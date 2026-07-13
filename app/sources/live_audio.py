@@ -66,7 +66,7 @@ class LiveAudioSource(Source):
                 chunk_path = await self._capture_chunk(stream_url)
                 if chunk_path is None:
                     continue
-                text = await asyncio.get_event_loop().run_in_executor(
+                text = await asyncio.get_running_loop().run_in_executor(
                     None, self._transcribe, chunk_path
                 )
                 os.remove(chunk_path)
@@ -94,7 +94,7 @@ class LiveAudioSource(Source):
     async def _capture_chunk(self, stream_url: str) -> str | None:
         import yt_dlp
 
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
 
         def _extract_audio_url() -> str | None:
             ydl_opts = {"quiet": True, "format": "bestaudio/best", "noplaylist": True}

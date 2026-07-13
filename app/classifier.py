@@ -1,15 +1,28 @@
 """Klassifiziert einen Statement-Text mit Claude: marktrelevant? Sentiment? betroffene Ticker/Sektoren?"""
-import json
+import datetime
 import logging
 
-from anthropic import Anthropic
+from anthropic import APIStatusError, AsyncAnthropic
 
-from app.config import ANTHROPIC_API_KEY, CLAUDE_MODEL
+from app.config import (
+    ANTHROPIC_API_KEY,
+    CLAUDE_MAX_RETRIES,
+    CLAUDE_MODEL,
+    CLAUDE_TIMEOUT_SECONDS,
+)
 from app.db import Classification
 
 logger = logging.getLogger(__name__)
 
-_client = Anthropic(api_key=ANTHROPIC_API_KEY) if ANTHROPIC_API_KEY else None
+_client = (
+    AsyncAnthropic(
+        api_key=ANTHROPIC_API_KEY,
+        max_retries=CLAUDE_MAX_RETRIES,
+        timeout=CLAUDE_TIMEOUT_SECONDS,
+    )
+    if ANTHROPIC_API_KEY
+    else None
+)
 
 CLASSIFY_TOOL = {
     "name": "classify_statement",
@@ -33,7 +46,7 @@ CLASSIFY_TOOL = {
                 "description": (
                     "Erwartete Kursrichtung fuer die genannten Ticker/Sektoren: "
                     "positive = eher steigend, negative = eher fallend, "
-                    "neutral = kein klarer Effekt oder gemischt."
+                    "neutral = kein klarer Effekt oder gemischt/unklar."
                 ),
             },
             "confidence": {
@@ -45,7 +58,9 @@ CLASSIFY_TOOL = {
                 "items": {"type": "string"},
                 "description": (
                     "Boersenticker konkret betroffener Unternehmen, z.B. ['TSLA', 'AAPL']. "
-                    "Leer lassen, wenn keine konkrete Firma genannt/gemeint ist."
+                    "Nur Ticker verwenden, bei denen du dir wirklich sicher bist, dass sie "
+                    "korrekt und real sind. Leer lassen, wenn keine konkrete Firma "
+                    "genannt/eindeutig gemeint ist oder du dir beim Ticker unsicher bist."
                 ),
             },
             "sectors": {
@@ -72,37 +87,37 @@ CLASSIFY_TOOL = {
     },
 }
 
-SYSTEM_PROMPT = (
-    "Du bist ein Finanzanalyse-Assistent. Du bekommst eine einzelne Aussage/ein Zitat "
-    "von Donald Trump (aus Reden, Social-Media-Posts oder Presseberichten). "
-    "Schaetze ein, ob und wie diese Aussage Aktienmaerkte beeinflussen koennte. "
-    "Sei konservativ: setze is_market_relevant nur auf true, wenn ein plausibler "
-    "wirtschaftlicher Zusammenhang besteht (z.B. Zoelle, Handelspolitik, "
-    "Zentralbank/Zinsen, konkrete Unternehmen/Branchen, Regulierung, Sanktionen, "
-    "Steuerpolitik, Ausgabenprogramme). Reine politische/persoenliche Aussagen ohne "
-    "Marktbezug sind is_market_relevant=false. Deine Einschaetzung ist Analyse, "
-    "keine Finanzberatung."
+
+def _system_prompt() -> str:
+    today = datetime.date.today().isoformat()
+    return (
+        f"Du bist ein Finanzanalyse-Assistent. Heutiges Datum: {today}. "
+        "Du bekommst eine einzelne Aussage/ein Zitat von Donald Trump (aus Reden, "
+        "Social-Media-Posts oder Presseberichten, teils nur als Nachrichten-Ueberschrift "
+        "vorliegend statt als woertliches Zitat). "
+        "Schaetze ein, ob und wie diese Aussage Aktienmaerkte beeinflussen koennte. "
+        "Sei konservativ: setze is_market_relevant nur auf true, wenn ein plausibler "
+        "wirtschaftlicher Zusammenhang besteht (z.B. Zoelle, Handelspolitik, "
+        "Zentralbank/Zinsen, konkrete Unternehmen/Branchen, Regulierung, Sanktionen, "
+        "Steuerpolitik, Ausgabenprogramme, Aussenpolitik mit Marktrelevanz). Reine "
+        "politische/persoenliche Aussagen ohne Marktbezug sind is_market_relevant=false. "
+        "Nenne nur Ticker, bei denen du wirklich sicher bist - im Zweifel lieber nur den "
+        "Sektor nennen und tickers leer lassen. Deine Einschaetzung ist Analyse, "
+        "keine Finanzberatung."
+    )
+
+
+FALLBACK_CLASSIFICATION = Classification(
+    is_market_relevant=False,
+    sentiment="neutral",
+    confidence=0.0,
+    tickers=[],
+    sectors=[],
+    reasoning="Konnte nicht klassifiziert werden (keine gueltige Antwort erhalten).",
 )
 
 
-def classify(text: str) -> Classification:
-    if _client is None:
-        raise RuntimeError("ANTHROPIC_API_KEY ist nicht gesetzt")
-
-    response = _client.messages.create(
-        model=CLAUDE_MODEL,
-        max_tokens=1024,
-        system=SYSTEM_PROMPT,
-        tools=[CLASSIFY_TOOL],
-        tool_choice={"type": "tool", "name": "classify_statement"},
-        messages=[
-            {
-                "role": "user",
-                "content": f'Aussage:\n"""\n{text}\n"""',
-            }
-        ],
-    )
-
+def _parse_response(response) -> Classification:
     for block in response.content:
         if block.type == "tool_use" and block.name == "classify_statement":
             data = block.input
@@ -114,13 +129,51 @@ def classify(text: str) -> Classification:
                 sectors=data.get("sectors", []) or [],
                 reasoning=data.get("reasoning", ""),
             )
-
     logger.warning("Keine tool_use Antwort von Claude erhalten, fallback auf neutral")
-    return Classification(
-        is_market_relevant=False,
-        sentiment="neutral",
-        confidence=0.0,
-        tickers=[],
-        sectors=[],
-        reasoning="Konnte nicht klassifiziert werden.",
+    return FALLBACK_CLASSIFICATION
+
+
+async def classify(text: str) -> Classification:
+    if _client is None:
+        raise RuntimeError("ANTHROPIC_API_KEY ist nicht gesetzt")
+
+    response = await _client.messages.create(
+        model=CLAUDE_MODEL,
+        max_tokens=1024,
+        system=_system_prompt(),
+        tools=[CLASSIFY_TOOL],
+        tool_choice={"type": "tool", "name": "classify_statement"},
+        messages=[
+            {
+                "role": "user",
+                "content": f'Aussage:\n"""\n{text}\n"""',
+            }
+        ],
     )
+    return _parse_response(response)
+
+
+async def selftest() -> None:
+    """Wirft eine Exception mit klarer Ursache, falls Claude nicht erreichbar/konfiguriert ist.
+
+    Wird beim Start aufgerufen, damit ein falscher/fehlender API-Key sofort auffaellt
+    statt erst beim ersten echten Statement irgendwann spaeter im Log unterzugehen.
+    """
+    if _client is None:
+        raise RuntimeError("ANTHROPIC_API_KEY ist nicht gesetzt")
+
+    try:
+        result = await classify(
+            "Testaussage: Ich werde neue Zoelle auf importierte Stahlprodukte verhaengen."
+        )
+    except APIStatusError as exc:
+        raise RuntimeError(
+            f"Claude-API antwortete mit Fehler (Status {exc.status_code}): {exc.message}. "
+            "Pruefe ANTHROPIC_API_KEY und CLAUDE_MODEL in .env."
+        ) from exc
+
+    if result is FALLBACK_CLASSIFICATION:
+        raise RuntimeError(
+            "Claude-Selftest lieferte keine gueltige strukturierte Antwort. "
+            "Pruefe CLAUDE_MODEL in .env."
+        )

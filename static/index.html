@@ -15,7 +15,58 @@
     color: #e6e6e6;
   }
   h1 { font-size: 1.4rem; margin-bottom: 0.25rem; }
+  h2 { font-size: 1rem; margin: 0 0 0.5rem; color: #c7c7c7; }
   .subtitle { color: #9aa0a6; font-size: 0.85rem; margin-bottom: 1.25rem; }
+
+  .banner {
+    border-radius: 8px;
+    padding: 0.6rem 0.9rem;
+    margin-bottom: 1rem;
+    font-size: 0.85rem;
+  }
+  .banner.error { background: #3a1414; border: 1px solid #7a2020; color: #ffb3b3; }
+  .banner.warning { background: #3a3014; border: 1px solid #7a6420; color: #ffe2a8; }
+
+  .panel {
+    border: 1px solid #2a2f36;
+    border-radius: 10px;
+    padding: 0.9rem 1.1rem;
+    margin-bottom: 1rem;
+    background: #14171c;
+  }
+
+  .status-row { display: flex; flex-wrap: wrap; gap: 0.5rem; }
+  .status-chip {
+    display: flex; align-items: center; gap: 0.4rem;
+    background: #1c2027; border-radius: 8px; padding: 0.3rem 0.6rem;
+    font-size: 0.78rem; color: #c7c7c7;
+  }
+  .dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+  .dot.ok { background: #2ecc71; }
+  .dot.warn { background: #f1c40f; }
+  .dot.error { background: #e74c3c; }
+  .dot.unknown { background: #555; }
+
+  .stats-row { display: flex; flex-wrap: wrap; gap: 1.5rem; }
+  .stat { min-width: 90px; }
+  .stat .value { font-size: 1.3rem; font-weight: 600; }
+  .stat .label { font-size: 0.72rem; color: #9aa0a6; }
+  .stat.positive .value { color: #2ecc71; }
+  .stat.negative .value { color: #e74c3c; }
+
+  .test-form { display: flex; flex-direction: column; gap: 0.5rem; }
+  textarea {
+    background: #0b0d10; color: #e6e6e6; border: 1px solid #2a2f36; border-radius: 8px;
+    padding: 0.6rem; font-family: inherit; font-size: 0.9rem; resize: vertical; min-height: 4.5rem;
+  }
+  .test-form-row { display: flex; gap: 0.75rem; align-items: center; }
+  button {
+    background: #2d6fe0; color: white; border: none; border-radius: 8px;
+    padding: 0.5rem 1rem; font-size: 0.85rem; cursor: pointer;
+  }
+  button:disabled { background: #444; cursor: default; }
+  #testResult { font-size: 0.85rem; white-space: pre-wrap; margin-top: 0.4rem; }
+
   .filters { margin-bottom: 1rem; display: flex; gap: 0.75rem; align-items: center; }
   .card {
     border: 1px solid #2a2f36;
@@ -27,6 +78,7 @@
   .card.positive { border-left: 4px solid #2ecc71; }
   .card.negative { border-left: 4px solid #e74c3c; }
   .card.neutral  { border-left: 4px solid #7f8c8d; }
+  .card.duplicate { opacity: 0.55; }
   .meta { font-size: 0.75rem; color: #9aa0a6; margin-bottom: 0.4rem; }
   .text { font-size: 0.95rem; margin-bottom: 0.5rem; }
   .tags { font-size: 0.8rem; color: #c7c7c7; }
@@ -47,6 +99,31 @@
   <div class="subtitle">
     Automatische Einschätzung via Claude – keine Finanzberatung. Aktualisiert alle 15s.
   </div>
+
+  <div id="banners"></div>
+
+  <div class="panel">
+    <h2>Status der Quellen</h2>
+    <div class="status-row" id="statusRow"></div>
+  </div>
+
+  <div class="panel">
+    <h2>Statistik</h2>
+    <div class="stats-row" id="statsRow"></div>
+  </div>
+
+  <div class="panel">
+    <h2>Pipeline testen</h2>
+    <div class="test-form">
+      <textarea id="testText" placeholder="z.B. Ich werde 25% Zölle auf alle importierten Autos erheben.">Ich werde 25% Zölle auf alle importierten Halbleiter erheben, das betrifft auch Taiwan.</textarea>
+      <div class="test-form-row">
+        <button id="testBtn" onclick="runTest()">Durch Claude jagen</button>
+        <label><input type="checkbox" id="testTelegram" checked> Bei Relevanz auch Telegram-Alert senden</label>
+      </div>
+      <div id="testResult"></div>
+    </div>
+  </div>
+
   <div class="filters">
     <label><input type="checkbox" id="onlyRelevant"> Nur marktrelevante Aussagen</label>
   </div>
@@ -60,7 +137,21 @@ function sentimentClass(s) {
   return ['positive', 'negative', 'neutral'].includes(s) ? s : 'neutral';
 }
 
-async function load() {
+function escapeHtml(str) {
+  const div = document.createElement('div');
+  div.textContent = str || '';
+  return div.innerHTML;
+}
+
+function timeAgo(ts) {
+  if (!ts) return 'nie';
+  const secs = Math.round(Date.now() / 1000 - ts);
+  if (secs < 60) return `vor ${secs}s`;
+  if (secs < 3600) return `vor ${Math.round(secs / 60)}min`;
+  return `vor ${Math.round(secs / 3600)}h`;
+}
+
+async function loadFeed() {
   const params = new URLSearchParams({
     limit: '50',
     only_relevant: onlyRelevant.checked ? 'true' : 'false',
@@ -78,15 +169,18 @@ async function load() {
 
 function renderCard(item) {
   const date = new Date(item.ingested_at * 1000).toLocaleString('de-DE');
-  const relevant = item.is_market_relevant ? '✅ marktrelevant' : '— nicht marktrelevant';
+  const isDup = item.duplicate_of_id != null;
+  const relevant = isDup
+    ? `↔ Duplikat von #${item.duplicate_of_id}`
+    : (item.is_market_relevant ? '✅ marktrelevant' : '— nicht marktrelevant');
   const conf = item.confidence != null ? Math.round(item.confidence * 100) + '%' : '–';
-  const tickers = (item.tickers || []).map(t => `<span class="tag">${t}</span>`).join('') || '–';
-  const sectors = (item.sectors || []).map(s => `<span class="tag">${s}</span>`).join('') || '–';
-  const link = item.url ? `<a href="${item.url}" target="_blank">Quelle</a>` : '';
+  const tickers = (item.tickers || []).map(t => `<span class="tag">${escapeHtml(t)}</span>`).join('') || '–';
+  const sectors = (item.sectors || []).map(s => `<span class="tag">${escapeHtml(s)}</span>`).join('') || '–';
+  const link = item.url ? `<a href="${escapeHtml(item.url)}" target="_blank">Quelle</a>` : '';
 
   return `
-    <div class="card ${sentimentClass(item.sentiment)}">
-      <div class="meta">${date} · ${item.source} · ${relevant} · Konfidenz ${conf}</div>
+    <div class="card ${sentimentClass(item.sentiment)}${isDup ? ' duplicate' : ''}">
+      <div class="meta">${date} · ${escapeHtml(item.source)} · ${relevant} · Konfidenz ${conf}</div>
       <div class="text">${escapeHtml(item.text)}</div>
       <div class="tags">Ticker: ${tickers} &nbsp; Sektoren: ${sectors}</div>
       ${item.reasoning ? `<div class="tags" style="margin-top:0.3rem;">${escapeHtml(item.reasoning)}</div>` : ''}
@@ -95,15 +189,92 @@ function renderCard(item) {
   `;
 }
 
-function escapeHtml(str) {
-  const div = document.createElement('div');
-  div.textContent = str || '';
-  return div.innerHTML;
+async function loadHealth() {
+  const res = await fetch('/api/health');
+  const health = await res.json();
+
+  const banners = document.getElementById('banners');
+  banners.innerHTML = [
+    ...health.errors.map(e => `<div class="banner error">⛔ ${escapeHtml(e)}</div>`),
+    ...health.warnings.map(w => `<div class="banner warning">⚠️ ${escapeHtml(w)}</div>`),
+  ].join('');
+
+  const statusRow = document.getElementById('statusRow');
+  const entries = Object.entries(health.sources || {});
+  if (!entries.length) {
+    statusRow.innerHTML = '<span class="empty">Keine Quellen aktiv.</span>';
+  } else {
+    statusRow.innerHTML = entries.map(([name, s]) => {
+      let dotClass = 'unknown';
+      if (s.last_success_at) dotClass = 'ok';
+      if (s.last_error && (s.last_error_at || 0) > (s.last_success_at || 0)) dotClass = 'warn';
+      return `<div class="status-chip"><span class="dot ${dotClass}"></span>
+        <span>${escapeHtml(name)} · letzter Poll ${timeAgo(s.last_poll_at)} · ${s.total_fetched} gesamt</span></div>`;
+    }).join('');
+  }
 }
 
-onlyRelevant.addEventListener('change', load);
-load();
-setInterval(load, 15000);
+async function loadStats() {
+  const res = await fetch('/api/stats');
+  const stats = await res.json();
+  const sentiment = stats.sentiment_breakdown || {};
+
+  const statsRow = document.getElementById('statsRow');
+  statsRow.innerHTML = `
+    <div class="stat"><div class="value">${stats.total}</div><div class="label">Statements gesamt</div></div>
+    <div class="stat"><div class="value">${stats.market_relevant}</div><div class="label">Marktrelevant</div></div>
+    <div class="stat positive"><div class="value">${sentiment.positive || 0}</div><div class="label">Positiv</div></div>
+    <div class="stat negative"><div class="value">${sentiment.negative || 0}</div><div class="label">Negativ</div></div>
+    <div class="stat"><div class="value">${stats.alerts_sent}</div><div class="label">Alerts gesendet</div></div>
+    <div class="stat"><div class="value">${stats.duplicates}</div><div class="label">Duplikate übersprungen</div></div>
+  `;
+}
+
+async function runTest() {
+  const btn = document.getElementById('testBtn');
+  const resultEl = document.getElementById('testResult');
+  const text = document.getElementById('testText').value.trim();
+  if (!text) return;
+
+  btn.disabled = true;
+  resultEl.textContent = 'Sende an Claude…';
+  try {
+    const res = await fetch('/api/test', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        text,
+        send_telegram: document.getElementById('testTelegram').checked,
+      }),
+    });
+    if (!res.ok) {
+      resultEl.textContent = `Fehler (${res.status}): ${await res.text()}`;
+      return;
+    }
+    const data = await res.json();
+    const c = data.classification;
+    resultEl.textContent =
+      `marktrelevant: ${c.is_market_relevant} | sentiment: ${c.sentiment} | ` +
+      `konfidenz: ${Math.round(c.confidence * 100)}%\n` +
+      `ticker: ${(c.tickers || []).join(', ') || '–'} | sektoren: ${(c.sectors || []).join(', ') || '–'}\n` +
+      `begründung: ${c.reasoning}\n` +
+      `Telegram-Alert gesendet: ${data.alert_sent}`;
+    loadFeed();
+    loadStats();
+  } catch (err) {
+    resultEl.textContent = 'Fehler: ' + err;
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+async function refreshAll() {
+  await Promise.all([loadFeed(), loadHealth(), loadStats()]);
+}
+
+onlyRelevant.addEventListener('change', loadFeed);
+refreshAll();
+setInterval(refreshAll, 15000);
 </script>
 </body>
 </html>

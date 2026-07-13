@@ -1,0 +1,17 @@
+[Unit]
+Description=Trump Market Impact Monitor
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Anpassen an den tatsächlichen Deploy-Pfad und -User:
+User=trump-monitor
+WorkingDirectory=/opt/trump-market-monitor
+EnvironmentFile=/opt/trump-market-monitor/.env
+ExecStart=/opt/trump-market-monitor/.venv/bin/python main.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

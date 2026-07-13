@@ -1,0 +1,12 @@
+services:
+  trump-monitor:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    ports:
+      - "8000:8000"
+    volumes:
+      - trump-monitor-data:/data
+
+volumes:
+  trump-monitor-data:

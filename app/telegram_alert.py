@@ -1,3 +1,5 @@
+import asyncio
+import html
 import logging
 
 import httpx
@@ -15,40 +17,84 @@ def _format_message(raw: RawStatement, classification: Classification) -> str:
     tickers = ", ".join(classification.tickers) or "—"
     sectors = ", ".join(classification.sectors) or "—"
     lines = [
-        f"{emoji} *Markt-relevante Trump-Aussage* ({classification.sentiment}, "
+        f"{emoji} <b>Markt-relevante Trump-Aussage</b> "
+        f"({html.escape(classification.sentiment)}, "
         f"Konfidenz {classification.confidence:.0%})",
-        f"Quelle: {raw.source}",
+        f"Quelle: {html.escape(raw.source)}",
         "",
-        raw.text[:500],
+        html.escape(raw.text[:500]),
         "",
-        f"Ticker: {tickers}",
-        f"Sektoren: {sectors}",
-        f"Begruendung: {classification.reasoning}",
+        f"Ticker: {html.escape(tickers)}",
+        f"Sektoren: {html.escape(sectors)}",
+        f"Begründung: {html.escape(classification.reasoning)}",
     ]
     if raw.url:
-        lines.append(f"Link: {raw.url}")
+        lines.append(f'<a href="{html.escape(raw.url)}">Link zur Quelle</a>')
     return "\n".join(lines)
 
 
-async def send_alert(raw: RawStatement, classification: Classification):
+async def _send(text: str, retries: int = 2) -> bool:
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
-        logger.debug("Telegram nicht konfiguriert, ueberspringe Alert.")
-        return
+        logger.debug("Telegram nicht konfiguriert, ueberspringe Nachricht.")
+        return False
 
-    text = _format_message(raw, classification)
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    payload = {
+        "chat_id": TELEGRAM_CHAT_ID,
+        "text": text,
+        "parse_mode": "HTML",
+        "disable_web_page_preview": False,
+    }
 
-    try:
-        async with httpx.AsyncClient(timeout=10) as client:
-            resp = await client.post(
-                url,
-                json={
-                    "chat_id": TELEGRAM_CHAT_ID,
-                    "text": text,
-                    "parse_mode": "Markdown",
-                    "disable_web_page_preview": False,
-                },
-            )
-            resp.raise_for_status()
-    except Exception:
-        logger.warning("Telegram-Alert konnte nicht gesendet werden.", exc_info=True)
+    attempt = 0
+    async with httpx.AsyncClient(timeout=10) as client:
+        while True:
+            try:
+                resp = await client.post(url, json=payload)
+                if resp.status_code == 429:
+                    retry_after = resp.json().get("parameters", {}).get("retry_after", 2)
+                    attempt += 1
+                    if attempt > retries:
+                        logger.warning("Telegram-Rate-Limit dauerhaft, gebe auf.")
+                        return False
+                    logger.info("Telegram-Rate-Limit, warte %ss", retry_after)
+                    await asyncio.sleep(retry_after)
+                    continue
+                resp.raise_for_status()
+                return True
+            except httpx.HTTPStatusError:
+                logger.warning(
+                    "Telegram lehnte Nachricht ab (Status %s): %s",
+                    resp.status_code,
+                    resp.text[:300],
+                )
+                return False
+            except Exception:
+                attempt += 1
+                if attempt > retries:
+                    logger.warning("Telegram-Alert konnte nicht gesendet werden.", exc_info=True)
+                    return False
+                await asyncio.sleep(2 * attempt)
+
+
+async def send_alert(raw: RawStatement, classification: Classification) -> bool:
+    return await _send(_format_message(raw, classification))
+
+
+async def send_text(text: str) -> bool:
+    return await _send(text)
+
+
+async def send_startup_notice(active_sources: list[str]) -> None:
+    sources_str = ", ".join(active_sources) if active_sources else "keine"
+    text = (
+        "🟢 <b>Trump Market Impact Monitor gestartet</b>\n"
+        f"Aktive Quellen: {html.escape(sources_str)}\n"
+        "Du bekommst hier ab jetzt Alerts bei marktrelevanten Aussagen."
+    )
+    sent = await send_text(text)
+    if not sent and TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID:
+        logger.warning(
+            "Start-Heartbeat konnte nicht an Telegram gesendet werden - "
+            "TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID pruefen."
+        )
