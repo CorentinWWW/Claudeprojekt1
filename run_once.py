@@ -15,9 +15,11 @@ import os
 import sys
 import time
 
+from app.classifier import classify
 from app.config import MAX_CONCURRENT_CLASSIFICATIONS, validate
-from app.db import RawStatement, init_db
-from app.orchestrator import build_sources, poll_once, process_statement
+from app.db import RawStatement, init_db, insert_statement, mark_alert_sent
+from app.orchestrator import build_sources, poll_once
+from app.telegram_alert import send_alert
 
 logging.basicConfig(
     level=logging.INFO,
@@ -44,13 +46,29 @@ async def main() -> int:
 
     test_text = os.getenv("MANUAL_TEST_TEXT", "").strip()
     if test_text:
+        # Bewusst OHNE is_known()/find_recent_duplicate()-Pruefung: ein manueller
+        # Test soll garantiert durch Claude (+ Telegram) laufen, auch wenn er
+        # einem frueheren Test-Statement aehnelt oder identisch ist.
         logger.info("Manueller Test-Text gesetzt, jage ihn durch die Pipeline: %s", test_text[:100])
         raw = RawStatement(
             source="manual_test",
             source_id=f"manual_test:{time.time()}",
             text=test_text,
         )
-        await process_statement(raw, semaphore)
+        classification = await classify(raw.text)
+        statement_id = insert_statement(raw, classification)
+        logger.info(
+            "[manual_test] relevant=%s sentiment=%s conf=%.2f tickers=%s",
+            classification.is_market_relevant,
+            classification.sentiment,
+            classification.confidence,
+            classification.tickers,
+        )
+        if classification.is_market_relevant:
+            sent = await send_alert(raw, classification)
+            if sent:
+                mark_alert_sent(statement_id)
+            logger.info("Telegram-Alert gesendet: %s", sent)
 
     return 0
 
