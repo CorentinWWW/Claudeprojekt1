@@ -6,7 +6,11 @@ load_dotenv()
 
 def _bool(name: str, default: bool) -> bool:
     val = os.getenv(name)
-    if val is None:
+    # Ein gesetzter, aber leerer/nur-Whitespace-Wert (z.B. eine CI-Variable, die zu
+    # einem leeren String aufgeloest wird) soll wie "nicht gesetzt" behandelt werden -
+    # sonst wuerde z.B. ENABLE_NEWS="" eine Quelle stillschweigend deaktivieren, obwohl
+    # der Default eigentlich True waere.
+    if val is None or val.strip() == "":
         return default
     return val.strip().lower() in ("1", "true", "yes", "on")
 
@@ -77,6 +81,12 @@ LIVE_AUDIO_STREAM_URLS = [
 WHISPER_MODEL_SIZE = os.getenv("WHISPER_MODEL_SIZE", "base")
 
 DASHBOARD_PORT = int(os.getenv("DASHBOARD_PORT", "8000"))
+# Falls gesetzt, verlangen alle /api/*-Endpunkte einen passenden "X-API-Key"-Header.
+# Ohne das waere z.B. /api/test (kostet einen echten Claude-Call + kann einen echten
+# Telegram-Alert ausloesen) fuer JEDEN erreichbar, der die IP:Port kennt - insbesondere
+# relevant, weil die README-Anleitung fuer die Oracle-Cloud-Variante explizit dazu
+# anleitet, Port 8000 fuer 0.0.0.0/0 zu oeffnen.
+DASHBOARD_API_KEY = _str("DASHBOARD_API_KEY")
 
 DB_PATH = os.getenv("DB_PATH", "trump_monitor.db")
 
@@ -109,6 +119,14 @@ def validate() -> tuple[list[str], list[str]]:
         warnings.append(
             "ENABLE_LIVE_AUDIO=true aber LIVE_AUDIO_STREAM_URLS ist leer - "
             "Live-Audio-Quelle liefert dadurch nie Ergebnisse."
+        )
+
+    if not DASHBOARD_API_KEY:
+        warnings.append(
+            "DASHBOARD_API_KEY ist nicht gesetzt - alle /api/*-Endpunkte (inkl. /api/test, "
+            "das echte Claude-Calls + Telegram-Alerts ausloesen kann) sind ungeschuetzt "
+            "erreichbar. Falls das Dashboard oeffentlich erreichbar ist (z.B. Oracle-Cloud-"
+            "Anleitung mit offenem Port 8000), dringend einen Wert setzen."
         )
 
     return errors, warnings

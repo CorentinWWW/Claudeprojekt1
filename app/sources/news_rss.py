@@ -12,7 +12,7 @@ import httpx
 
 from app.db import RawStatement
 from app.sources.base import Source
-from app.util import retry_async
+from app.util import BoundedSeenSet, retry_async
 
 logger = logging.getLogger(__name__)
 
@@ -22,15 +22,16 @@ FEEDS = [
     "https://finance.yahoo.com/news/rssindex",
 ]
 
-# Wortgrenze, damit "trumpet"/"trumped-up" etc. nicht faelschlich matchen
-TRUMP_WORD_PATTERN = re.compile(r"\btrump\b", re.IGNORECASE)
+# Wortgrenze, damit "trumpet"/"trumped-up" etc. nicht faelschlich matchen, aber
+# gaengige Ableitungen wie "Trumpism"/"Trumpcare"/"Trumpian" trotzdem erfassen.
+TRUMP_WORD_PATTERN = re.compile(r"\btrump(?:ism|care|ian)?\b", re.IGNORECASE)
 
 
 class RssNewsSource(Source):
     name = "news_rss"
 
     def __init__(self):
-        self._seen: set[str] = set()
+        self._seen: BoundedSeenSet = BoundedSeenSet(maxlen=5000)
 
     async def poll(self) -> list[RawStatement]:
         results: list[RawStatement] = []

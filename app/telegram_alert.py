@@ -30,7 +30,7 @@ def _format_ticker_calls(ticker_calls: list[dict]) -> str:
     lines = []
     for tc in ticker_calls:
         ticker = html.escape(tc.get("ticker", "?"))
-        direction = tc.get("direction") or "?"
+        direction = html.escape(tc.get("direction") or "?")
         reasoning = html.escape(tc.get("reasoning", ""))
         arrow = _direction_arrow(tc.get("direction"))
         suffix = f" – {reasoning}" if reasoning else ""
@@ -56,7 +56,9 @@ def _format_message(raw: RawStatement, classification: Classification) -> str:
         f"Konfidenz {classification.confidence:.0%})",
     ]
     if classification.related_topic_id is not None and classification.is_major_escalation:
-        lines.append(f"⚠️ Eskalation von Statement #{classification.related_topic_id}")
+        lines.append(
+            f"⚠️ Eskalation von Statement #{html.escape(str(classification.related_topic_id))}"
+        )
     lines += [
         f"Quelle: {html.escape(raw.source)}",
         "",
@@ -128,23 +130,45 @@ def _format_digest(items: list[tuple[RawStatement, Classification, int]]) -> str
     header = (
         f"📊 <b>{len(items)} marktrelevante Trump-Meldungen in diesem Zyklus</b>\n{counts_str}"
     )
+    footer = "<i>Keine Finanzberatung – eigene Anlageentscheidung auf eigenes Risiko.</i>"
 
     sorted_items = sorted(items, key=lambda item: item[1].confidence, reverse=True)
-    lines = []
+    candidate_lines = []
     for raw, classification, _ in sorted_items[:DIGEST_MAX_DETAIL_LINES]:
         emoji = SENTIMENT_EMOJI.get(classification.sentiment, "⚪")
         title = html.escape(raw.text[:120])
         ticker_str = _format_ticker_calls_compact(classification.ticker_calls)
-        lines.append(f"{emoji} {title} (Ticker: {ticker_str})")
+        candidate_lines.append(f"{emoji} {title} (Ticker: {ticker_str})")
 
-    remaining = len(items) - len(lines)
-    body = "\n".join(lines)
+    # Zeilenweise statt zeichenweise budgetieren: eine reine Zeichen-Kappung des
+    # fertigen Texts (wie zuvor) koennte mitten in einem HTML-Tag oder einer Entity
+    # enden - Telegram wuerde dann die GESAMTE Nachricht wegen ungueltigem HTML
+    # ablehnen. Stattdessen wird bei Platzmangel immer nur eine ganze Detailzeile
+    # weniger angezeigt, nie ein Teilstring einer Zeile.
+    included_lines: list[str] = []
+    for line in candidate_lines:
+        remaining_after = len(items) - (len(included_lines) + 1)
+        placeholder = (
+            f"\n… und {remaining_after} weitere (Details im Log der Ausfuehrung)"
+            if remaining_after > 0
+            else ""
+        )
+        trial_body = "\n".join(included_lines + [line])
+        trial_text = f"{header}\n\n{trial_body}{placeholder}\n\n{footer}"
+        if len(trial_text) > TELEGRAM_MAX_LENGTH:
+            break
+        included_lines.append(line)
+
+    remaining = len(items) - len(included_lines)
+    body = "\n".join(included_lines)
     if remaining > 0:
         body += f"\n… und {remaining} weitere (Details im Log der Ausfuehrung)"
 
-    text = f"{header}\n\n{body}\n\n<i>Keine Finanzberatung – eigene Anlageentscheidung auf eigenes Risiko.</i>"
+    text = f"{header}\n\n{body}\n\n{footer}"
     if len(text) > TELEGRAM_MAX_LENGTH:
-        text = text[: TELEGRAM_MAX_LENGTH - 20] + "\n…(gekürzt)"
+        # Aeusserster Notfall (z.B. schon Header+Footer allein zu lang): komplett
+        # ohne Detailzeilen - immer noch vollstaendiges, gueltiges HTML.
+        text = f"{header}\n\n{footer}"
     return text
 
 

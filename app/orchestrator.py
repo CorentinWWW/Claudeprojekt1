@@ -21,12 +21,12 @@ from app.config import (
 from app.db import (
     Classification,
     RawStatement,
-    find_recent_duplicate,
+    get_dedup_candidates,
+    get_known_source_ids,
     get_pending_alerts,
     get_recent_alerted,
     init_db,
     insert_statement,
-    is_known,
     mark_alert_sent,
 )
 from app.sources.live_audio import LiveAudioSource
@@ -82,15 +82,24 @@ def _partition_duplicates(raw_statements: list):
     (duplicate_raw, primary_raw) - primary_raw ist entweder ein Element aus
     to_classify (noch nicht in der DB) oder hat bereits eine DB-ID (siehe Aufrufer).
     """
+    # Batch statt einer DB-Verbindung/Query pro Statement (relevant bei einem
+    # Nachrichtenschub mit vielen gleichzeitigen Statements in einem Zyklus).
+    known_ids = get_known_source_ids([r.source_id for r in raw_statements])
+    candidates = get_dedup_candidates()
+
     to_classify = []
     duplicate_pairs = []  # (duplicate_raw, primary_raw_or_dbrow)
     batch: list[tuple] = []  # (text, raw) bereits akzeptierter Statements dieser Charge
 
     for raw in raw_statements:
-        if is_known(raw.source_id):
+        if raw.source_id in known_ids:
             continue
 
-        db_duplicate = find_recent_duplicate(raw.text)
+        db_duplicate = None
+        for cand in candidates:
+            if text_similarity(raw.text, cand["text"]) >= DEDUP_SIMILARITY_THRESHOLD:
+                db_duplicate = cand
+                break
         if db_duplicate is not None:
             duplicate_pairs.append((raw, db_duplicate))
             continue
@@ -119,6 +128,21 @@ async def _classify_and_store(raw, semaphore: asyncio.Semaphore, recent_context:
             logger.exception("Klassifikation fehlgeschlagen fuer: %s", raw.text[:80])
             return None
 
+    if classification.related_topic_id is not None:
+        # Claude kann sich die ID ausdenken/verwechseln - nur vertrauen, wenn sie
+        # tatsaechlich Teil des angebotenen Kontexts war (sonst haette man ein
+        # dangling duplicate_of_id auf eine falsche/nicht existierende Zeile).
+        valid_ids = {item["id"] for item in recent_context}
+        if classification.related_topic_id not in valid_ids:
+            logger.warning(
+                "[%s] Claude gab related_topic_id=%s zurueck, das nicht im "
+                "angebotenen Themen-Kontext war - ignoriere die Zuordnung.",
+                raw.source,
+                classification.related_topic_id,
+            )
+            classification.related_topic_id = None
+            classification.is_major_escalation = False
+
     if classification.related_topic_id is not None and not classification.is_major_escalation:
         # Gleiches Thema wie eine heute schon alarmierte Meldung, aber keine wesentliche
         # Verschaerfung - nicht erneut alarmieren (nur als Duplikat vermerken).
@@ -133,6 +157,15 @@ async def _classify_and_store(raw, semaphore: asyncio.Semaphore, recent_context:
         return None
 
     statement_id = insert_statement(raw, classification)
+    if statement_id is None:
+        logger.warning(
+            "[%s] Statement konnte nicht gespeichert werden (source_id-Konflikt "
+            "ohne auffindbare existierende Zeile?), ueberspringe: %s",
+            raw.source,
+            raw.text[:80],
+        )
+        return None
+
     escalation_note = (
         f" (Eskalation von #{classification.related_topic_id})"
         if classification.related_topic_id is not None and classification.is_major_escalation
@@ -148,6 +181,18 @@ async def _classify_and_store(raw, semaphore: asyncio.Semaphore, recent_context:
         escalation_note,
         raw.text[:100],
     )
+
+    if classification.is_market_relevant and classification.confidence >= ALERT_CONFIDENCE_THRESHOLD:
+        # Sofort sichtbar fuer noch laufende Geschwister-Klassifikationen in dieser
+        # Charge (recent_context ist eine geteilte, mutable Liste - siehe poll_once):
+        # mindert (loest aber nicht vollstaendig fuer die ersten gleichzeitig
+        # gestarteten Aufrufe) das Risiko, dieselbe Story zweimal zu alarmieren,
+        # wenn sie unterschiedlich formuliert ist und Tier 1 (Textvergleich) das
+        # nicht faengt.
+        recent_context.append(
+            {"id": statement_id, "text": raw.text[:150], "sentiment": classification.sentiment}
+        )
+
     return (raw, classification, statement_id)
 
 
@@ -180,6 +225,8 @@ def _row_to_alert_tuple(row: dict) -> tuple:
         ticker_calls=row["tickers"],
         sectors=row["sectors"],
         reasoning=row["reasoning"] or "",
+        related_topic_id=row.get("related_topic_id"),
+        is_major_escalation=bool(row.get("is_major_escalation")),
     )
     return (raw, classification, row["id"])
 
@@ -223,13 +270,24 @@ async def poll_once(sources, semaphore: asyncio.Semaphore):
 
         to_classify, duplicate_pairs = _partition_duplicates(raw_statements)
 
+        # Mutable statt statischer Snapshot (siehe _classify_and_store): waechst
+        # waehrend der Verarbeitung dieser Charge, wenn zuvor gestartete Aufgaben
+        # bereits fertig sind, bevor spaeter gestartete ihren Klassifikations-Call
+        # tatsaechlich abschicken.
         recent_context = get_recent_alerted(
             hours=TOPIC_CONTEXT_WINDOW_HOURS, limit=TOPIC_CONTEXT_MAX_ITEMS
         )
-        results = await asyncio.gather(
-            *(_classify_and_store(raw, semaphore, recent_context) for raw in to_classify)
+        raw_results = await asyncio.gather(
+            *(_classify_and_store(raw, semaphore, recent_context) for raw in to_classify),
+            return_exceptions=True,
         )
-        results = [r for r in results if r is not None]
+        results = []
+        for r in raw_results:
+            if isinstance(r, BaseException):
+                logger.error("Unerwarteter Fehler bei der Klassifikation im Batch.", exc_info=r)
+                continue
+            if r is not None:
+                results.append(r)
         id_by_source_id = {r[0].source_id: r[2] for r in results}
 
         for dup_raw, primary in duplicate_pairs:

@@ -223,7 +223,7 @@ async def classify(text: str, recent_context: Optional[list[dict]] = None) -> Cl
     context_block = _build_context_block(recent_context)
     response = await _client.messages.create(
         model=CLAUDE_MODEL,
-        max_tokens=1536,
+        max_tokens=2048,
         system=_system_prompt(),
         tools=[CLASSIFY_TOOL],
         tool_choice={"type": "tool", "name": "classify_statement"},
@@ -234,6 +234,17 @@ async def classify(text: str, recent_context: Optional[list[dict]] = None) -> Cl
             }
         ],
     )
+    if response.stop_reason == "max_tokens":
+        # Die Tool-Use-Antwort wurde mitten im JSON abgeschnitten (z.B. bei vielen
+        # ticker_calls mit langen Begruendungen) - ein Parse-Versuch koennte
+        # scheitern ODER (schlimmer) ein unvollstaendiges/korruptes Ergebnis als
+        # gueltig durchgehen lassen. Lieber sauber als Fehler behandeln, dann
+        # greift dieselbe Retry-/Skip-Logik wie bei jedem anderen Klassifikations-
+        # fehler (siehe orchestrator.py: _classify_and_store).
+        raise RuntimeError(
+            "Claude-Antwort wurde bei max_tokens abgeschnitten - Ergebnis waere "
+            "unvollstaendig. Statement wird diesen Zyklus uebersprungen."
+        )
     return _parse_response(response)
 
 

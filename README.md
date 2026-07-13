@@ -192,6 +192,30 @@ Chunks (Standard 30s), keine Wort-für-Wort-Live-Transkription.
   nicht mehr den ganzen Feed, der Truth-Social-Browser-Fallback hat einen
   Gesamt-Timeout, Live-Audio-Temp-Dateien werden auch bei fehlgeschlagener
   Transkription zuverlässig aufgeräumt.
+- **Weitere Härtung nach systematischem Bug-Hunt** (5 parallele Review-Durchläufe
+  über den gesamten Code):
+  - Batch-Queries statt Query-pro-Statement bei der Duplikatprüfung
+    (`get_known_source_ids`/`get_dedup_candidates`) - relevant bei einem
+    Nachrichtenschub mit vielen Statements in einem Zyklus.
+  - Automatische Schema-Migration (`ALTER TABLE`) für DBs, die vor Einführung von
+    `related_topic_id`/`is_major_escalation` angelegt wurden (z.B. aus einem alten
+    GitHub-Actions-Cache).
+  - `insert_statement` gibt bei einem `source_id`-Konflikt die tatsächliche
+    existierende ID zurück statt einer irreführenden `0`.
+  - Claude kann keine `related_topic_id` mehr "halluzinieren", die gar nicht im
+    angebotenen Themen-Kontext war - wird erkannt und verworfen.
+  - Bei `max_tokens`-Abschneidung der Claude-Antwort wird das Statement sauber als
+    Fehler behandelt statt ein unvollständiges Ergebnis zu riskieren.
+  - Truth-Social-Browser-Fallback ordnet abgefangene Posts nur dann zu, wenn sie
+    wirklich vom konfigurierten Account (`TRUTH_SOCIAL_HANDLE`) stammen - verhindert
+    Fehlzuordnung fremder Accounts.
+  - Alle `_seen`-Caches der Quellen sind jetzt größenbegrenzt (FIFO-Verdrängung),
+    damit ein wochenlanger Dauerbetrieb nicht unbegrenzt Speicher aufbaut.
+  - Sammel-Nachrichten (Digest) werden zeilenweise statt zeichenweise gekürzt -
+    verhindert, dass ein mitten in einem HTML-Tag abgeschnittener Text von Telegram
+    komplett abgelehnt wird.
+  - `/api/statements`, `/api/stats`, `/api/test` sind per `DASHBOARD_API_KEY`
+    absicherbar (siehe Konfigurationstabelle unten).
 
 ## Dauerbetrieb (24/7)
 
@@ -285,6 +309,12 @@ Das Image installiert Chromium samt System-Abhängigkeiten automatisch
 (`playwright install --with-deps chromium` im `Dockerfile`). Die SQLite-Datenbank
 liegt in einem benannten Volume (`trump-monitor-data`), übersteht also Neustarts/Updates.
 
+Der Container läuft als nicht-root User (`appuser`) und deklariert einen
+`HEALTHCHECK`, der `/api/health` abfragt – `docker ps`/`docker compose ps` zeigen
+den Container also auch dann als `unhealthy` an, wenn der Monitoring-Loop wegen
+eines Konfigurationsfehlers (z.B. falscher `ANTHROPIC_API_KEY`) gar nicht erst
+gestartet ist, obwohl der Prozess selbst noch läuft.
+
 > Hinweis: Der Docker-Build selbst konnte in dieser Sandbox nicht getestet werden
 > (kein laufender Docker-Daemon verfügbar), da hier bewusst keine Container-in-Container-
 > Mechanismen genutzt werden. Das `Dockerfile` folgt aber dem offiziell dokumentierten
@@ -325,6 +355,13 @@ Siehe `.env.example` für alle Variablen. Wichtige zusätzliche Stellschrauben:
 | `TELEGRAM_STARTUP_NOTICE` | Heartbeat-Nachricht beim Start senden (Standard an) |
 | `TRUTH_SOCIAL_BROWSER_FALLBACK` | Playwright-Fallback für Truth Social an/aus (Standard an) |
 | `CLAUDE_MAX_RETRIES` / `CLAUDE_TIMEOUT_SECONDS` | Robustheit der Claude-API-Calls |
+| `DASHBOARD_API_KEY` | Schützt `/api/statements`, `/api/stats`, `/api/test` mit einem `X-API-Key`-Header. **Unbedingt setzen**, sobald das Dashboard von außen erreichbar ist (z.B. Oracle-Cloud-Anleitung mit offenem Port 8000) – sonst kann jeder, der die IP kennt, Claude-Kosten verursachen und/oder Telegram-Alerts auslösen. `/api/health` bleibt bewusst ungeschützt (für externe Uptime-Checks). Zufälligen Wert erzeugen z.B. mit `openssl rand -hex 24`. Das Dashboard selbst fragt den Key einmalig ab und merkt ihn sich im Browser (localStorage). |
+
+`DB_PATH` **nicht** in `.env` setzen, wenn Docker verwendet wird – das Image hat
+bereits `DB_PATH=/data/trump_monitor.db` passend zum Volume-Mount als Default. Ein
+eigener Wert in `.env` würde diesen überschreiben und die DB außerhalb des Volumes
+ablegen; beim nächsten `docker compose up --build` wäre der komplette Verlauf weg
+(siehe Kommentar in `.env.example`).
 
 ## Datenbank
 
@@ -336,10 +373,10 @@ Einschätzung abgleichen).
 
 ## API-Endpunkte
 
-| Endpunkt | Zweck |
-|---|---|
-| `GET /` | Dashboard |
-| `GET /api/statements?limit=&only_relevant=` | Feed als JSON |
-| `GET /api/stats` | Aggregierte Statistik |
-| `GET /api/health` | Status pro Quelle, Konfigurationsfehler/-warnungen, Uptime |
-| `POST /api/test` | Beliebigen Text durch die volle Pipeline schicken (siehe oben) |
+| Endpunkt | Zweck | Auth |
+|---|---|---|
+| `GET /` | Dashboard | – |
+| `GET /api/statements?limit=&only_relevant=` | Feed als JSON | `X-API-Key`, falls `DASHBOARD_API_KEY` gesetzt |
+| `GET /api/stats` | Aggregierte Statistik | `X-API-Key`, falls `DASHBOARD_API_KEY` gesetzt |
+| `GET /api/health` | Status pro Quelle, Konfigurationsfehler/-warnungen, Uptime | – (bewusst offen für Uptime-Checks) |
+| `POST /api/test` | Beliebigen Text durch die volle Pipeline schicken (siehe oben), max. 4000 Zeichen | `X-API-Key`, falls `DASHBOARD_API_KEY` gesetzt |

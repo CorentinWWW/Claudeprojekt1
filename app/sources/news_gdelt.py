@@ -12,7 +12,7 @@ import httpx
 
 from app.db import RawStatement
 from app.sources.base import Source
-from app.util import retry_async
+from app.util import BoundedSeenSet, retry_async
 
 logger = logging.getLogger(__name__)
 
@@ -29,7 +29,7 @@ class GdeltNewsSource(Source):
     name = "news_gdelt"
 
     def __init__(self):
-        self._seen: set[str] = set()
+        self._seen: BoundedSeenSet = BoundedSeenSet(maxlen=5000)
 
     async def poll(self) -> list[RawStatement]:
         params = {

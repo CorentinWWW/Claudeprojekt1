@@ -103,6 +103,14 @@
   <div id="banners"></div>
 
   <div class="panel">
+    <h2>Zugriff</h2>
+    <div class="test-form-row">
+      <input type="password" id="apiKeyInput" placeholder="X-API-Key (falls DASHBOARD_API_KEY gesetzt ist)" style="flex:1; background:#0b0d10; color:#e6e6e6; border:1px solid #2a2f36; border-radius:8px; padding:0.5rem;">
+      <button onclick="saveApiKey()">Speichern</button>
+    </div>
+  </div>
+
+  <div class="panel">
     <h2>Status der Quellen</h2>
     <div class="status-row" id="statusRow"></div>
   </div>
@@ -143,6 +151,43 @@ function escapeHtml(str) {
   return div.innerHTML;
 }
 
+// escapeHtml() ist NICHT sicher fuer die Verwendung innerhalb eines HTML-Attributs
+// (z.B. title="..."): das textContent/innerHTML-Roundtrip escaped &, < und >, aber
+// KEINE Anfuehrungszeichen (die sind nur in Text-Knoten unkritisch, nicht in
+// Attribut-Werten) - ein `"` im Text wuerde sonst aus dem Attribut ausbrechen und
+// z.B. einen onmouseover-Handler injizieren koennen.
+function escapeAttr(str) {
+  return escapeHtml(str).replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+
+function getApiKey() {
+  return localStorage.getItem('dashboardApiKey') || '';
+}
+
+function saveApiKey() {
+  const val = document.getElementById('apiKeyInput').value.trim();
+  if (val) {
+    localStorage.setItem('dashboardApiKey', val);
+  } else {
+    localStorage.removeItem('dashboardApiKey');
+  }
+  refreshAll();
+}
+
+async function apiFetch(url, options = {}) {
+  const key = getApiKey();
+  const headers = Object.assign({}, options.headers || {});
+  if (key) headers['X-API-Key'] = key;
+  const res = await fetch(url, Object.assign({}, options, { headers }));
+  if (res.status === 401) {
+    const banners = document.getElementById('banners');
+    banners.innerHTML =
+      '<div class="banner error">⛔ Fehlender/falscher API-Key - oben unter "Zugriff" den korrekten X-API-Key eintragen.</div>' +
+      banners.innerHTML;
+  }
+  return res;
+}
+
 function timeAgo(ts) {
   if (!ts) return 'nie';
   const secs = Math.round(Date.now() / 1000 - ts);
@@ -156,7 +201,7 @@ async function loadFeed() {
     limit: '50',
     only_relevant: onlyRelevant.checked ? 'true' : 'false',
   });
-  const res = await fetch('/api/statements?' + params.toString());
+  const res = await apiFetch('/api/statements?' + params.toString());
   const items = await res.json();
 
   if (!items.length) {
@@ -177,7 +222,7 @@ function renderTickerCalls(tickerCalls) {
   if (!tickerCalls || !tickerCalls.length) return '–';
   return tickerCalls.map(tc => {
     const label = tc.direction ? `${tc.ticker} (${tc.direction})` : tc.ticker;
-    const title = tc.reasoning ? ` title="${escapeHtml(tc.reasoning)}"` : '';
+    const title = tc.reasoning ? ` title="${escapeAttr(tc.reasoning)}"` : '';
     return `<span class="tag"${title}>${directionArrow(tc.direction)} ${escapeHtml(label)}</span>`;
   }).join('');
 }
@@ -191,7 +236,7 @@ function renderCard(item) {
   const conf = item.confidence != null ? Math.round(item.confidence * 100) + '%' : '–';
   const tickers = renderTickerCalls(item.tickers);
   const sectors = (item.sectors || []).map(s => `<span class="tag">${escapeHtml(s)}</span>`).join('') || '–';
-  const link = item.url ? `<a href="${escapeHtml(item.url)}" target="_blank">Quelle</a>` : '';
+  const link = item.url ? `<a href="${escapeAttr(item.url)}" target="_blank">Quelle</a>` : '';
 
   return `
     <div class="card ${sentimentClass(item.sentiment)}${isDup ? ' duplicate' : ''}">
@@ -205,7 +250,7 @@ function renderCard(item) {
 }
 
 async function loadHealth() {
-  const res = await fetch('/api/health');
+  const res = await apiFetch('/api/health');
   const health = await res.json();
 
   const banners = document.getElementById('banners');
@@ -230,7 +275,7 @@ async function loadHealth() {
 }
 
 async function loadStats() {
-  const res = await fetch('/api/stats');
+  const res = await apiFetch('/api/stats');
   const stats = await res.json();
   const sentiment = stats.sentiment_breakdown || {};
 
@@ -254,7 +299,7 @@ async function runTest() {
   btn.disabled = true;
   resultEl.textContent = 'Sende an Claude…';
   try {
-    const res = await fetch('/api/test', {
+    const res = await apiFetch('/api/test', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -288,6 +333,7 @@ async function refreshAll() {
   await Promise.all([loadFeed(), loadHealth(), loadStats()]);
 }
 
+document.getElementById('apiKeyInput').value = getApiKey();
 onlyRelevant.addEventListener('change', loadFeed);
 refreshAll();
 setInterval(refreshAll, 15000);

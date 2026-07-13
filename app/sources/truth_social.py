@@ -33,6 +33,7 @@ from app.config import (
 )
 from app.db import RawStatement
 from app.sources.base import Source
+from app.util import BoundedSeenSet
 
 logger = logging.getLogger(__name__)
 
@@ -61,7 +62,7 @@ class TruthSocialSource(Source):
     def __init__(self, handle: str = TRUTH_SOCIAL_HANDLE):
         self.handle = handle
         self._account_id: str | None = None
-        self._seen: set[str] = set()
+        self._seen: BoundedSeenSet = BoundedSeenSet(maxlen=5000)
         self._browser_deps_missing = False
         self._last_browser_attempt = 0.0
 
@@ -193,12 +194,26 @@ class TruthSocialSource(Source):
 
     # ---- Gemeinsames Parsing ------------------------------------------------
 
-    def _to_raw_statements(self, statuses: list[dict]) -> list[RawStatement]:
+    def _to_raw_statements(
+        self, statuses: list[dict], enforce_account_scope: bool = False
+    ) -> list[RawStatement]:
         results: list[RawStatement] = []
         for status in statuses:
+            if not isinstance(status, dict):
+                continue
             source_id = str(status.get("id", ""))
             if not source_id or source_id in self._seen:
                 continue
+
+            if enforce_account_scope and not self._matches_configured_account(status):
+                # Nur beim Browser-Fallback relevant: STATUSES_PATTERN matcht die
+                # /api/v1/accounts/*/statuses-Antwort JEDES Accounts, dessen Profil
+                # waehrend des Seitenaufrufs geladen wird (z.B. verlinkte/zitierte
+                # Accounts in Empfehlungs-Widgets) - nicht nur die des konfigurierten
+                # Handles. Ohne diesen Check koennten fremde Postings faelschlich als
+                # Trump-Aussage einsortiert werden.
+                continue
+
             self._seen.add(source_id)
 
             text = _strip_html(status.get("content", ""))
@@ -216,19 +231,30 @@ class TruthSocialSource(Source):
             )
         return results
 
+    def _matches_configured_account(self, status: dict) -> bool:
+        account = status.get("account")
+        if not isinstance(account, dict):
+            return False
+        handle = self.handle.lower().lstrip("@")
+        username = (account.get("username") or "").lower()
+        acct = (account.get("acct") or "").lower()
+        return handle in (username, acct)
+
     async def poll(self) -> list[RawStatement]:
         statuses = await self._fetch_via_direct_api()
+        enforce_account_scope = False
 
         if statuses is None and TRUTH_SOCIAL_BROWSER_FALLBACK:
             now = time.time()
             if now - self._last_browser_attempt >= TRUTH_SOCIAL_BROWSER_FALLBACK_MIN_INTERVAL:
                 self._last_browser_attempt = now
                 statuses = await self._fetch_via_browser()
+                enforce_account_scope = True
 
-        if not statuses:
+        if not statuses or not isinstance(statuses, list):
             return []
 
-        return self._to_raw_statements(statuses)
+        return self._to_raw_statements(statuses, enforce_account_scope=enforce_account_scope)
 
 
 def _strip_html(html_content: str) -> str:
