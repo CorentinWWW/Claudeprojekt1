@@ -160,9 +160,49 @@ Chunks (Standard 30s), keine Wort-für-Wort-Live-Transkription.
 
 Dieses Projekt läuft als lang laufender Python-Prozess (Polling-Loop + Webserver in
 einem). Für echten Dauerbetrieb muss es auf einer permanenten Umgebung deployed
-werden - drei fertige Optionen liegen bei:
+werden - vier fertige Optionen liegen bei:
 
-### Option A: Docker (empfohlen)
+### Option 0: Oracle Cloud Free Tier (kostenlos, empfohlen)
+
+Oracle Cloud bietet einen "Always Free"-VPS, der dauerhaft (nicht nur als Trial)
+kostenlos bleibt. So richtest du ihn ein:
+
+1. **Account erstellen**: [oracle.com/cloud/free](https://www.oracle.com/cloud/free/)
+   → "Start for free". Braucht E-Mail, Telefonnummer und eine Kreditkarte zur
+   Identitätsprüfung - es wird nichts abgebucht, solange man im Free-Tier-Limit bleibt.
+2. **VM erstellen**: Cloud Console → *Compute* → *Instances* → *Create Instance*
+   - Image: **Ubuntu** (Standard-Vorschlag meist schon passend)
+   - Shape: **VM.Standard.A1.Flex** (ARM, bis 4 OCPU/24GB RAM gratis - komfortabler
+     für Docker+Chromium) probieren; falls "Out of host capacity" kommt (bei Free-Tier
+     manchmal je nach Region ausgebucht), alternativ **VM.Standard.E2.1.Micro** (x86,
+     1 OCPU/1GB RAM, garantiert verfügbar, aber knapper bemessen)
+   - SSH-Key: eigenen Public Key hochladen (oder von Oracle generieren lassen und
+     herunterladen)
+   - *Create* klicken, IP-Adresse der Instanz notieren
+3. **Port 8000 auf Netzwerk-Ebene freigeben**: Instanz-Detailseite → Subnetz-Link →
+   *Security Lists* → Default Security List → *Add Ingress Rules*:
+   - Source CIDR: `0.0.0.0/0`
+   - IP Protocol: TCP
+   - Destination Port Range: `8000`
+4. **Einloggen und Bootstrap-Skript laufen lassen**:
+   ```bash
+   ssh ubuntu@<Server-IP>
+   curl -fsSL https://raw.githubusercontent.com/CorentinWWW/Claudeprojekt1/claude/trump-market-impact-analyzer-dbjvu5/deploy/oracle_bootstrap.sh | bash
+   ```
+   Das Skript (`deploy/oracle_bootstrap.sh`) installiert Docker, öffnet Port 8000 in
+   der VM-eigenen Firewall (iptables/ufw - zusätzlich zur Security List aus Schritt 3),
+   klont dieses Repo und legt `.env` aus der Vorlage an.
+5. **Konfigurieren und starten**:
+   ```bash
+   nano ~/trump-market-monitor/.env   # ANTHROPIC_API_KEY (+ optional Telegram) eintragen
+   cd ~/trump-market-monitor && sudo docker compose up -d --build
+   ```
+6. Dashboard unter `http://<Server-IP>:8000` aufrufen, im Test-Panel einen Beispieltext
+   durchjagen um zu prüfen, dass alles korrekt konfiguriert ist.
+
+Für Updates später: `cd ~/trump-market-monitor && git pull && sudo docker compose up -d --build`.
+
+### Option A: Docker (auf einem beliebigen Server)
 
 ```bash
 cp .env.example .env   # ausfuellen
