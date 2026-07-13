@@ -5,7 +5,12 @@ on:
     # Alle 30 Minuten. Bei oeffentlichen Repos sind GitHub-Actions-Minuten
     # unbegrenzt, dann kann man hier z.B. auf */15 verkuerzen.
     - cron: "*/30 * * * *"
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      test_text:
+        description: "Optional: Testaussage, die garantiert durch Claude+Telegram gejagt wird (leer lassen fuer normalen Lauf)"
+        required: false
+        default: ""
 
 jobs:
   poll:
@@ -38,6 +43,7 @@ jobs:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           TELEGRAM_STARTUP_NOTICE: "false"
+          MANUAL_TEST_TEXT: ${{ github.event.inputs.test_text }}
           ENABLE_LIVE_AUDIO: "false"
           # Playwright/Chromium ist hier bewusst nicht installiert, um Laeufe
           # kurz zu halten - Truth Social nutzt in diesem Modus nur den

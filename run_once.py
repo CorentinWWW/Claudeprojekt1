@@ -11,11 +11,13 @@ der Cache-Schritt in .github/workflows/monitor.yml.
 """
 import asyncio
 import logging
+import os
 import sys
+import time
 
 from app.config import MAX_CONCURRENT_CLASSIFICATIONS, validate
-from app.db import init_db
-from app.orchestrator import build_sources, poll_once
+from app.db import RawStatement, init_db
+from app.orchestrator import build_sources, poll_once, process_statement
 
 logging.basicConfig(
     level=logging.INFO,
@@ -39,6 +41,17 @@ async def main() -> int:
 
     semaphore = asyncio.Semaphore(MAX_CONCURRENT_CLASSIFICATIONS)
     await poll_once(sources, semaphore)
+
+    test_text = os.getenv("MANUAL_TEST_TEXT", "").strip()
+    if test_text:
+        logger.info("Manueller Test-Text gesetzt, jage ihn durch die Pipeline: %s", test_text[:100])
+        raw = RawStatement(
+            source="manual_test",
+            source_id=f"manual_test:{time.time()}",
+            text=test_text,
+        )
+        await process_statement(raw, semaphore)
+
     return 0
 
 
