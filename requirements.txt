@@ -1,0 +1,10 @@
+fastapi>=0.111
+uvicorn[standard]>=0.30
+httpx>=0.27
+anthropic>=0.34
+python-dotenv>=1.0
+feedparser>=6.0
+
+# Optional: only needed if ENABLE_LIVE_AUDIO=true
+# yt-dlp>=2024.8.6
+# faster-whisper>=1.0.3

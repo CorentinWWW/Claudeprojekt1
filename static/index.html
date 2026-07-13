@@ -1,0 +1,109 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="UTF-8">
+<title>Trump Market Impact Monitor</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root { color-scheme: light dark; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    max-width: 900px;
+    margin: 0 auto;
+    padding: 1.5rem;
+    background: #0b0d10;
+    color: #e6e6e6;
+  }
+  h1 { font-size: 1.4rem; margin-bottom: 0.25rem; }
+  .subtitle { color: #9aa0a6; font-size: 0.85rem; margin-bottom: 1.25rem; }
+  .filters { margin-bottom: 1rem; display: flex; gap: 0.75rem; align-items: center; }
+  .card {
+    border: 1px solid #2a2f36;
+    border-radius: 10px;
+    padding: 0.9rem 1.1rem;
+    margin-bottom: 0.75rem;
+    background: #14171c;
+  }
+  .card.positive { border-left: 4px solid #2ecc71; }
+  .card.negative { border-left: 4px solid #e74c3c; }
+  .card.neutral  { border-left: 4px solid #7f8c8d; }
+  .meta { font-size: 0.75rem; color: #9aa0a6; margin-bottom: 0.4rem; }
+  .text { font-size: 0.95rem; margin-bottom: 0.5rem; }
+  .tags { font-size: 0.8rem; color: #c7c7c7; }
+  .tag {
+    display: inline-block;
+    background: #23272e;
+    border-radius: 6px;
+    padding: 0.1rem 0.5rem;
+    margin-right: 0.3rem;
+  }
+  a { color: #6ea8fe; }
+  .empty { color: #9aa0a6; font-style: italic; }
+  label { font-size: 0.85rem; color: #c7c7c7; }
+</style>
+</head>
+<body>
+  <h1>🗽 Trump Market Impact Monitor</h1>
+  <div class="subtitle">
+    Automatische Einschätzung via Claude – keine Finanzberatung. Aktualisiert alle 15s.
+  </div>
+  <div class="filters">
+    <label><input type="checkbox" id="onlyRelevant"> Nur marktrelevante Aussagen</label>
+  </div>
+  <div id="feed"></div>
+
+<script>
+const feed = document.getElementById('feed');
+const onlyRelevant = document.getElementById('onlyRelevant');
+
+function sentimentClass(s) {
+  return ['positive', 'negative', 'neutral'].includes(s) ? s : 'neutral';
+}
+
+async function load() {
+  const params = new URLSearchParams({
+    limit: '50',
+    only_relevant: onlyRelevant.checked ? 'true' : 'false',
+  });
+  const res = await fetch('/api/statements?' + params.toString());
+  const items = await res.json();
+
+  if (!items.length) {
+    feed.innerHTML = '<div class="empty">Noch keine Statements erfasst.</div>';
+    return;
+  }
+
+  feed.innerHTML = items.map(renderCard).join('');
+}
+
+function renderCard(item) {
+  const date = new Date(item.ingested_at * 1000).toLocaleString('de-DE');
+  const relevant = item.is_market_relevant ? '✅ marktrelevant' : '— nicht marktrelevant';
+  const conf = item.confidence != null ? Math.round(item.confidence * 100) + '%' : '–';
+  const tickers = (item.tickers || []).map(t => `<span class="tag">${t}</span>`).join('') || '–';
+  const sectors = (item.sectors || []).map(s => `<span class="tag">${s}</span>`).join('') || '–';
+  const link = item.url ? `<a href="${item.url}" target="_blank">Quelle</a>` : '';
+
+  return `
+    <div class="card ${sentimentClass(item.sentiment)}">
+      <div class="meta">${date} · ${item.source} · ${relevant} · Konfidenz ${conf}</div>
+      <div class="text">${escapeHtml(item.text)}</div>
+      <div class="tags">Ticker: ${tickers} &nbsp; Sektoren: ${sectors}</div>
+      ${item.reasoning ? `<div class="tags" style="margin-top:0.3rem;">${escapeHtml(item.reasoning)}</div>` : ''}
+      <div style="margin-top:0.4rem;">${link}</div>
+    </div>
+  `;
+}
+
+function escapeHtml(str) {
+  const div = document.createElement('div');
+  div.textContent = str || '';
+  return div.innerHTML;
+}
+
+onlyRelevant.addEventListener('change', load);
+load();
+setInterval(load, 15000);
+</script>
+</body>
+</html>
