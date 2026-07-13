@@ -167,6 +167,21 @@ async function loadFeed() {
   feed.innerHTML = items.map(renderCard).join('');
 }
 
+function directionArrow(direction) {
+  if (direction === 'long') return '🔺';
+  if (direction === 'short') return '🔻';
+  return '◽';
+}
+
+function renderTickerCalls(tickerCalls) {
+  if (!tickerCalls || !tickerCalls.length) return '–';
+  return tickerCalls.map(tc => {
+    const label = tc.direction ? `${tc.ticker} (${tc.direction})` : tc.ticker;
+    const title = tc.reasoning ? ` title="${escapeHtml(tc.reasoning)}"` : '';
+    return `<span class="tag"${title}>${directionArrow(tc.direction)} ${escapeHtml(label)}</span>`;
+  }).join('');
+}
+
 function renderCard(item) {
   const date = new Date(item.ingested_at * 1000).toLocaleString('de-DE');
   const isDup = item.duplicate_of_id != null;
@@ -174,7 +189,7 @@ function renderCard(item) {
     ? `↔ Duplikat von #${item.duplicate_of_id}`
     : (item.is_market_relevant ? '✅ marktrelevant' : '— nicht marktrelevant');
   const conf = item.confidence != null ? Math.round(item.confidence * 100) + '%' : '–';
-  const tickers = (item.tickers || []).map(t => `<span class="tag">${escapeHtml(t)}</span>`).join('') || '–';
+  const tickers = renderTickerCalls(item.tickers);
   const sectors = (item.sectors || []).map(s => `<span class="tag">${escapeHtml(s)}</span>`).join('') || '–';
   const link = item.url ? `<a href="${escapeHtml(item.url)}" target="_blank">Quelle</a>` : '';
 
@@ -253,10 +268,11 @@ async function runTest() {
     }
     const data = await res.json();
     const c = data.classification;
+    const tickerStr = (c.ticker_calls || []).map(tc => `${tc.ticker} (${tc.direction})`).join(', ') || '–';
     resultEl.textContent =
       `marktrelevant: ${c.is_market_relevant} | sentiment: ${c.sentiment} | ` +
       `konfidenz: ${Math.round(c.confidence * 100)}%\n` +
-      `ticker: ${(c.tickers || []).join(', ') || '–'} | sektoren: ${(c.sectors || []).join(', ') || '–'}\n` +
+      `ticker: ${tickerStr} | sektoren: ${(c.sectors || []).join(', ') || '–'}\n` +
       `begründung: ${c.reasoning}\n` +
       `Telegram-Alert gesendet: ${data.alert_sent}`;
     loadFeed();

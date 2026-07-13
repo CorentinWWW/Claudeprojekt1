@@ -1,3 +1,7 @@
+# Fuer die MANUELLE VPS-Installation ohne Docker (README "Option B").
+# Passt NICHT zum Docker-Setup ueber deploy/oracle_bootstrap.sh (das nutzt
+# docker-compose statt systemd) - Pfade/User hier sind fuer eine eigene
+# venv-Installation gedacht, siehe README fuer die vollstaendigen Schritte.
 [Unit]
 Description=Trump Market Impact Monitor
 After=network-online.target

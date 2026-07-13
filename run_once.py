@@ -58,11 +58,11 @@ async def main() -> int:
         classification = await classify(raw.text)
         statement_id = insert_statement(raw, classification)
         logger.info(
-            "[manual_test] relevant=%s sentiment=%s conf=%.2f tickers=%s",
+            "[manual_test] relevant=%s sentiment=%s conf=%.2f ticker_calls=%s",
             classification.is_market_relevant,
             classification.sentiment,
             classification.confidence,
-            classification.tickers,
+            classification.ticker_calls,
         )
         if classification.is_market_relevant:
             sent = await send_alert(raw, classification)

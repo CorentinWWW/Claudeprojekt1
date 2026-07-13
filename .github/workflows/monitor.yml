@@ -12,10 +12,27 @@ on:
         required: false
         default: ""
 
+# Verhindert, dass ein manuell getriggerter Lauf und der naechste geplante Lauf
+# ueberlappen: beide wuerden sonst denselben DB-Cache-Stand restaurieren, unabhaengig
+# voneinander veraendern und ihre jeweils eigene (sich widersprechende) Version
+# zurueckspeichern - wodurch der zuerst fertige Lauf seine Aenderungen (z.B.
+# "Alert wurde verschickt") stillschweigend wieder verliert. "cancel-in-progress:
+# false" laesst laufende Jobs zu Ende laufen und reiht neue nur ein, statt sie
+# abzubrechen (ein abgebrochener Lauf wuerde ohnehin von _resend_pending_alerts()
+# beim naechsten Mal nachgeholt, aber sequenziell ist sauberer).
+concurrency:
+  group: trump-market-monitor
+  cancel-in-progress: false
+
 jobs:
   poll:
     runs-on: ubuntu-latest
-    timeout-minutes: 8
+    # Grosszuegig bemessen: ein Nachrichtenschub (viele echte, unterschiedliche
+    # Trump/Markt-Meldungen gleichzeitig) kann mehrere Minuten Klassifikation
+    # brauchen. Lieber laenger warten als einen Lauf mitten in der Verarbeitung
+    # abzubrechen (siehe _resend_pending_alerts() in orchestrator.py als
+    # zusaetzliches Sicherheitsnetz, falls es doch mal knapp wird).
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
 

@@ -12,6 +12,7 @@ import httpx
 
 from app.db import RawStatement
 from app.sources.base import Source
+from app.util import retry_async
 
 logger = logging.getLogger(__name__)
 
@@ -41,34 +42,46 @@ class GdeltNewsSource(Source):
         }
         url = f"{GDELT_ENDPOINT}?{urlencode(params)}"
 
-        try:
+        async def _fetch():
             async with httpx.AsyncClient(timeout=20) as client:
                 resp = await client.get(url)
                 resp.raise_for_status()
-                data = resp.json()
+                return resp.json()
+
+        try:
+            # Nur Verbindungsfehler (DNS/Timeout/Reset) werden wiederholt - ein
+            # HTTP-Statusfehler wie 429/403 wuerde sich innerhalb weniger Sekunden
+            # ohnehin nicht aendern, das erledigt der naechste Poll-Zyklus.
+            data = await retry_async(_fetch, retries=2, backoff_seconds=2.0, retry_on=(httpx.TransportError,))
+
+            # Bewusst innerhalb des try-Blocks: GDELT liefert bei manchen
+            # Rand-/Fehlerfaellen valides JSON, das aber nicht die erwartete
+            # Dict-Struktur hat (z.B. eine Fehlermeldung als Liste/String) -
+            # das soll die Quelle nicht mit einem AttributeError abschiessen.
+            articles = data.get("articles", []) or [] if isinstance(data, dict) else []
+            results: list[RawStatement] = []
+            for art in articles:
+                if not isinstance(art, dict):
+                    continue
+                source_id = art.get("url", "")
+                if not source_id or source_id in self._seen:
+                    continue
+                self._seen.add(source_id)
+
+                title = (art.get("title") or "").strip()
+                if not title:
+                    continue
+
+                results.append(
+                    RawStatement(
+                        source=self.name,
+                        source_id=source_id,
+                        text=f"{title} (Quelle: {art.get('domain', 'unbekannt')})",
+                        url=art.get("url"),
+                        published_at=time.time(),
+                    )
+                )
+            return results
         except Exception:
             logger.exception("GDELT-Abfrage fehlgeschlagen")
             return []
-
-        articles = data.get("articles", []) or []
-        results: list[RawStatement] = []
-        for art in articles:
-            source_id = art.get("url", "")
-            if not source_id or source_id in self._seen:
-                continue
-            self._seen.add(source_id)
-
-            title = (art.get("title") or "").strip()
-            if not title:
-                continue
-
-            results.append(
-                RawStatement(
-                    source=self.name,
-                    source_id=source_id,
-                    text=f"{title} (Quelle: {art.get('domain', 'unbekannt')})",
-                    url=art.get("url"),
-                    published_at=time.time(),
-                )
-            )
-        return results

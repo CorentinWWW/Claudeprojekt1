@@ -39,9 +39,17 @@ MAX_CONCURRENT_CLASSIFICATIONS = int(os.getenv("MAX_CONCURRENT_CLASSIFICATIONS",
 
 # Statements, deren Text zu >= diesem Wert (0-1, difflib-Aehnlichkeit) einem kuerzlich
 # gesehenen Statement gleicht, gelten als Duplikat (z.B. dieselbe Meldung bei
-# GDELT und RSS) und werden nicht erneut klassifiziert/alarmiert.
+# GDELT und RSS, oder von vielen Portalen wortgleich syndiziert) und werden nicht
+# erneut klassifiziert/alarmiert. Dies ist die schnelle, reine Text-Ebene (Tier 1).
 DEDUP_SIMILARITY_THRESHOLD = float(os.getenv("DEDUP_SIMILARITY_THRESHOLD", "0.82"))
-DEDUP_WINDOW_SECONDS = int(os.getenv("DEDUP_WINDOW_SECONDS", "21600"))  # 6h
+DEDUP_WINDOW_SECONDS = int(os.getenv("DEDUP_WINDOW_SECONDS", "86400"))  # 24h ("heute")
+
+# Themen-Ebene (Tier 2, semantisch via Claude): wie viele Stunden zurueck bereits
+# alarmierte Statements als Kontext mitgegeben werden, damit Claude erkennen kann,
+# ob eine neue Meldung im Kern zu einem heute schon gemeldeten Thema gehoert -
+# und nur bei einer echten Eskalation trotzdem erneut alarmiert wird.
+TOPIC_CONTEXT_WINDOW_HOURS = int(os.getenv("TOPIC_CONTEXT_WINDOW_HOURS", "24"))
+TOPIC_CONTEXT_MAX_ITEMS = int(os.getenv("TOPIC_CONTEXT_MAX_ITEMS", "20"))
 
 ENABLE_NEWS = _bool("ENABLE_NEWS", True)
 ENABLE_TRUTH_SOCIAL = _bool("ENABLE_TRUTH_SOCIAL", True)

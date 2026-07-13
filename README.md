@@ -2,29 +2,34 @@
 
 Überwacht Aussagen von Donald Trump (Nachrichtenzitate, Truth-Social-Posts, optional
 Live-Reden), lässt Claude einschätzen ob eine Aussage marktrelevant ist (positiv/
-negativ/neutral, betroffene Ticker/Sektoren) und schickt bei Relevanz einen
-Telegram-Alert. Ein Web-Dashboard zeigt den Live-Feed inkl. Status- und Statistik-Übersicht.
+negativ/neutral, betroffene Ticker mit Long/Short-Einschätzung) und schickt bei
+Relevanz einen Telegram-Alert - aber nur einmal pro Thema pro Tag, außer die Lage
+eskaliert wirklich. Ein Web-Dashboard zeigt den Live-Feed inkl. Status- und
+Statistik-Übersicht.
 
-**Kein Trading-Signal / keine Finanzberatung.** Die Einschätzungen sind LLM-generiert
-und können falsch liegen.
+**Kein Trading-Signal / keine Finanzberatung.** Die Einschätzungen (inkl. Long/Short)
+sind LLM-generiert und können falsch liegen - eigene Anlageentscheidung auf eigenes Risiko.
 
 ## Architektur
 
 ```
 Quellen (News/Truth Social/Live-Audio) --poll()--> Orchestrator (Supervisor, Concurrency)
                                                         |
-                                              Duplikat-Check (difflib)
+                                    Tier 1: Text-Duplikat-Check (difflib, 24h,
+                                            auch INNERHALB einer Charge)
                                                         |
-                                              Claude-Klassifikation
-                                              (marktrelevant? sentiment?
-                                               ticker? sektoren?)
+                                    Claude-Klassifikation: marktrelevant? sentiment?
+                                    Ticker + Long/Short je Ticker? Tier 2: dasselbe
+                                    Thema wie eine heute schon alarmierte Meldung -
+                                    und falls ja, wesentliche Eskalation?
                                                         |
-                                              +---------+---------+
-                                              v                   v
-                                        SQLite (Audit-Trail)  Telegram-Alert (HTML, Retry)
-                                              |
-                                              v
-                                Web-Dashboard (FastAPI): Feed, Health, Stats, Test-Endpoint
+                                    +----------+--------+--------+-----------+
+                                    v          v                 v           v
+                              SQLite       Alerts gebuendelt   Pending-Alert-Retry
+                            (Audit-Trail)  (Einzeln/Digest)    (holt nie versendete
+                                    |       via Telegram        Alerts beim naechsten
+                                    v                           Zyklus nach)
+                    Web-Dashboard (FastAPI): Feed, Health, Stats, Test-Endpoint
 ```
 
 ## Setup
@@ -137,12 +142,35 @@ Chunks (Standard 30s), keine Wort-für-Wort-Live-Transkription.
   etc. werden beim Boot erkannt (`app/config.py: validate()`), zusammen mit einem
   echten Claude-Selftest-Call. Fehler stoppen den Monitoring-Loop kontrolliert
   (nicht den ganzen Prozess) und sind über `/api/health` sichtbar.
-- **Cross-Source-Duplikaterkennung**: dieselbe reale Aussage, die z.B. sowohl bei
-  GDELT als auch per RSS auftaucht, wird per Textähnlichkeit (`difflib`) erkannt
-  und nur einmal klassifiziert/alarmiert (siehe `DEDUP_SIMILARITY_THRESHOLD`).
+- **Zweistufige Duplikaterkennung**:
+  - *Tier 1 (Text, `difflib`)*: dieselbe reale Aussage, die z.B. sowohl bei GDELT
+    als auch per RSS auftaucht oder von vielen Portalen wortgleich syndiziert wird,
+    wird per Textähnlichkeit erkannt und nur einmal klassifiziert (siehe
+    `DEDUP_SIMILARITY_THRESHOLD`/`DEDUP_WINDOW_SECONDS`, Standard 24h). Prüft auch
+    INNERHALB einer Charge gegeneinander, nicht nur gegen die DB - sonst würde ein
+    einzelner Nachrichtenschub mit vielen syndizierten Kopien jede davon einzeln
+    alarmieren.
+  - *Tier 2 (Thema, via Claude)*: bereits heute alarmierte Meldungen werden Claude
+    als Kontext mitgegeben (`TOPIC_CONTEXT_WINDOW_HOURS`/`TOPIC_CONTEXT_MAX_ITEMS`).
+    Erkennt Claude, dass eine neue Meldung *im Kern* zu einem dieser Themen gehört
+    (auch bei ganz anderem Wortlaut), wird sie nur dann erneut alarmiert, wenn sie
+    eine **wesentliche Eskalation** darstellt (z.B. von Androhung zu tatsächlicher
+    Umsetzung) - reine Wiederholungen/Umformulierungen bleiben stumm.
+- **Long/Short-Einschätzung pro Ticker**: statt nur "betroffene Ticker" gibt Claude
+  für jeden genannten Ticker eine `long`/`short`-Einschätzung mit Begründung ab -
+  auch innerhalb derselben Meldung können unterschiedliche Ticker unterschiedlich
+  betroffen sein (z.B. Zölle die Stahlproduzenten nützen, aber Autobauern schaden).
 - **Nebenläufige Klassifikation**: mehrere neue Statements pro Poll-Zyklus werden
   parallel klassifiziert (begrenzt durch `MAX_CONCURRENT_CLASSIFICATIONS`), statt
   nacheinander.
+- **Gebündelte Alerts statt Nachrichtenflut**: sind in einem Zyklus mehr als
+  `ALERT_DIGEST_THRESHOLD` (Standard 3) Meldungen gleichzeitig alarmwürdig (z.B. bei
+  einer echten Großlage mit vielen unterschiedlichen Artikeln), wird daraus EINE
+  Sammel-Nachricht statt einer Flut von Einzelnachrichten.
+- **Pending-Alert-Wiederholung**: Statements, die als marktrelevant eingestuft aber
+  nie tatsächlich alarmiert wurden (z.B. weil ein Lauf mitten drin abgebrochen wurde
+  oder Telegram kurzzeitig nicht erreichbar war), werden beim nächsten Zyklus
+  automatisch erneut versucht - sonst würden sie für immer stumm bleiben.
 - **Telegram-Fix**: die ursprüngliche Markdown-Formatierung konnte durch
   Sonderzeichen im Statement-Text (`_`, `*`, `` ` ``) brechen und Alerts
   stillschweigend verschlucken. Jetzt HTML-Modus mit korrektem Escaping, plus
@@ -155,6 +183,15 @@ Chunks (Standard 30s), keine Wort-für-Wort-Live-Transkription.
   gesendete Alerts), beide auch im Dashboard sichtbar.
 - **SQLite im WAL-Modus**: gleichzeitige Schreibzugriffe (Orchestrator) und
   Lesezugriffe (Dashboard-API) blockieren sich nicht gegenseitig.
+- **GitHub-Actions-Concurrency-Guard**: verhindert, dass zwei überlappende Läufe
+  (z.B. ein manueller Trigger während der geplante Lauf noch läuft) denselben
+  DB-Cache-Stand gegeneinander überschreiben und sich dabei Alerts verlieren.
+- **Robustere Quellen**: HTML-Entities in Truth-Social-Texten werden korrekt
+  dekodiert, GDELT/RSS wiederholen bei transienten Verbindungsfehlern automatisch
+  (nicht bei permanenten Blocks wie 403), ein einzelner kaputter RSS-Eintrag kostet
+  nicht mehr den ganzen Feed, der Truth-Social-Browser-Fallback hat einen
+  Gesamt-Timeout, Live-Audio-Temp-Dateien werden auch bei fehlgeschlagener
+  Transkription zuverlässig aufgeräumt.
 
 ## Dauerbetrieb (24/7)
 
@@ -282,7 +319,9 @@ Siehe `.env.example` für alle Variablen. Wichtige zusätzliche Stellschrauben:
 | `ALERT_CONFIDENCE_THRESHOLD` | Ab welcher Claude-Konfidenz (0-1) ein Telegram-Alert geschickt wird (Standard 0.5) |
 | `MAX_CONCURRENT_CLASSIFICATIONS` | Wie viele Claude-Calls parallel laufen dürfen (Standard 3) |
 | `DEDUP_SIMILARITY_THRESHOLD` | Ab welcher Textähnlichkeit (0-1) zwei Statements als Duplikat gelten (Standard 0.82) |
-| `DEDUP_WINDOW_SECONDS` | Zeitfenster für die Duplikatsuche (Standard 6h) |
+| `DEDUP_WINDOW_SECONDS` | Zeitfenster für die Text-Duplikatsuche, Tier 1 (Standard 24h) |
+| `TOPIC_CONTEXT_WINDOW_HOURS` / `TOPIC_CONTEXT_MAX_ITEMS` | Wie viele Stunden zurück / wie viele Meldungen als Themen-Kontext an Claude mitgegeben werden, Tier 2 (Standard 24h / 20) |
+| `ALERT_DIGEST_THRESHOLD` | Ab wie vielen gleichzeitigen Alerts zu einer Sammel-Nachricht gebündelt wird (Standard 3) |
 | `TELEGRAM_STARTUP_NOTICE` | Heartbeat-Nachricht beim Start senden (Standard an) |
 | `TRUTH_SOCIAL_BROWSER_FALLBACK` | Playwright-Fallback für Truth Social an/aus (Standard an) |
 | `CLAUDE_MAX_RETRIES` / `CLAUDE_TIMEOUT_SECONDS` | Robustheit der Claude-API-Calls |

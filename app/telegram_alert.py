@@ -2,6 +2,7 @@ import asyncio
 import html
 import logging
 from collections import Counter
+from typing import Optional
 
 import httpx
 
@@ -15,21 +16,56 @@ TELEGRAM_MAX_LENGTH = 4096
 DIGEST_MAX_DETAIL_LINES = 15
 
 
+def _direction_arrow(direction: Optional[str]) -> str:
+    if direction == "long":
+        return "🔺"
+    if direction == "short":
+        return "🔻"
+    return "◽"
+
+
+def _format_ticker_calls(ticker_calls: list[dict]) -> str:
+    if not ticker_calls:
+        return "–"
+    lines = []
+    for tc in ticker_calls:
+        ticker = html.escape(tc.get("ticker", "?"))
+        direction = tc.get("direction") or "?"
+        reasoning = html.escape(tc.get("reasoning", ""))
+        arrow = _direction_arrow(tc.get("direction"))
+        suffix = f" – {reasoning}" if reasoning else ""
+        lines.append(f"{arrow} {ticker} ({direction}){suffix}")
+    return "\n".join(lines)
+
+
+def _format_ticker_calls_compact(ticker_calls: list[dict]) -> str:
+    if not ticker_calls:
+        return "–"
+    return ", ".join(
+        f"{html.escape(tc.get('ticker', '?'))}{_direction_arrow(tc.get('direction'))}"
+        for tc in ticker_calls
+    )
+
+
 def _format_message(raw: RawStatement, classification: Classification) -> str:
     emoji = SENTIMENT_EMOJI.get(classification.sentiment, "⚪")
-    tickers = ", ".join(classification.tickers) or "—"
     sectors = ", ".join(classification.sectors) or "—"
     lines = [
         f"{emoji} <b>Markt-relevante Trump-Aussage</b> "
         f"({html.escape(classification.sentiment)}, "
         f"Konfidenz {classification.confidence:.0%})",
+    ]
+    if classification.related_topic_id is not None and classification.is_major_escalation:
+        lines.append(f"⚠️ Eskalation von Statement #{classification.related_topic_id}")
+    lines += [
         f"Quelle: {html.escape(raw.source)}",
         "",
         html.escape(raw.text[:500]),
         "",
-        f"Ticker: {html.escape(tickers)}",
+        f"Ticker:\n{_format_ticker_calls(classification.ticker_calls)}",
         f"Sektoren: {html.escape(sectors)}",
         f"Begründung: {html.escape(classification.reasoning)}",
+        "<i>Keine Finanzberatung – eigene Anlageentscheidung auf eigenes Risiko.</i>",
     ]
     if raw.url:
         lines.append(f'<a href="{html.escape(raw.url)}">Link zur Quelle</a>')
@@ -97,16 +133,16 @@ def _format_digest(items: list[tuple[RawStatement, Classification, int]]) -> str
     lines = []
     for raw, classification, _ in sorted_items[:DIGEST_MAX_DETAIL_LINES]:
         emoji = SENTIMENT_EMOJI.get(classification.sentiment, "⚪")
-        tickers = ", ".join(classification.tickers) or "–"
         title = html.escape(raw.text[:120])
-        lines.append(f"{emoji} {title} (Ticker: {html.escape(tickers)})")
+        ticker_str = _format_ticker_calls_compact(classification.ticker_calls)
+        lines.append(f"{emoji} {title} (Ticker: {ticker_str})")
 
     remaining = len(items) - len(lines)
     body = "\n".join(lines)
     if remaining > 0:
         body += f"\n… und {remaining} weitere (Details im Log der Ausfuehrung)"
 
-    text = f"{header}\n\n{body}"
+    text = f"{header}\n\n{body}\n\n<i>Keine Finanzberatung – eigene Anlageentscheidung auf eigenes Risiko.</i>"
     if len(text) > TELEGRAM_MAX_LENGTH:
         text = text[: TELEGRAM_MAX_LENGTH - 20] + "\n…(gekürzt)"
     return text

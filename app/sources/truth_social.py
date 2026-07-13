@@ -17,6 +17,7 @@ WICHTIG - Einschraenkungen:
   einer eigenen eingeloggten Session) gesetzt werden, falls verfuegbar.
 """
 import asyncio
+import html
 import logging
 import os
 import re
@@ -48,6 +49,10 @@ BROWSER_USER_AGENT = (
 # Playwright selbst erwartete Standard-Revision - ansonsten normales Verhalten
 # (Standardpfad nach "playwright install chromium").
 _LOCAL_CHROMIUM_PATH = "/opt/pw-browsers/chromium"
+# Oberer Zeitdeckel fuer den gesamten Browser-Fallback (Start, Navigation, Warten,
+# Schliessen) - schuetzt vor einem haengenden/abgestuerzten Chromium, das sonst
+# den kompletten Poll-Zyklus fuer immer blockieren wuerde.
+BROWSER_FALLBACK_TOTAL_TIMEOUT = 45
 
 
 class TruthSocialSource(Source):
@@ -117,6 +122,29 @@ class TruthSocialSource(Source):
                 self._browser_deps_missing = True
             return None
 
+        try:
+            # Bewusst mit Gesamt-Timeout umschlossen: ohne das koennte ein
+            # unresponsives/abgestuerztes Chromium (z.B. haengendes browser.close())
+            # den kompletten Poll-Zyklus fuer immer blockieren.
+            return await asyncio.wait_for(
+                self._fetch_via_browser_inner(async_playwright),
+                timeout=BROWSER_FALLBACK_TOTAL_TIMEOUT,
+            )
+        except asyncio.TimeoutError:
+            logger.warning(
+                "Truth-Social-Browser-Fallback: Timeout nach %ss, breche ab.",
+                BROWSER_FALLBACK_TOTAL_TIMEOUT,
+            )
+            return None
+        except Exception:
+            logger.warning(
+                "Truth-Social-Browser-Fallback fehlgeschlagen (z.B. fehlende "
+                "System-Abhaengigkeiten fuer Chromium).",
+                exc_info=True,
+            )
+            return None
+
+    async def _fetch_via_browser_inner(self, async_playwright) -> list[dict] | None:
         captured: list[dict] = []
         pending_tasks = []
 
@@ -129,36 +157,28 @@ class TruthSocialSource(Source):
                 except Exception:
                     logger.debug("Konnte Response-JSON nicht parsen: %s", response.url)
 
-        try:
-            async with async_playwright() as p:
-                launch_kwargs = {
-                    "headless": True,
-                    "args": ["--no-sandbox", "--disable-dev-shm-usage"],
-                }
-                if os.path.exists(_LOCAL_CHROMIUM_PATH):
-                    launch_kwargs["executable_path"] = _LOCAL_CHROMIUM_PATH
-                browser = await p.chromium.launch(**launch_kwargs)
-                try:
-                    context = await browser.new_context(user_agent=BROWSER_USER_AGENT)
-                    page = await context.new_page()
-                    page.on(
-                        "response",
-                        lambda r: pending_tasks.append(asyncio.create_task(handle_response(r))),
-                    )
-                    url = PROFILE_URL_TMPL.format(handle=self.handle)
-                    await page.goto(url, wait_until="domcontentloaded", timeout=30000)
-                    await page.wait_for_timeout(5000)
-                    if pending_tasks:
-                        await asyncio.gather(*pending_tasks, return_exceptions=True)
-                finally:
-                    await browser.close()
-        except Exception:
-            logger.warning(
-                "Truth-Social-Browser-Fallback fehlgeschlagen (z.B. fehlende "
-                "System-Abhaengigkeiten fuer Chromium).",
-                exc_info=True,
-            )
-            return None
+        async with async_playwright() as p:
+            launch_kwargs = {
+                "headless": True,
+                "args": ["--no-sandbox", "--disable-dev-shm-usage"],
+            }
+            if os.path.exists(_LOCAL_CHROMIUM_PATH):
+                launch_kwargs["executable_path"] = _LOCAL_CHROMIUM_PATH
+            browser = await p.chromium.launch(**launch_kwargs)
+            try:
+                context = await browser.new_context(user_agent=BROWSER_USER_AGENT)
+                page = await context.new_page()
+                page.on(
+                    "response",
+                    lambda r: pending_tasks.append(asyncio.create_task(handle_response(r))),
+                )
+                url = PROFILE_URL_TMPL.format(handle=self.handle)
+                await page.goto(url, wait_until="domcontentloaded", timeout=30000)
+                await page.wait_for_timeout(5000)
+                if pending_tasks:
+                    await asyncio.gather(*pending_tasks, return_exceptions=True)
+            finally:
+                await browser.close()
 
         if not captured:
             logger.info(
@@ -213,4 +233,5 @@ class TruthSocialSource(Source):
 
 def _strip_html(html_content: str) -> str:
     text = re.sub(r"<[^>]+>", " ", html_content or "")
+    text = html.unescape(text)
     return " ".join(text.split()).strip()

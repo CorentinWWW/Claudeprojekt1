@@ -14,9 +14,21 @@ from app.config import (
     MAX_CONCURRENT_CLASSIFICATIONS,
     POLL_INTERVAL_SECONDS,
     TELEGRAM_STARTUP_NOTICE,
+    TOPIC_CONTEXT_MAX_ITEMS,
+    TOPIC_CONTEXT_WINDOW_HOURS,
     WHISPER_MODEL_SIZE,
 )
-from app.db import find_recent_duplicate, init_db, insert_statement, is_known, mark_alert_sent
+from app.db import (
+    Classification,
+    RawStatement,
+    find_recent_duplicate,
+    get_pending_alerts,
+    get_recent_alerted,
+    init_db,
+    insert_statement,
+    is_known,
+    mark_alert_sent,
+)
 from app.sources.live_audio import LiveAudioSource
 from app.sources.news_gdelt import GdeltNewsSource
 from app.sources.news_rss import RssNewsSource
@@ -99,22 +111,41 @@ def _partition_duplicates(raw_statements: list):
     return to_classify, duplicate_pairs
 
 
-async def _classify_and_store(raw, semaphore: asyncio.Semaphore):
+async def _classify_and_store(raw, semaphore: asyncio.Semaphore, recent_context: list[dict]):
     async with semaphore:
         try:
-            classification = await classify(raw.text)
+            classification = await classify(raw.text, recent_context=recent_context)
         except Exception:
             logger.exception("Klassifikation fehlgeschlagen fuer: %s", raw.text[:80])
             return None
 
+    if classification.related_topic_id is not None and not classification.is_major_escalation:
+        # Gleiches Thema wie eine heute schon alarmierte Meldung, aber keine wesentliche
+        # Verschaerfung - nicht erneut alarmieren (nur als Duplikat vermerken).
+        insert_statement(raw, None, duplicate_of_id=classification.related_topic_id)
+        logger.info(
+            "[%s] Themen-Duplikat von Statement #%d (keine wesentliche Eskalation), "
+            "kein erneuter Alert: %s",
+            raw.source,
+            classification.related_topic_id,
+            raw.text[:80],
+        )
+        return None
+
     statement_id = insert_statement(raw, classification)
+    escalation_note = (
+        f" (Eskalation von #{classification.related_topic_id})"
+        if classification.related_topic_id is not None and classification.is_major_escalation
+        else ""
+    )
     logger.info(
-        "[%s] relevant=%s sentiment=%s conf=%.2f tickers=%s :: %s",
+        "[%s] relevant=%s sentiment=%s conf=%.2f ticker=%s%s :: %s",
         raw.source,
         classification.is_market_relevant,
         classification.sentiment,
         classification.confidence,
-        classification.tickers,
+        [tc["ticker"] for tc in classification.ticker_calls],
+        escalation_note,
         raw.text[:100],
     )
     return (raw, classification, statement_id)
@@ -140,7 +171,39 @@ async def _send_alerts(alert_worthy: list[tuple]):
                 mark_alert_sent(statement_id)
 
 
+def _row_to_alert_tuple(row: dict) -> tuple:
+    raw = RawStatement(source=row["source"], source_id=row["source_id"], text=row["text"], url=row["url"])
+    classification = Classification(
+        is_market_relevant=bool(row["is_market_relevant"]),
+        sentiment=row["sentiment"],
+        confidence=row["confidence"] or 0.0,
+        ticker_calls=row["tickers"],
+        sectors=row["sectors"],
+        reasoning=row["reasoning"] or "",
+    )
+    return (raw, classification, row["id"])
+
+
+async def _resend_pending_alerts():
+    """Versucht Alerts erneut, die als marktrelevant eingestuft aber nie tatsaechlich
+    verschickt wurden (z.B. weil ein vorheriger Lauf mitten drin abgebrochen wurde,
+    oder Telegram beim ersten Versuch nicht erreichbar war). Ohne das wuerden solche
+    Statements fuer immer stumm bleiben, da is_known() sie ab dem ersten Insert als
+    'schon gesehen' behandelt."""
+    pending = get_pending_alerts()
+    if not pending:
+        return
+    logger.info(
+        "%d marktrelevante Statement(s) ohne erfolgreichen Alert aus vorherigem(n) "
+        "Lauf/Laeufen gefunden, versuche erneut.",
+        len(pending),
+    )
+    await _send_alerts([_row_to_alert_tuple(row) for row in pending])
+
+
 async def poll_once(sources, semaphore: asyncio.Semaphore):
+    await _resend_pending_alerts()
+
     for source in sources:
         health = source_health[source.name]
         health["last_poll_at"] = time.time()
@@ -160,8 +223,11 @@ async def poll_once(sources, semaphore: asyncio.Semaphore):
 
         to_classify, duplicate_pairs = _partition_duplicates(raw_statements)
 
+        recent_context = get_recent_alerted(
+            hours=TOPIC_CONTEXT_WINDOW_HOURS, limit=TOPIC_CONTEXT_MAX_ITEMS
+        )
         results = await asyncio.gather(
-            *(_classify_and_store(raw, semaphore) for raw in to_classify)
+            *(_classify_and_store(raw, semaphore, recent_context) for raw in to_classify)
         )
         results = [r for r in results if r is not None]
         id_by_source_id = {r[0].source_id: r[2] for r in results}

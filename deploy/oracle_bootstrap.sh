@@ -12,12 +12,24 @@ REPO_URL="https://github.com/CorentinWWW/Claudeprojekt1.git"
 BRANCH="claude/trump-market-impact-analyzer-dbjvu5"
 APP_DIR="$HOME/trump-market-monitor"
 
+if ! command -v apt-get &> /dev/null; then
+  echo "FEHLER: Dieses Skript unterstuetzt nur Debian/Ubuntu-Images (braucht apt-get)."
+  echo "Oracle Cloud bietet bei der VM-Erstellung auch Oracle-Linux-Images an (dnf/firewalld) -"
+  echo "bitte stattdessen ein Ubuntu-Image waehlen (siehe README-Anleitung)."
+  exit 1
+fi
+
 echo "== [1/4] Docker installieren =="
 if ! command -v docker &> /dev/null; then
   sudo apt-get update -y
   sudo apt-get install -y ca-certificates curl gnupg
   sudo install -m 0755 -d /etc/apt/keyrings
-  curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+  # Kein Pipe von curl direkt in gpg: unter "set -o pipefail" wuerde ein
+  # Netzwerkfehler von curl sonst durch den Exit-Code von gpg maskiert und
+  # stillschweigend ein leerer/kaputter Keyring geschrieben.
+  curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /tmp/docker.gpg
+  sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg /tmp/docker.gpg
+  rm -f /tmp/docker.gpg
   sudo chmod a+r /etc/apt/keyrings/docker.gpg
   echo \
     "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo "$VERSION_CODENAME") stable" \

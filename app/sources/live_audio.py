@@ -25,6 +25,17 @@ from app.sources.base import Source
 
 logger = logging.getLogger(__name__)
 
+YTDLP_EXTRACT_TIMEOUT_SECONDS = 30
+
+
+def _safe_remove(path: str | None):
+    if not path:
+        return
+    try:
+        os.remove(path)
+    except OSError:
+        pass
+
 
 class LiveAudioSource(Source):
     name = "live_audio"
@@ -62,6 +73,7 @@ class LiveAudioSource(Source):
 
         results: list[RawStatement] = []
         for stream_url in self.stream_urls:
+            chunk_path = None
             try:
                 chunk_path = await self._capture_chunk(stream_url)
                 if chunk_path is None:
@@ -69,7 +81,6 @@ class LiveAudioSource(Source):
                 text = await asyncio.get_running_loop().run_in_executor(
                     None, self._transcribe, chunk_path
                 )
-                os.remove(chunk_path)
                 text = text.strip()
                 if not text:
                     continue
@@ -89,6 +100,10 @@ class LiveAudioSource(Source):
                     stream_url,
                     exc_info=True,
                 )
+            finally:
+                # Immer aufraeumen, auch wenn die Transkription fehlschlaegt -
+                # sonst sammeln sich bei wiederholten Fehlern Temp-Dateien an.
+                _safe_remove(chunk_path)
         return results
 
     async def _capture_chunk(self, stream_url: str) -> str | None:
@@ -102,11 +117,27 @@ class LiveAudioSource(Source):
                 info = ydl.extract_info(stream_url, download=False)
                 return info.get("url")
 
-        audio_url = await loop.run_in_executor(None, _extract_audio_url)
+        try:
+            # Timeout schuetzt davor, dass ein haengender yt-dlp-Aufruf (totes
+            # Stream/Netzwerk-Stall) diesen Poll-Zyklus unbegrenzt blockiert. Der
+            # zugrundeliegende Thread selbst laesst sich nicht abbrechen (Python-
+            # Limitation), laeuft im Hintergrund aber irgendwann von selbst aus.
+            audio_url = await asyncio.wait_for(
+                loop.run_in_executor(None, _extract_audio_url),
+                timeout=YTDLP_EXTRACT_TIMEOUT_SECONDS,
+            )
+        except asyncio.TimeoutError:
+            logger.warning(
+                "yt-dlp-Extraktion fuer %s hat zu lange gedauert (>%ss), ueberspringe.",
+                stream_url,
+                YTDLP_EXTRACT_TIMEOUT_SECONDS,
+            )
+            return None
         if not audio_url:
             return None
 
-        tmp_path = tempfile.mktemp(suffix=".wav")
+        fd, tmp_path = tempfile.mkstemp(suffix=".wav")
+        os.close(fd)
         cmd = [
             "ffmpeg", "-y", "-i", audio_url,
             "-t", str(self.chunk_seconds),
@@ -120,9 +151,11 @@ class LiveAudioSource(Source):
             await asyncio.wait_for(proc.wait(), timeout=self.chunk_seconds + 30)
         except asyncio.TimeoutError:
             proc.kill()
+            _safe_remove(tmp_path)
             return None
 
         if proc.returncode != 0 or not os.path.exists(tmp_path):
+            _safe_remove(tmp_path)
             return None
         return tmp_path
 

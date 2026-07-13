@@ -44,9 +44,17 @@ class Classification:
     is_market_relevant: bool
     sentiment: str  # "positive" | "negative" | "neutral"
     confidence: float
-    tickers: list = field(default_factory=list)
+    # Liste von {"ticker": str, "direction": "long"|"short", "reasoning": str}
+    ticker_calls: list = field(default_factory=list)
     sectors: list = field(default_factory=list)
     reasoning: str = ""
+    # Falls diese Aussage im Kern zu einem kuerzlich bereits alarmierten Thema
+    # gehoert: dessen Statement-ID, sonst None. Siehe app/classifier.py.
+    related_topic_id: Optional[int] = None
+    # Nur relevant wenn related_topic_id gesetzt ist: true = trotz gleichem Thema
+    # so bedeutsame Verschaerfung/neue Entwicklung, dass ein erneuter Alert
+    # gerechtfertigt ist.
+    is_major_escalation: bool = False
 
 
 @contextmanager
@@ -127,7 +135,7 @@ def insert_statement(
                 int(classification.is_market_relevant) if classification else None,
                 classification.sentiment if classification else None,
                 classification.confidence if classification else None,
-                json.dumps(classification.tickers) if classification else None,
+                json.dumps(classification.ticker_calls) if classification else None,
                 json.dumps(classification.sectors) if classification else None,
                 classification.reasoning if classification else None,
                 duplicate_of_id,
@@ -143,6 +151,19 @@ def mark_alert_sent(statement_id: int):
         )
 
 
+def _normalize_ticker_calls(raw_tickers: list) -> list[dict]:
+    # Vor der Einfuehrung von Long/Short-Empfehlungen wurden hier einfache
+    # Ticker-Strings gespeichert. Alte, aus einem GitHub-Actions-Cache
+    # ueberlebende Zeilen sollen die Anzeige nicht zum Absturz bringen.
+    normalized = []
+    for t in raw_tickers:
+        if isinstance(t, str):
+            normalized.append({"ticker": t, "direction": None, "reasoning": ""})
+        else:
+            normalized.append(t)
+    return normalized
+
+
 def get_recent(limit: int = 50, only_relevant: bool = False) -> list[dict]:
     query = "SELECT * FROM statements"
     if only_relevant:
@@ -153,7 +174,51 @@ def get_recent(limit: int = 50, only_relevant: bool = False) -> list[dict]:
         result = []
         for row in rows:
             d = dict(row)
-            d["tickers"] = json.loads(d["tickers"]) if d["tickers"] else []
+            d["tickers"] = _normalize_ticker_calls(json.loads(d["tickers"]) if d["tickers"] else [])
+            d["sectors"] = json.loads(d["sectors"]) if d["sectors"] else []
+            result.append(d)
+        return result
+
+
+def get_recent_alerted(hours: int = 24, limit: int = 20) -> list[dict]:
+    """Kuerzlich alarmierte Statements - dient als Kontext beim Klassifizieren
+    neuer Statements, damit Claude erkennen kann, ob eine neue Meldung im Kern
+    zu einem heute schon gemeldeten Thema gehoert (siehe app/classifier.py)."""
+    cutoff = time.time() - hours * 3600
+    with get_conn() as conn:
+        rows = conn.execute(
+            """
+            SELECT id, text, sentiment FROM statements
+            WHERE alert_sent = 1 AND ingested_at >= ?
+            ORDER BY ingested_at DESC
+            LIMIT ?
+            """,
+            (cutoff, limit),
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def get_pending_alerts(hours: int = 24) -> list[dict]:
+    """Statements, die als marktrelevant klassifiziert wurden, aber nie tatsaechlich
+    alarmiert wurden (z.B. weil der Prozess mitten im Lauf abgebrochen wurde, bevor
+    der Telegram-Versand drankam, oder weil der Versand selbst fehlgeschlagen ist).
+    Wird bei jedem Zyklus erneut versucht, damit ein abgebrochener Lauf keine
+    marktrelevante Meldung stillschweigend verliert."""
+    cutoff = time.time() - hours * 3600
+    with get_conn() as conn:
+        rows = conn.execute(
+            """
+            SELECT * FROM statements
+            WHERE is_market_relevant = 1 AND alert_sent = 0 AND duplicate_of_id IS NULL
+                AND ingested_at >= ?
+            ORDER BY ingested_at ASC
+            """,
+            (cutoff,),
+        ).fetchall()
+        result = []
+        for row in rows:
+            d = dict(row)
+            d["tickers"] = _normalize_ticker_calls(json.loads(d["tickers"]) if d["tickers"] else [])
             d["sectors"] = json.loads(d["sectors"]) if d["sectors"] else []
             result.append(d)
         return result
