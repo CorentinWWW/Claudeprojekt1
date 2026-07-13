@@ -11,13 +11,20 @@ def _bool(name: str, default: bool) -> bool:
     return val.strip().lower() in ("1", "true", "yes", "on")
 
 
-ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
-CLAUDE_MODEL = os.getenv("CLAUDE_MODEL", "claude-sonnet-5")
+def _str(name: str, default: str = "") -> str:
+    # .strip() faengt versehentlich mitkopierte Zeilenumbrueche/Leerzeichen ab
+    # (z.B. beim Einfuegen eines Tokens aus Telegram/der Console in GitHub Secrets) -
+    # ohne das wuerden ungueltige Zeichen erst spaeter als kryptischer URL-Fehler auftauchen.
+    return os.getenv(name, default).strip()
+
+
+ANTHROPIC_API_KEY = _str("ANTHROPIC_API_KEY")
+CLAUDE_MODEL = _str("CLAUDE_MODEL", "claude-sonnet-5")
 CLAUDE_MAX_RETRIES = int(os.getenv("CLAUDE_MAX_RETRIES", "3"))
 CLAUDE_TIMEOUT_SECONDS = float(os.getenv("CLAUDE_TIMEOUT_SECONDS", "30"))
 
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
+TELEGRAM_BOT_TOKEN = _str("TELEGRAM_BOT_TOKEN")
+TELEGRAM_CHAT_ID = _str("TELEGRAM_CHAT_ID")
 # Kurze Nachricht beim Start schicken, damit sofort sichtbar ist ob Telegram korrekt verbunden ist
 TELEGRAM_STARTUP_NOTICE = _bool("TELEGRAM_STARTUP_NOTICE", True)
 
@@ -36,10 +43,10 @@ ENABLE_NEWS = _bool("ENABLE_NEWS", True)
 ENABLE_TRUTH_SOCIAL = _bool("ENABLE_TRUTH_SOCIAL", True)
 ENABLE_LIVE_AUDIO = _bool("ENABLE_LIVE_AUDIO", False)
 
-TRUTH_SOCIAL_HANDLE = os.getenv("TRUTH_SOCIAL_HANDLE", "realDonaldTrump")
+TRUTH_SOCIAL_HANDLE = _str("TRUTH_SOCIAL_HANDLE", "realDonaldTrump")
 # Optional: eigenes Bearer-Token (z.B. aus einer eingeloggten Browser-Session),
 # falls die oeffentlichen Endpunkte ohne Auth nicht mehr funktionieren.
-TRUTH_SOCIAL_BEARER_TOKEN = os.getenv("TRUTH_SOCIAL_BEARER_TOKEN", "")
+TRUTH_SOCIAL_BEARER_TOKEN = _str("TRUTH_SOCIAL_BEARER_TOKEN")
 # Fallback: falls der direkte (unauthentifizierte) API-Call fehlschlaegt, mit einem
 # echten headless Chromium die Profilseite laden und die Netzwerk-Antworten der
 # Seite selbst mitschneiden (robuster gegen Bot-Blocking als ein nackter HTTP-Call,
