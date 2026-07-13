@@ -1,0 +1,46 @@
+name: Trump Market Monitor
+
+on:
+  schedule:
+    # Alle 30 Minuten. Bei oeffentlichen Repos sind GitHub-Actions-Minuten
+    # unbegrenzt, dann kann man hier z.B. auf */15 verkuerzen.
+    - cron: "*/30 * * * *"
+  workflow_dispatch: {}
+
+jobs:
+  poll:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      # Haelt den Dedup-/Duplikat-Status ueber mehrere Laeufe hinweg am Leben,
+      # sonst wuerde jede Meldung bei jedem Lauf erneut alarmiert werden.
+      - name: Restore statement DB
+        uses: actions/cache@v4
+        with:
+          path: trump_monitor.db
+          key: trump-monitor-db-${{ github.run_id }}
+          restore-keys: |
+            trump-monitor-db-
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run one poll cycle
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          TELEGRAM_STARTUP_NOTICE: "false"
+          ENABLE_LIVE_AUDIO: "false"
+          # Playwright/Chromium ist hier bewusst nicht installiert, um Laeufe
+          # kurz zu halten - Truth Social nutzt in diesem Modus nur den
+          # direkten (leichten) API-Call, ohne Browser-Fallback.
+          TRUTH_SOCIAL_BROWSER_FALLBACK: "false"
+        run: python run_once.py

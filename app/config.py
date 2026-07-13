@@ -80,7 +80,7 @@ def validate() -> tuple[list[str], list[str]]:
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         warnings.append(
             "TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID nicht gesetzt - es werden keine "
-            "Telegram-Alerts verschickt, nur das Dashboard wird befuellt."
+            "Telegram-Alerts verschickt, Statements werden nur in der DB erfasst."
         )
 
     if not ENABLE_NEWS and not ENABLE_TRUTH_SOCIAL and not ENABLE_LIVE_AUDIO:

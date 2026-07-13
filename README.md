@@ -158,11 +158,46 @@ Chunks (Standard 30s), keine Wort-für-Wort-Live-Transkription.
 
 ## Dauerbetrieb (24/7)
 
-Dieses Projekt läuft als lang laufender Python-Prozess (Polling-Loop + Webserver in
-einem). Für echten Dauerbetrieb muss es auf einer permanenten Umgebung deployed
-werden - vier fertige Optionen liegen bei:
+Es gibt zwei grundsätzlich verschiedene Betriebsarten:
 
-### Option 0: Oracle Cloud Free Tier (kostenlos, empfohlen)
+- **Einfachster Weg - GitHub Actions** (kein Account/Server/Kreditkarte nötig,
+  nur Telegram-Alerts, kein Dashboard, Polling alle 30 Min statt 60s)
+- **Voller Funktionsumfang** - Dashboard, 60s-Polling, Truth-Social-Browser-Fallback,
+  Live-Audio - braucht einen (kostenlosen) Server (z.B. Oracle Cloud Free Tier)
+
+### Einfachster Weg: GitHub Actions (empfohlen zum Ausprobieren)
+
+Kein eigener Server, keine Kreditkarte, keine SSH/Firewall-Konfiguration - nur dieses
+GitHub-Repo. Ein Workflow (`.github/workflows/monitor.yml`) führt alle 30 Minuten
+automatisch einen Poll-Zyklus aus (`run_once.py`: alle Quellen abfragen, klassifizieren,
+bei Relevanz Telegram-Alert schicken) und beendet sich wieder. Der Dedup-Status
+zwischen Läufen wird über den GitHub-Actions-Cache mitgeschleppt.
+
+1. Repo auf GitHub forken/nutzen (dieser Branch: `claude/trump-market-impact-analyzer-dbjvu5`)
+2. **Settings → Secrets and variables → Actions → New repository secret** und dort anlegen:
+   - `ANTHROPIC_API_KEY` (Pflicht)
+   - `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` (optional, aber empfohlen für Alerts)
+3. Fertig - der Workflow läuft automatisch alle 30 Min. Zum sofortigen Testen:
+   Tab **Actions** → *Trump Market Monitor* → **Run workflow** (manueller Trigger).
+4. Ergebnis im Actions-Log einsehbar (welche Statements klassifiziert wurden), Alerts
+   kommen per Telegram.
+
+**Wichtig bei privaten Repos:** GitHub gibt kostenlosen Accounts ca. 2000 Actions-Minuten/
+Monat (bei öffentlichen Repos unbegrenzt). Ein Lauf alle 30 Min bleibt im Rahmen; bei
+Bedarf im Workflow auf `*/15` verkürzen, wenn das Repo öffentlich ist oder genug
+Freiminuten übrig sind.
+
+Kein Dashboard in diesem Modus - Telegram ist der Alert-Kanal, `Actions`-Tab das Log.
+Live-Audio und der Truth-Social-Browser-Fallback sind hier bewusst deaktiviert (siehe
+`monitor.yml`), damit jeder Lauf kurz und günstig bleibt.
+
+### Voller Funktionsumfang: eigener (kostenloser) Server
+
+Für Dashboard, dauerhaftes 60s-Polling und den Truth-Social-Browser-Fallback braucht es
+einen durchlaufenden Prozess statt eines Cron-Jobs - dafür eignet sich ein kostenloser
+Oracle-Cloud-VPS:
+
+### Option 0: Oracle Cloud Free Tier (kostenlos, voller Funktionsumfang)
 
 Oracle Cloud bietet einen "Always Free"-VPS, der dauerhaft (nicht nur als Trial)
 kostenlos bleibt. So richtest du ihn ein:
