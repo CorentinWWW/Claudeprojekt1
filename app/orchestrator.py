@@ -5,6 +5,8 @@ import time
 from app.classifier import classify
 from app.config import (
     ALERT_CONFIDENCE_THRESHOLD,
+    ALERT_DIGEST_THRESHOLD,
+    DEDUP_SIMILARITY_THRESHOLD,
     ENABLE_LIVE_AUDIO,
     ENABLE_NEWS,
     ENABLE_TRUTH_SOCIAL,
@@ -19,7 +21,8 @@ from app.sources.live_audio import LiveAudioSource
 from app.sources.news_gdelt import GdeltNewsSource
 from app.sources.news_rss import RssNewsSource
 from app.sources.truth_social import TruthSocialSource
-from app.telegram_alert import send_alert, send_startup_notice
+from app.telegram_alert import send_alert, send_digest_alert, send_startup_notice
+from app.util import text_similarity
 
 logger = logging.getLogger(__name__)
 
@@ -52,33 +55,57 @@ def build_sources():
     return sources
 
 
-async def process_statement(raw, semaphore: asyncio.Semaphore):
-    if is_known(raw.source_id):
-        return
+def _partition_duplicates(raw_statements: list):
+    """Trennt eine Charge frischer Statements in (zu klassifizierende, Duplikate).
 
-    duplicate = find_recent_duplicate(raw.text)
-    if duplicate is not None:
-        # Gleiche reale Aussage wurde bereits (evtl. von einer anderen Quelle)
-        # klassifiziert - nicht erneut Claude bemuehen oder erneut alarmieren.
-        insert_statement(
-            raw,
-            None,
-            duplicate_of_id=duplicate["id"],
-        )
-        logger.info(
-            "[%s] Duplikat von Statement #%d erkannt, ueberspringe Klassifikation: %s",
-            raw.source,
-            duplicate["id"],
-            raw.text[:80],
-        )
-        return
+    Prueft nicht nur gegen bereits in der DB gespeicherte Statements, sondern auch
+    gegeneinander INNERHALB der Charge: bei vielen gleichzeitig eintreffenden
+    Meldungen (z.B. dieselbe Agenturmeldung, von zig Portalen wortgleich
+    syndiziert) wuerde ein reiner DB-Check das nicht erkennen, weil zum
+    Pruefzeitpunkt noch keine der Geschwister-Meldungen in der DB steht - das
+    fuehrte in der Praxis dazu, dass ein einzelner Nachrichtenschub dieselbe
+    Meldung mehrfach alarmiert hat.
 
+    Gibt (to_classify, duplicate_pairs) zurueck: duplicate_pairs enthaelt
+    (duplicate_raw, primary_raw) - primary_raw ist entweder ein Element aus
+    to_classify (noch nicht in der DB) oder hat bereits eine DB-ID (siehe Aufrufer).
+    """
+    to_classify = []
+    duplicate_pairs = []  # (duplicate_raw, primary_raw_or_dbrow)
+    batch: list[tuple] = []  # (text, raw) bereits akzeptierter Statements dieser Charge
+
+    for raw in raw_statements:
+        if is_known(raw.source_id):
+            continue
+
+        db_duplicate = find_recent_duplicate(raw.text)
+        if db_duplicate is not None:
+            duplicate_pairs.append((raw, db_duplicate))
+            continue
+
+        batch_duplicate = None
+        for seen_text, seen_raw in batch:
+            if text_similarity(raw.text, seen_text) >= DEDUP_SIMILARITY_THRESHOLD:
+                batch_duplicate = seen_raw
+                break
+
+        if batch_duplicate is not None:
+            duplicate_pairs.append((raw, batch_duplicate))
+            continue
+
+        to_classify.append(raw)
+        batch.append((raw.text, raw))
+
+    return to_classify, duplicate_pairs
+
+
+async def _classify_and_store(raw, semaphore: asyncio.Semaphore):
     async with semaphore:
         try:
             classification = await classify(raw.text)
         except Exception:
             logger.exception("Klassifikation fehlgeschlagen fuer: %s", raw.text[:80])
-            return
+            return None
 
     statement_id = insert_statement(raw, classification)
     logger.info(
@@ -90,14 +117,27 @@ async def process_statement(raw, semaphore: asyncio.Semaphore):
         classification.tickers,
         raw.text[:100],
     )
+    return (raw, classification, statement_id)
 
-    if (
-        classification.is_market_relevant
-        and classification.confidence >= ALERT_CONFIDENCE_THRESHOLD
-    ):
-        sent = await send_alert(raw, classification)
+
+async def _send_alerts(alert_worthy: list[tuple]):
+    """Schickt einzelne Alerts bei wenigen Treffern, sonst eine gebuendelte
+    Sammel-Nachricht - verhindert eine Alert-Flut bei einem Nachrichtenschub
+    (z.B. wenn ploetzlich viele echte, unterschiedliche Meldungen gleichzeitig
+    marktrelevant sind)."""
+    if not alert_worthy:
+        return
+
+    if len(alert_worthy) <= ALERT_DIGEST_THRESHOLD:
+        for raw, classification, statement_id in alert_worthy:
+            sent = await send_alert(raw, classification)
+            if sent:
+                mark_alert_sent(statement_id)
+    else:
+        sent = await send_digest_alert(alert_worthy)
         if sent:
-            mark_alert_sent(statement_id)
+            for _, _, statement_id in alert_worthy:
+                mark_alert_sent(statement_id)
 
 
 async def poll_once(sources, semaphore: asyncio.Semaphore):
@@ -118,9 +158,35 @@ async def poll_once(sources, semaphore: asyncio.Semaphore):
         if not raw_statements:
             continue
 
-        await asyncio.gather(
-            *(process_statement(raw, semaphore) for raw in raw_statements)
+        to_classify, duplicate_pairs = _partition_duplicates(raw_statements)
+
+        results = await asyncio.gather(
+            *(_classify_and_store(raw, semaphore) for raw in to_classify)
         )
+        results = [r for r in results if r is not None]
+        id_by_source_id = {r[0].source_id: r[2] for r in results}
+
+        for dup_raw, primary in duplicate_pairs:
+            # primary ist entweder eine DB-Row (dict, hat "id") oder ein RawStatement
+            # aus derselben Charge (dessen DB-ID erst jetzt, nach der Klassifikation, bekannt ist).
+            primary_id = primary["id"] if isinstance(primary, dict) else id_by_source_id.get(primary.source_id)
+            if primary_id is None:
+                # Primary-Statement konnte nicht klassifiziert werden (z.B. Claude-Fehler) -
+                # Duplikat einfach verwerfen, es wurde bereits geloggt.
+                continue
+            insert_statement(dup_raw, None, duplicate_of_id=primary_id)
+            logger.info(
+                "[%s] Duplikat von Statement #%d erkannt, ueberspringe Klassifikation: %s",
+                dup_raw.source,
+                primary_id,
+                dup_raw.text[:80],
+            )
+
+        alert_worthy = [
+            r for r in results
+            if r[1].is_market_relevant and r[1].confidence >= ALERT_CONFIDENCE_THRESHOLD
+        ]
+        await _send_alerts(alert_worthy)
 
 
 async def _poll_loop():

@@ -1,6 +1,7 @@
 import asyncio
 import html
 import logging
+from collections import Counter
 
 import httpx
 
@@ -10,6 +11,8 @@ from app.db import Classification, RawStatement
 logger = logging.getLogger(__name__)
 
 SENTIMENT_EMOJI = {"positive": "🟢", "negative": "🔴", "neutral": "⚪"}
+TELEGRAM_MAX_LENGTH = 4096
+DIGEST_MAX_DETAIL_LINES = 15
 
 
 def _format_message(raw: RawStatement, classification: Classification) -> str:
@@ -79,6 +82,43 @@ async def _send(text: str, retries: int = 2) -> bool:
 
 async def send_alert(raw: RawStatement, classification: Classification) -> bool:
     return await _send(_format_message(raw, classification))
+
+
+def _format_digest(items: list[tuple[RawStatement, Classification, int]]) -> str:
+    sentiment_counts = Counter(c.sentiment for _, c, _ in items)
+    counts_str = " ".join(
+        f"{SENTIMENT_EMOJI.get(s, '⚪')} {n}" for s, n in sentiment_counts.items()
+    )
+    header = (
+        f"📊 <b>{len(items)} marktrelevante Trump-Meldungen in diesem Zyklus</b>\n{counts_str}"
+    )
+
+    sorted_items = sorted(items, key=lambda item: item[1].confidence, reverse=True)
+    lines = []
+    for raw, classification, _ in sorted_items[:DIGEST_MAX_DETAIL_LINES]:
+        emoji = SENTIMENT_EMOJI.get(classification.sentiment, "⚪")
+        tickers = ", ".join(classification.tickers) or "–"
+        title = html.escape(raw.text[:120])
+        lines.append(f"{emoji} {title} (Ticker: {html.escape(tickers)})")
+
+    remaining = len(items) - len(lines)
+    body = "\n".join(lines)
+    if remaining > 0:
+        body += f"\n… und {remaining} weitere (Details im Log der Ausfuehrung)"
+
+    text = f"{header}\n\n{body}"
+    if len(text) > TELEGRAM_MAX_LENGTH:
+        text = text[: TELEGRAM_MAX_LENGTH - 20] + "\n…(gekürzt)"
+    return text
+
+
+async def send_digest_alert(items: list[tuple[RawStatement, Classification, int]]) -> bool:
+    """Buendelt mehrere gleichzeitig alarmwuerdige Statements (z.B. bei einem
+    ploetzlichen Nachrichtenschub) in einer einzigen Telegram-Nachricht statt
+    einer Flut von Einzelnachrichten."""
+    if not items:
+        return False
+    return await _send(_format_digest(items))
 
 
 async def send_text(text: str) -> bool:
