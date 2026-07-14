@@ -62,6 +62,20 @@ def _short_headline(classification: Classification, raw: RawStatement, max_lengt
     return (cut or text[:max_length]) + "…"
 
 
+def _linkable_url(url: Optional[str]) -> Optional[str]:
+    """Attribut-escapte URL fuer ein <a href> - oder None, wenn nicht verlinkbar.
+
+    Nur http(s): ein exotisches Schema (z.B. javascript: aus einer manipulierten
+    Quelle) soll gar nicht erst im Markup landen; ausserdem lehnt Telegram Nachrichten
+    mit unbekannten URL-Protokollen KOMPLETT ab - der Alert waere dann verloren.
+    Absurd lange URLs (> 1000 Zeichen; echte Artikel-URLs liegen weit darunter)
+    werden verworfen statt verlinkt - sonst muesste das Laengen-Sicherheitsnetz in
+    _format_message die Ueberschrift opfern, nur um die URL unterzubringen."""
+    if not url or not url.startswith(("http://", "https://")) or len(url) > 1000:
+        return None
+    return html.escape(url, quote=True)
+
+
 def _format_message(raw: RawStatement, classification: Classification) -> str:
     emoji = SENTIMENT_EMOJI.get(classification.sentiment, "⚪")
     escalation_prefix = (
@@ -70,33 +84,40 @@ def _format_message(raw: RawStatement, classification: Classification) -> str:
         else ""
     )
     ticker_lines = _format_ticker_lines(classification.ticker_calls)
+    url = _linkable_url(raw.url)
+
+    def assemble(escaped_headline: str) -> str:
+        # Anchor wird immer als Ganzes um die (ggf. gekuerzte) Ueberschrift gelegt,
+        # nie mitgekuerzt - ein zerrissenes <a>-Tag wuerde Telegram die GESAMTE
+        # Nachricht ablehnen lassen.
+        inner = f'<a href="{url}">{escaped_headline}</a>' if url else escaped_headline
+        return f"{emoji} {classification.confidence:.0%} — {inner}\n{ticker_lines}"
+
     # Auf Nutzerwunsch: die Ueberschrift wird NICHT um ihrer selbst willen abgekuerzt
     # (voller Begruendungstext). _short_headline() truncatet nur, wenn der Text den
     # verbleibenden Platz in der Nachricht tatsaechlich sprengen wuerde - ein reines
     # Sicherheitsnetz fuer einen pathologisch langen Begruendungstext, das im
     # Normalfall (System-Prompt verlangt 1-2 Saetze) nie greift, weil max_length dann
-    # weit ueber jeder realistischen Textlaenge liegt.
-    # Vorab-Budget (Normalfall): +1 fuer die von _short_headline() ggf. angehaengte
-    # Ellipse. Reicht bei ganz normalem Text locker, verhindert aber NICHT, dass
-    # html.escape() den Text nachtraeglich nochmal deutlich verlaengert, falls er
-    # ungewoehnlich viele "<"/"&"/etc. enthaelt (jedes Zeichen kann bis zu 5 Zeichen
-    # werden - "<" -> "&lt;") - dafuer gibt es den harten Notfall-Schnitt danach.
-    fixed_overhead = len(f"{emoji} {classification.confidence:.0%} — \n{ticker_lines}") + len(escalation_prefix)
+    # weit ueber jeder realistischen Textlaenge liegt. +1 fuer die ggf. angehaengte
+    # Ellipse; das Escaping-Aufblaehen ("<" -> "&lt;") faengt der Notfall-Schnitt.
+    fixed_overhead = len(assemble("")) + len(escalation_prefix)
     max_headline_len = max(50, TELEGRAM_MAX_LENGTH - fixed_overhead - 1)
     headline = html.escape(escalation_prefix + _short_headline(classification, raw, max_headline_len))
-    text = f"{emoji} {classification.confidence:.0%} — {headline}\n{ticker_lines}"
+    text = assemble(headline)
 
     if len(text) > TELEGRAM_MAX_LENGTH:
         # Absoluter Notfall (z.B. Begruendungstext voller "<"/"&", die durchs
-        # Escaping stark aufblaehen): bereits escapten Ueberschrift-String hart auf
-        # den tatsaechlich verbleibenden Platz kuerzen. Im Extremfall entsteht dabei
-        # ein abgeschnittenes HTML-Entity-Fragment (z.B. "&am" statt "&amp;") - das
-        # zeigt Telegram als harmlosen literalen Text, bricht aber (anders als ein
-        # abgeschnittenes Tag) niemals die HTML-Struktur der Nachricht, da hier keine
-        # Tags im Spiel sind.
+        # Escaping stark aufblaehen): den bereits escapten Ueberschrift-Text hart
+        # kuerzen und den Anchor neu darum bauen. Im Extremfall entsteht dabei ein
+        # abgeschnittenes HTML-Entity-Fragment (z.B. "&am" statt "&amp;") - das zeigt
+        # Telegram als harmlosen literalen Text, die Tag-Struktur bleibt intakt.
         overflow = len(text) - TELEGRAM_MAX_LENGTH
         headline = headline[:-overflow] if overflow < len(headline) else ""
-        text = f"{emoji} {classification.confidence:.0%} — {headline}\n{ticker_lines}"
+        text = assemble(headline)
+    if len(text) > TELEGRAM_MAX_LENGTH:
+        # Selbst mit leerer Ueberschrift zu lang (pathologisch lange URL): Link weg.
+        url = None
+        text = assemble("")
     return text
 
 
@@ -110,7 +131,10 @@ async def _send(text: str, retries: int = 2) -> bool:
         "chat_id": TELEGRAM_CHAT_ID,
         "text": text,
         "parse_mode": "HTML",
-        "disable_web_page_preview": False,
+        # Ueberschriften sind jetzt auf den Quellartikel verlinkt - ohne das hier
+        # wuerde Telegram unter jeder Nachricht eine grosse Link-Vorschau-Karte
+        # anzeigen und die bewusst kompakten Alerts wieder aufblaehen.
+        "disable_web_page_preview": True,
     }
 
     attempt = 0
@@ -163,6 +187,11 @@ def _format_digest(items: list[tuple[RawStatement, Classification, int]]) -> str
     for raw, classification, _ in sorted_items[:DIGEST_MAX_DETAIL_LINES]:
         emoji = SENTIMENT_EMOJI.get(classification.sentiment, "⚪")
         headline = html.escape(_short_headline(classification, raw, max_length=_DIGEST_HEADLINE_MAX_LENGTH))
+        url = _linkable_url(raw.url)
+        if url:
+            # Anchor pro ganzer Zeile - die Budget-Schleife unten verwirft nur ganze
+            # Zeilen, ein <a>-Tag kann also nie zerrissen werden.
+            headline = f'<a href="{url}">{headline}</a>'
         ticker_str = _format_ticker_calls_compact(classification.ticker_calls)
         candidate_lines.append(f"{emoji} {classification.confidence:.0%} {headline} — {ticker_str}")
 

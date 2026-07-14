@@ -111,11 +111,59 @@ def test_ticker_sorting():
     check("Sortierung: volle Ueberschrift enthalten", "Zoelle auf Halbleiter." in text)
 
 
+def test_linked_headline():
+    import app.telegram_alert as ta
+    from app.db import Classification, RawStatement
+
+    tc = [{"ticker": "TSM", "direction": "short", "confidence": 0.9, "reasoning": "y"}]
+    cls = Classification(is_market_relevant=True, sentiment="negative", confidence=0.85,
+                         reasoning="Zoelle auf Halbleiter.", ticker_calls=tc)
+
+    raw = RawStatement(source="t", source_id="l1", text="x", url="https://example.com/a?x=1&y=2")
+    text = ta._format_message(raw, cls)
+    check("Link: Ueberschrift ist Anchor auf den Quellartikel (URL attribut-escaped)",
+          '<a href="https://example.com/a?x=1&amp;y=2">' in text)
+    check("Link: Anchor sauber geschlossen", text.count("<a ") == 1 and text.count("</a>") == 1)
+
+    raw_no = RawStatement(source="t", source_id="l2", text="x")
+    check("Link: ohne URL kein Anchor", "<a " not in ta._format_message(raw_no, cls))
+
+    raw_js = RawStatement(source="t", source_id="l3", text="x", url="javascript:alert(1)")
+    check("Link: javascript:-URL wird NICHT verlinkt", "<a " not in ta._format_message(raw_js, cls))
+
+    raw_huge = RawStatement(source="t", source_id="l4", text="x", url="https://e.com/" + "p" * 5000)
+    t_huge = ta._format_message(raw_huge, cls)
+    check("Link: absurd lange URL -> kein Link, aber Ueberschrift bleibt erhalten",
+          "<a " not in t_huge and "Zoelle auf Halbleiter." in t_huge)
+
+    cls_adv = Classification(is_market_relevant=True, sentiment="negative", confidence=0.8,
+                             reasoning="<" * 6000, ticker_calls=tc)
+    t_adv = ta._format_message(
+        RawStatement(source="t", source_id="l5", text="x", url="https://example.com/a"), cls_adv
+    )
+    check("Link adversarial: <= TELEGRAM_MAX_LENGTH und Anchor-Tags paarig (nie zerrissen)",
+          len(t_adv) <= ta.TELEGRAM_MAX_LENGTH and t_adv.count("<a ") == t_adv.count("</a>"))
+
+    items = [
+        (
+            RawStatement(source="t", source_id=f"dl{i}", text=f"M{i}", url=f"https://example.com/{i}"),
+            Classification(is_market_relevant=True, sentiment="negative", confidence=0.9,
+                           reasoning=f"Begruendung {i}.", ticker_calls=tc),
+            i,
+        )
+        for i in range(5)
+    ]
+    d = ta._format_digest(items)
+    check("Digest: jede Zeile auf ihren Artikel verlinkt, Tags paarig",
+          d.count("<a ") == 5 and d.count("</a>") == 5)
+
+
 def main():
     test_length_safety_net()
     test_html_injection_escaped()
     test_ticker_confidence_parsing()
     test_ticker_sorting()
+    test_linked_headline()
 
     print()
     if failures:

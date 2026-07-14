@@ -1,6 +1,9 @@
 import asyncio
+import datetime
 import logging
 import time
+
+from anthropic import AuthenticationError, NotFoundError, PermissionDeniedError
 
 from app.classifier import CONTEXT_SNIPPET_MAX_CHARS, DailyCapExceeded, classify
 from app.config import (
@@ -11,6 +14,7 @@ from app.config import (
     ENABLE_NEWS,
     ENABLE_TRUTH_SOCIAL,
     LIVE_AUDIO_STREAM_URLS,
+    MAX_CLASSIFICATIONS_PER_DAY,
     MAX_CONCURRENT_CLASSIFICATIONS,
     POLL_INTERVAL_SECONDS,
     TELEGRAM_STARTUP_NOTICE,
@@ -28,13 +32,20 @@ from app.db import (
     init_db,
     insert_statement,
     mark_alert_sent,
+    try_claim_meta_key,
 )
 from app.sources.live_audio import LiveAudioSource
 from app.sources.news_gdelt import GdeltNewsSource
 from app.sources.news_rss import RssNewsSource
 from app.sources.truth_social import TruthSocialSource
-from app.telegram_alert import send_alert, send_digest_alert, send_startup_notice
+from app.telegram_alert import send_alert, send_digest_alert, send_startup_notice, send_text
 from app.util import text_similarity
+
+# Permanente Konfigurationsfehler der Claude-API: ein kaputter/widerrufener API-Key
+# (401), fehlende Berechtigung (403) oder ein nicht (mehr) existierendes Modell (404)
+# reparieren sich nicht von selbst - im Gegensatz zu transienten Fehlern (Timeouts,
+# 429, 529), die das SDK selbst retried und die den Lauf nicht abbrechen sollen.
+PERMANENT_CLAUDE_ERRORS = (AuthenticationError, PermissionDeniedError, NotFoundError)
 
 logger = logging.getLogger(__name__)
 
@@ -120,6 +131,24 @@ def _partition_duplicates(raw_statements: list):
     return to_classify, duplicate_pairs
 
 
+async def _notify_daily_cap_once():
+    """Schickt beim ERSTEN Zuschlagen des Tages-Limits genau eine Telegram-Notiz -
+    sonst saehe ein Tag mit ausgeschoepftem Kostendeckel fuer den Nutzer exakt so aus
+    wie ein ruhiger Nachrichtentag, obwohl der Monitor in Wahrheit stummgeschaltet
+    ist. try_claim_meta_key ist atomar und ueberlebt einzelne GitHub-Actions-Laeufe,
+    daher hoechstens eine Notiz pro UTC-Tag (schlaegt der Telegram-Versand selbst
+    fehl, wird bewusst nicht erneut versucht - lieber eine verpasste Notiz als eine
+    Wiederholungs-Schleife)."""
+    today = datetime.datetime.now(datetime.timezone.utc).date().isoformat()
+    if try_claim_meta_key(f"cap_notice_{today}"):
+        await send_text(
+            f"⏸️ Tages-Limit von {MAX_CLASSIFICATIONS_PER_DAY} Claude-Analysen erreicht - "
+            "neue Meldungen werden bis Mitternacht (UTC) uebersprungen, damit die "
+            "API-Kosten gedeckelt bleiben. Limit anpassbar ueber "
+            "MAX_CLASSIFICATIONS_PER_DAY (.env bzw. GitHub-Variable)."
+        )
+
+
 async def _classify_and_store(raw, semaphore: asyncio.Semaphore, recent_context: list[dict]):
     async with semaphore:
         try:
@@ -130,7 +159,16 @@ async def _classify_and_store(raw, semaphore: asyncio.Semaphore, recent_context:
             # folgenden Zyklen bis Mitternacht UTC - eine kurze Warnung pro
             # uebersprungenem Statement reicht.
             logger.warning("[%s] %s :: %s", raw.source, exc, raw.text[:80])
+            await _notify_daily_cap_once()
             return None
+        except PERMANENT_CLAUDE_ERRORS:
+            # Bewusst NICHT schlucken: ein kaputter API-Key oder ein geloeschtes
+            # Modell trifft jeden weiteren Call genauso - wuerde das hier wie ein
+            # normaler Einzelfehler behandelt, bliebe der GitHub-Actions-Lauf ewig
+            # gruen, obwohl der Monitor faktisch tot ist (siehe poll_once, das den
+            # Fehler gesammelt weiterwirft, und run_once.py, wo er den Lauf mit
+            # Exitcode != 0 beendet -> GitHub verschickt eine Fehler-Mail).
+            raise
         except Exception:
             logger.exception("Klassifikation fehlgeschlagen fuer: %s", raw.text[:80])
             return None
@@ -268,6 +306,12 @@ async def _resend_pending_alerts():
 async def poll_once(sources, semaphore: asyncio.Semaphore):
     await _resend_pending_alerts()
 
+    # Wird gesetzt, sobald ein permanenter Claude-Konfigurationsfehler (kaputter Key,
+    # geloeschtes Modell) auftaucht - erst NACH Abschluss der kompletten Buchhaltung
+    # (Duplikate speichern, erfolgreiche Alerts senden) weitergeworfen, damit keine
+    # bereits gewonnenen Daten dieses Zyklus verloren gehen.
+    permanent_error: Exception | None = None
+
     for source in sources:
         health = source_health[source.name]
         health["last_poll_at"] = time.time()
@@ -300,6 +344,10 @@ async def poll_once(sources, semaphore: asyncio.Semaphore):
         )
         results = []
         for r in raw_results:
+            if isinstance(r, PERMANENT_CLAUDE_ERRORS):
+                if permanent_error is None:
+                    permanent_error = r
+                continue
             if isinstance(r, BaseException):
                 logger.error("Unerwarteter Fehler bei der Klassifikation im Batch.", exc_info=r)
                 continue
@@ -328,6 +376,20 @@ async def poll_once(sources, semaphore: asyncio.Semaphore):
             if r[1] is not None and r[1].is_market_relevant and r[1].confidence >= ALERT_CONFIDENCE_THRESHOLD
         ]
         await _send_alerts(alert_worthy)
+
+    if permanent_error is not None:
+        # Ein 401/403/404 der Claude-API repariert sich nicht von selbst - nach oben
+        # durchreichen: run_once.py (GitHub-Actions-Modus) beendet den Lauf damit mit
+        # Exitcode != 0 (roter Lauf + Fehler-Mail von GitHub) statt fuer immer gruen
+        # zu bleiben, waehrend kein einziges Statement mehr klassifiziert wird. Im
+        # Dauerbetrieb faengt _poll_loop den Fehler und loggt ihn pro Zyklus als
+        # CRITICAL.
+        logger.critical(
+            "Permanenter Claude-Konfigurationsfehler - ANTHROPIC_API_KEY/CLAUDE_MODEL "
+            "pruefen: %s",
+            permanent_error,
+        )
+        raise permanent_error
 
 
 async def _poll_loop():

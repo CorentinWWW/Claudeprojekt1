@@ -169,7 +169,9 @@ Chunks (Standard 30s), keine Wort-für-Wort-Live-Transkription.
   mit geringerer Sicherheit schaden). Der Telegram-Alert zeigt die vollständige
   Überschrift (nicht abgekürzt) sowie alle Ticker als eigene Zeile mit Long/Short-Wort
   und Prozent-Konfidenz, sortiert nach Konfidenz absteigend - die sicherste
-  Einschätzung steht ganz oben.
+  Einschätzung steht ganz oben. Die Überschrift ist mit dem Quellartikel verlinkt
+  (antippen öffnet den Original-Artikel; nur http/https, Link-Vorschau deaktiviert,
+  damit die Nachricht kompakt bleibt).
 - **Klassifikation standardmäßig seriell** (`MAX_CONCURRENT_CLASSIFICATIONS=1`):
   zwei fast zeitgleich klassifizierte Statements zum selben Thema können sich
   gegenseitig nicht als Duplikat erkennen, weil der Themen-Kontext (Tier 2) erst
@@ -208,7 +210,19 @@ Chunks (Standard 30s), keine Wort-für-Wort-Live-Transkription.
   werden weitere Meldungen bis Mitternacht (UTC) einfach übersprungen (kurze Warnung
   im Log) statt einen weiteren Call auszulösen - der Claude-Selftest beim Start ist
   davon ausgenommen, damit ein ausgeschöpftes Tages-Limit nicht auch noch den
-  Verbindungs-Check und damit den gesamten Monitoring-Start blockiert.
+  Verbindungs-Check und damit den gesamten Monitoring-Start blockiert. Beim ERSTEN
+  Zuschlagen des Limits an einem Tag kommt genau eine Telegram-Notiz - ein
+  stummgeschalteter Monitor sähe sonst exakt so aus wie ein ruhiger Nachrichtentag.
+- **Kein grün-aber-tot**: permanente Claude-Konfigurationsfehler (401 = kaputter/
+  widerrufener API-Key, 403 = fehlende Berechtigung, 404 = gelöschtes/falsches
+  Modell) werden nicht mehr pro Statement geschluckt, sondern beenden den
+  GitHub-Actions-Lauf mit Exitcode ≠ 0 - der Lauf wird rot und GitHub verschickt
+  automatisch eine Fehler-Mail. Transiente Fehler (Timeouts, 429/529) bleiben
+  weiterhin weich: das SDK retried sie, ein einzelner Ausfall bricht nichts ab.
+- **Exakt gepinnte Dependencies**: der GitHub-Actions-Modus installiert die
+  Python-Pakete bei jedem Lauf (48×/Tag) frisch - `requirements.txt` pinnt deshalb
+  exakte, test-verifizierte Versionen, damit ein Breaking-Release eines
+  Upstream-Pakets den Monitor nicht von einer Minute auf die andere töten kann.
 - **Pending-Alert-Wiederholung**: Statements, die als marktrelevant eingestuft aber
   nie tatsächlich alarmiert wurden (z.B. weil ein Lauf mitten drin abgebrochen wurde
   oder Telegram kurzzeitig nicht erreichbar war), werden beim nächsten Zyklus

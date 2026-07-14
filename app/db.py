@@ -41,6 +41,14 @@ CREATE TABLE IF NOT EXISTS classification_calls (
     called_at REAL NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_classification_calls_called_at ON classification_calls(called_at);
+
+-- Kleiner Schluessel-Wert-Speicher fuer "genau einmal"-Zustaende, die einzelne
+-- GitHub-Actions-Laeufe ueberleben muessen (z.B. "Tages-Limit-Hinweis fuer den
+-- 2026-07-14 wurde bereits verschickt", siehe try_claim_meta_key()).
+CREATE TABLE IF NOT EXISTS meta (
+    key TEXT PRIMARY KEY,
+    value TEXT
+);
 """
 
 # Fuer DBs, die vor der Einfuehrung von related_topic_id/is_major_escalation angelegt
@@ -161,6 +169,23 @@ def reserve_classification_call_slot(limit: int) -> bool:
         if reserved:
             conn.execute("DELETE FROM classification_calls WHERE called_at < ?", (now - 2 * 86400,))
     return reserved
+
+
+def try_claim_meta_key(key: str) -> bool:
+    """Atomares "wer zuerst kommt": legt den Key an und gibt True zurueck, wenn er
+    vorher NICHT existierte - False, wenn ihn schon jemand (dieser oder ein anderer
+    Prozess, z.B. ein ueberlappender GitHub-Actions-Lauf) beansprucht hat. INSERT OR
+    IGNORE auf den PRIMARY KEY laeuft als eine SQL-Anweisung und wird von SQLites
+    Schreibsperre serialisiert. Genutzt fuer Aktionen, die genau einmal passieren
+    sollen (z.B. die Telegram-Notiz beim Erreichen des Tages-Limits, mit dem Datum
+    im Key). Die Eintraege sind winzig (einer pro Tag/Ereignis) und werden bewusst
+    nicht aufgeraeumt."""
+    with get_conn() as conn:
+        cur = conn.execute(
+            "INSERT OR IGNORE INTO meta (key, value) VALUES (?, ?)",
+            (key, str(time.time())),
+        )
+        return cur.rowcount > 0
 
 
 def get_known_source_ids(source_ids: list[str]) -> set[str]:
