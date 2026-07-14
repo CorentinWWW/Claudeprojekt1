@@ -153,7 +153,7 @@ async def _classify_and_store(raw, semaphore: asyncio.Semaphore, recent_context:
     if classification.related_topic_id is not None and not classification.is_major_escalation:
         # Gleiches Thema wie eine heute schon alarmierte Meldung, aber keine wesentliche
         # Verschaerfung - nicht erneut alarmieren (nur als Duplikat vermerken).
-        insert_statement(raw, None, duplicate_of_id=classification.related_topic_id)
+        dup_id = insert_statement(raw, None, duplicate_of_id=classification.related_topic_id)
         logger.info(
             "[%s] Themen-Duplikat von Statement #%d (keine wesentliche Eskalation), "
             "kein erneuter Alert: %s",
@@ -161,7 +161,13 @@ async def _classify_and_store(raw, semaphore: asyncio.Semaphore, recent_context:
             classification.related_topic_id,
             raw.text[:80],
         )
-        return None
+        # (raw, None, dup_id) statt bare None: dup_id muss in poll_once ueber
+        # id_by_source_id auffindbar bleiben, sonst wuerden Batch-Geschwister, die
+        # als Tier-1-Textduplikat GENAU DIESES raw erkannt wurden (duplicate_pairs),
+        # ihre primary_id nicht finden und komplett verworfen werden (nicht mal als
+        # eigene Duplikat-Zeile) - siehe alert_worthy-Filter in poll_once, der
+        # classification=None hier korrekt als "nicht alarmwuerdig" behandelt.
+        return (raw, None, dup_id)
 
     statement_id = insert_statement(raw, classification)
     if statement_id is None:
@@ -319,7 +325,7 @@ async def poll_once(sources, semaphore: asyncio.Semaphore):
 
         alert_worthy = [
             r for r in results
-            if r[1].is_market_relevant and r[1].confidence >= ALERT_CONFIDENCE_THRESHOLD
+            if r[1] is not None and r[1].is_market_relevant and r[1].confidence >= ALERT_CONFIDENCE_THRESHOLD
         ]
         await _send_alerts(alert_worthy)
 

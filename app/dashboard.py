@@ -1,4 +1,5 @@
 import asyncio
+import hmac
 import logging
 import time
 
@@ -8,7 +9,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from app import config
-from app.classifier import classify, selftest
+from app.classifier import DailyCapExceeded, classify, selftest
 from app.db import (
     RawStatement,
     get_recent,
@@ -37,7 +38,9 @@ async def require_api_key(x_api_key: str | None = Header(default=None)):
     gesetzt ist. Ohne das waere z.B. /api/test (echter Claude-Call + moeglicher
     Telegram-Alert) fuer jeden erreichbar, der die IP:Port kennt - siehe README zur
     Oracle-Cloud-Anleitung, die einen offenen Port 8000 voraussetzt."""
-    if config.DASHBOARD_API_KEY and x_api_key != config.DASHBOARD_API_KEY:
+    if config.DASHBOARD_API_KEY and not hmac.compare_digest(
+        x_api_key or "", config.DASHBOARD_API_KEY
+    ):
         raise HTTPException(status_code=401, detail="Fehlender oder falscher X-API-Key Header")
 
 
@@ -130,7 +133,13 @@ async def api_test(req: TestRequest):
         source_id=f"manual_test:{time.time()}",
         text=req.text,
     )
-    classification = await classify(raw.text)
+    try:
+        classification = await classify(raw.text)
+    except DailyCapExceeded as exc:
+        # Sonst wuerde ein bereits ausgeschoepftes Tages-Limit hier als undurchsichtiger
+        # 500er landen, statt derselben klaren, erwarteten Meldung wie ueberall sonst
+        # im Code (siehe orchestrator.py: _classify_and_store).
+        raise HTTPException(status_code=429, detail=str(exc)) from exc
     statement_id = insert_statement(raw, classification)
 
     alert_sent = False

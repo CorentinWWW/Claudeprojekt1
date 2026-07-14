@@ -15,7 +15,7 @@ import os
 import sys
 import time
 
-from app.classifier import classify
+from app.classifier import DailyCapExceeded, classify
 from app.config import MAX_CONCURRENT_CLASSIFICATIONS, validate
 from app.db import RawStatement, init_db, insert_statement, mark_alert_sent
 from app.orchestrator import build_sources, poll_once
@@ -55,7 +55,16 @@ async def main() -> int:
             source_id=f"manual_test:{time.time()}",
             text=test_text,
         )
-        classification = await classify(raw.text)
+        try:
+            classification = await classify(raw.text)
+        except DailyCapExceeded as exc:
+            # Erwarteter, kein echter Fehler (z.B. wenn poll_once() oben im selben
+            # Lauf das Tages-Limit schon ausgeschoepft hat) - soll den Workflow-Run
+            # nicht mit einem nicht-Null-Exitcode/rotem Kreuz beenden, obwohl der
+            # eigentliche Poll-Zyklus erfolgreich war. Gleiche Behandlung wie ueberall
+            # sonst im Code (siehe orchestrator.py: _classify_and_store).
+            logger.warning("[manual_test] %s", exc)
+            return 0
         statement_id = insert_statement(raw, classification)
         logger.info(
             "[manual_test] relevant=%s sentiment=%s conf=%.2f ticker_calls=%s",

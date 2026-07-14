@@ -123,13 +123,44 @@ def get_classification_calls_today() -> int:
 
 
 def record_classification_call() -> None:
-    """Vermerkt einen tatsaechlich ausgefuehrten Claude-Klassifikations-Call. Raeumt bei
-    dieser Gelegenheit gleich Eintraege auf, die aelter als 2 Tage sind, statt einen
-    eigenen Cron-/Wartungsjob fuer diese kleine Tabelle zu brauchen."""
+    """Vermerkt einen tatsaechlich ausgefuehrten Claude-Klassifikations-Call OHNE
+    Limit-Pruefung. Nur fuer Faelle gedacht, die nie durch das Tages-Limit blockiert
+    werden duerfen (siehe classify()/selftest() in app/classifier.py), aber trotzdem
+    mitgezaehlt werden sollen. Raeumt bei dieser Gelegenheit gleich Eintraege auf, die
+    aelter als 2 Tage sind, statt einen eigenen Cron-/Wartungsjob fuer diese kleine
+    Tabelle zu brauchen."""
     now = time.time()
     with get_conn() as conn:
         conn.execute("INSERT INTO classification_calls (called_at) VALUES (?)", (now,))
         conn.execute("DELETE FROM classification_calls WHERE called_at < ?", (now - 2 * 86400,))
+
+
+def reserve_classification_call_slot(limit: int) -> bool:
+    """Atomare Variante von "ist das Tages-Limit erreicht? Falls nein, Call vermerken":
+    ein getrennter get_classification_calls_today()-Check gefolgt von einem separaten
+    record_classification_call()-Insert waere nur INNERHALB eines einzelnen Prozesses/
+    Event-Loops race-frei (dort, weil zwischen den beiden synchronen DB-Calls kein
+    "await" liegt). Der Kostendeckel soll aber auch dann hart bleiben, wenn z.B. ein
+    haengender vorheriger GitHub-Actions-Lauf und ein neu getriggerter Lauf sich
+    ueberschneiden (siehe .github/workflows/monitor.yml: concurrency-Guard reduziert
+    das Risiko, schliesst es aber nicht 100% aus) - INSERT...SELECT...WHERE laeuft als
+    EINE SQL-Anweisung und wird von SQLites eigener Schreibsperre serialisiert, ist
+    also auch prozessuebergreifend atomar. Gibt True zurueck, wenn ein Slot reserviert
+    wurde (Call darf gemacht werden), False wenn das Limit bereits erreicht ist."""
+    cutoff = _utc_day_start_epoch()
+    now = time.time()
+    with get_conn() as conn:
+        cur = conn.execute(
+            """
+            INSERT INTO classification_calls (called_at)
+            SELECT ? WHERE (SELECT COUNT(*) FROM classification_calls WHERE called_at >= ?) < ?
+            """,
+            (now, cutoff, limit),
+        )
+        reserved = cur.rowcount > 0
+        if reserved:
+            conn.execute("DELETE FROM classification_calls WHERE called_at < ?", (now - 2 * 86400,))
+    return reserved
 
 
 def get_known_source_ids(source_ids: list[str]) -> set[str]:

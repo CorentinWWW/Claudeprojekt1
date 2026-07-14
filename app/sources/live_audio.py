@@ -144,20 +144,31 @@ class LiveAudioSource(Source):
             "-ar", "16000", "-ac", "1",
             tmp_path,
         ]
-        proc = await asyncio.create_subprocess_exec(
-            *cmd, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL
-        )
         try:
-            await asyncio.wait_for(proc.wait(), timeout=self.chunk_seconds + 30)
-        except asyncio.TimeoutError:
-            proc.kill()
-            _safe_remove(tmp_path)
-            return None
+            # create_subprocess_exec selbst (nicht nur proc.wait()) kann werfen, z.B.
+            # FileNotFoundError falls ffmpeg nicht im PATH ist - dann existiert
+            # tmp_path bereits auf der Platte, aber "proc" wuerde nie zugewiesen.
+            # Ohne dieses try/except wuerde die Exception hier direkt raus- und in
+            # poll() (das chunk_path als lokale Variable nie zugewiesen bekaeme, da
+            # der await nie zurueckkehrt) an _safe_remove(None) vorbeipropagieren -
+            # ein Leak leerer .wav-Dateien bei jedem Poll-Zyklus ohne ffmpeg.
+            proc = await asyncio.create_subprocess_exec(
+                *cmd, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL
+            )
+            try:
+                await asyncio.wait_for(proc.wait(), timeout=self.chunk_seconds + 30)
+            except asyncio.TimeoutError:
+                proc.kill()
+                _safe_remove(tmp_path)
+                return None
 
-        if proc.returncode != 0 or not os.path.exists(tmp_path):
+            if proc.returncode != 0 or not os.path.exists(tmp_path):
+                _safe_remove(tmp_path)
+                return None
+            return tmp_path
+        except Exception:
             _safe_remove(tmp_path)
-            return None
-        return tmp_path
+            raise
 
     def _transcribe(self, path: str) -> str:
         from faster_whisper import WhisperModel

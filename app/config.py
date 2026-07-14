@@ -22,27 +22,44 @@ def _str(name: str, default: str = "") -> str:
     return os.getenv(name, default).strip()
 
 
+def _int(name: str, default: int) -> int:
+    # Analog zu _bool: ein gesetzter, aber leerer/nur-Whitespace-Wert soll wie "nicht
+    # gesetzt" behandelt werden, statt int("") mit einem ValueError den kompletten
+    # Prozess schon beim Modul-Import abstuerzen zu lassen.
+    val = os.getenv(name)
+    if val is None or val.strip() == "":
+        return default
+    return int(val.strip())
+
+
+def _float(name: str, default: float) -> float:
+    val = os.getenv(name)
+    if val is None or val.strip() == "":
+        return default
+    return float(val.strip())
+
+
 ANTHROPIC_API_KEY = _str("ANTHROPIC_API_KEY")
 # Haiku statt Sonnet als Default: die Klassifikation ist eine strukturierte,
 # schema-gefuehrte Aufgabe (Tool-Use mit festem JSON-Schema) - dafuer reicht Haiku in
 # der Praxis gut aus, kostet aber nur einen Bruchteil pro Call. Bei Bedarf in .env auf
 # z.B. "claude-sonnet-5" fuer potenziell bessere Einschaetzungsqualitaet umstellen.
 CLAUDE_MODEL = _str("CLAUDE_MODEL", "claude-haiku-4-5")
-CLAUDE_MAX_RETRIES = int(os.getenv("CLAUDE_MAX_RETRIES", "3"))
-CLAUDE_TIMEOUT_SECONDS = float(os.getenv("CLAUDE_TIMEOUT_SECONDS", "30"))
+CLAUDE_MAX_RETRIES = _int("CLAUDE_MAX_RETRIES", 3)
+CLAUDE_TIMEOUT_SECONDS = _float("CLAUDE_TIMEOUT_SECONDS", 30)
 
 TELEGRAM_BOT_TOKEN = _str("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = _str("TELEGRAM_CHAT_ID")
 # Kurze Nachricht beim Start schicken, damit sofort sichtbar ist ob Telegram korrekt verbunden ist
 TELEGRAM_STARTUP_NOTICE = _bool("TELEGRAM_STARTUP_NOTICE", True)
 
-POLL_INTERVAL_SECONDS = int(os.getenv("POLL_INTERVAL_SECONDS", "60"))
+POLL_INTERVAL_SECONDS = _int("POLL_INTERVAL_SECONDS", 60)
 
-ALERT_CONFIDENCE_THRESHOLD = float(os.getenv("ALERT_CONFIDENCE_THRESHOLD", "0.5"))
+ALERT_CONFIDENCE_THRESHOLD = _float("ALERT_CONFIDENCE_THRESHOLD", 0.5)
 # Ab wie vielen gleichzeitig alarmwuerdigen Statements in EINEM Poll-Zyklus zu einer
 # gebuendelten Sammel-Nachricht gewechselt wird statt einer Einzelnachricht pro Statement
 # (verhindert eine Alert-Flut bei einem ploetzlichen Nachrichtenschub).
-ALERT_DIGEST_THRESHOLD = int(os.getenv("ALERT_DIGEST_THRESHOLD", "3"))
+ALERT_DIGEST_THRESHOLD = _int("ALERT_DIGEST_THRESHOLD", 3)
 # Statements, die GLEICHZEITIG (innerhalb derselben Semaphore-Runde) klassifiziert
 # werden, sehen sich gegenseitig nicht im Themen-Kontext (recent_context waechst
 # erst, NACHDEM eine Klassifikation fertig ist - siehe orchestrator.py:
@@ -51,7 +68,7 @@ ALERT_DIGEST_THRESHOLD = int(os.getenv("ALERT_DIGEST_THRESHOLD", "3"))
 # als "neu" durchgehen und beide einen Alert ausloesen. Default bewusst auf 1
 # (seriell) gesetzt, um dieses Duplikat-Risiko auszuschliessen - auf Kosten von
 # etwas laengerer Verarbeitungszeit bei einem ploetzlichen Nachrichtenschub.
-MAX_CONCURRENT_CLASSIFICATIONS = int(os.getenv("MAX_CONCURRENT_CLASSIFICATIONS", "1"))
+MAX_CONCURRENT_CLASSIFICATIONS = _int("MAX_CONCURRENT_CLASSIFICATIONS", 1)
 
 # Harter Kostendeckel: mehr als so viele Claude-Klassifikations-Calls finden an einem
 # Tag (UTC) nicht mehr statt, egal wie viele neue Statements eintreffen - schuetzt vor
@@ -64,21 +81,21 @@ MAX_CONCURRENT_CLASSIFICATIONS = int(os.getenv("MAX_CONCURRENT_CLASSIFICATIONS",
 # unabhaengig vom tatsaechlichen Nachrichtenaufkommen. Persistiert in SQLite, gilt also
 # auch ueber einzelne GitHub-Actions-Laeufe hinweg (siehe app/db.py:
 # get_classification_calls_today/record_classification_call).
-MAX_CLASSIFICATIONS_PER_DAY = int(os.getenv("MAX_CLASSIFICATIONS_PER_DAY", "100"))
+MAX_CLASSIFICATIONS_PER_DAY = _int("MAX_CLASSIFICATIONS_PER_DAY", 100)
 
 # Statements, deren Text zu >= diesem Wert (0-1, difflib-Aehnlichkeit) einem kuerzlich
 # gesehenen Statement gleicht, gelten als Duplikat (z.B. dieselbe Meldung bei
 # GDELT und RSS, oder von vielen Portalen wortgleich syndiziert) und werden nicht
 # erneut klassifiziert/alarmiert. Dies ist die schnelle, reine Text-Ebene (Tier 1).
-DEDUP_SIMILARITY_THRESHOLD = float(os.getenv("DEDUP_SIMILARITY_THRESHOLD", "0.82"))
-DEDUP_WINDOW_SECONDS = int(os.getenv("DEDUP_WINDOW_SECONDS", "86400"))  # 24h ("heute")
+DEDUP_SIMILARITY_THRESHOLD = _float("DEDUP_SIMILARITY_THRESHOLD", 0.82)
+DEDUP_WINDOW_SECONDS = _int("DEDUP_WINDOW_SECONDS", 86400)  # 24h ("heute")
 
 # Themen-Ebene (Tier 2, semantisch via Claude): wie viele Stunden zurueck bereits
 # alarmierte Statements als Kontext mitgegeben werden, damit Claude erkennen kann,
 # ob eine neue Meldung im Kern zu einem heute schon gemeldeten Thema gehoert -
 # und nur bei einer echten Eskalation trotzdem erneut alarmiert wird.
-TOPIC_CONTEXT_WINDOW_HOURS = int(os.getenv("TOPIC_CONTEXT_WINDOW_HOURS", "24"))
-TOPIC_CONTEXT_MAX_ITEMS = int(os.getenv("TOPIC_CONTEXT_MAX_ITEMS", "20"))
+TOPIC_CONTEXT_WINDOW_HOURS = _int("TOPIC_CONTEXT_WINDOW_HOURS", 24)
+TOPIC_CONTEXT_MAX_ITEMS = _int("TOPIC_CONTEXT_MAX_ITEMS", 20)
 
 ENABLE_NEWS = _bool("ENABLE_NEWS", True)
 ENABLE_TRUTH_SOCIAL = _bool("ENABLE_TRUTH_SOCIAL", True)
@@ -96,8 +113,8 @@ TRUTH_SOCIAL_BROWSER_FALLBACK = _bool("TRUTH_SOCIAL_BROWSER_FALLBACK", True)
 # Mindestabstand zwischen zwei Browser-Fallback-Versuchen, damit ein dauerhaft
 # blockierter direkter API-Call nicht bei jedem Poll-Zyklus einen vollen Chromium
 # startet.
-TRUTH_SOCIAL_BROWSER_FALLBACK_MIN_INTERVAL = int(
-    os.getenv("TRUTH_SOCIAL_BROWSER_FALLBACK_MIN_INTERVAL", "300")
+TRUTH_SOCIAL_BROWSER_FALLBACK_MIN_INTERVAL = _int(
+    "TRUTH_SOCIAL_BROWSER_FALLBACK_MIN_INTERVAL", 300
 )
 
 LIVE_AUDIO_STREAM_URLS = [
@@ -105,7 +122,7 @@ LIVE_AUDIO_STREAM_URLS = [
 ]
 WHISPER_MODEL_SIZE = os.getenv("WHISPER_MODEL_SIZE", "base")
 
-DASHBOARD_PORT = int(os.getenv("DASHBOARD_PORT", "8000"))
+DASHBOARD_PORT = _int("DASHBOARD_PORT", 8000)
 # Falls gesetzt, verlangen alle /api/*-Endpunkte einen passenden "X-API-Key"-Header.
 # Ohne das waere z.B. /api/test (kostet einen echten Claude-Call + kann einen echten
 # Telegram-Alert ausloesen) fuer JEDEN erreichbar, der die IP:Port kennt - insbesondere

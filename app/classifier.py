@@ -15,7 +15,7 @@ from app.config import (
     CLAUDE_TIMEOUT_SECONDS,
     MAX_CLASSIFICATIONS_PER_DAY,
 )
-from app.db import Classification, get_classification_calls_today, record_classification_call
+from app.db import Classification, record_classification_call, reserve_classification_call_slot
 
 logger = logging.getLogger(__name__)
 
@@ -216,30 +216,52 @@ class DailyCapExceeded(RuntimeError):
     _classify_and_store)."""
 
 
+def _classification_from_tool_input(data: dict) -> Classification:
+    raw_ticker_calls = data.get("ticker_calls") or []
+    ticker_calls = [
+        {
+            "ticker": tc.get("ticker", ""),
+            "direction": tc.get("direction") or "long",
+            "reasoning": tc.get("reasoning", ""),
+        }
+        for tc in raw_ticker_calls
+        if isinstance(tc, dict) and tc.get("ticker")
+    ]
+    # data.get("confidence", 0.0) wuerde bei einem explizit gesetzten JSON "null" (statt
+    # fehlendem Feld) trotzdem None zurueckgeben - float(None) crasht mit TypeError.
+    # Ebenso koennte ein Modell ausserhalb des Schemas einen Wert > 1 oder < 0 liefern.
+    confidence = data.get("confidence")
+    confidence = float(confidence) if confidence is not None else 0.0
+    confidence = max(0.0, min(1.0, confidence))
+    return Classification(
+        is_market_relevant=bool(data.get("is_market_relevant", False)),
+        sentiment=data.get("sentiment") or "neutral",
+        confidence=confidence,
+        ticker_calls=ticker_calls,
+        sectors=data.get("sectors") or [],
+        reasoning=data.get("reasoning") or "",
+        related_topic_id=data.get("related_topic_id"),
+        is_major_escalation=bool(data.get("is_major_escalation", False)),
+    )
+
+
 def _parse_response(response) -> Classification:
     for block in response.content:
         if block.type == "tool_use" and block.name == "classify_statement":
-            data = block.input
-            raw_ticker_calls = data.get("ticker_calls", []) or []
-            ticker_calls = [
-                {
-                    "ticker": tc.get("ticker", ""),
-                    "direction": tc.get("direction", "long"),
-                    "reasoning": tc.get("reasoning", ""),
-                }
-                for tc in raw_ticker_calls
-                if tc.get("ticker")
-            ]
-            return Classification(
-                is_market_relevant=bool(data.get("is_market_relevant", False)),
-                sentiment=data.get("sentiment", "neutral"),
-                confidence=float(data.get("confidence", 0.0)),
-                ticker_calls=ticker_calls,
-                sectors=data.get("sectors", []) or [],
-                reasoning=data.get("reasoning", ""),
-                related_topic_id=data.get("related_topic_id"),
-                is_major_escalation=bool(data.get("is_major_escalation", False)),
-            )
+            try:
+                return _classification_from_tool_input(block.input)
+            except (TypeError, ValueError, AttributeError):
+                # Ein Modell (insbesondere ein guenstigeres wie das aktuelle Default
+                # Haiku) koennte ausserhalb des Schemas liegende Werte liefern (z.B.
+                # confidence als String, ticker_calls-Eintraege ohne dict-Struktur) -
+                # das soll classify() nicht mit einer haesslichen Exception abschiessen,
+                # sondern sauber auf den Fallback zurueckfallen wie bei komplett
+                # fehlender tool_use-Antwort.
+                logger.warning(
+                    "Unerwartete/fehlerhafte tool_use-Antwort von Claude, fallback auf neutral",
+                    exc_info=True,
+                )
+                return FALLBACK_CLASSIFICATION
     logger.warning("Keine tool_use Antwort von Claude erhalten, fallback auf neutral")
     return FALLBACK_CLASSIFICATION
 
@@ -258,15 +280,18 @@ async def classify(
     # ausschliesslich fuer selftest() gedacht - ein bereits ausgeschoepftes Tages-
     # Limit soll nicht dazu fuehren, dass der Claude-Erreichbarkeits-Check beim Start
     # fehlschlaegt und der gesamte Monitoring-Loop deswegen gar nicht erst anspringt.
-    if not _bypass_daily_cap and get_classification_calls_today() >= MAX_CLASSIFICATIONS_PER_DAY:
+    # Der Selftest-Call soll aber trotzdem GEZAEHLT werden (record_classification_call)
+    # - sonst waere jeder Prozess-Neustart ein unsichtbarer, nicht mitgezaehlter
+    # Kostenpunkt ausserhalb des dokumentierten "harten" Tages-Limits.
+    if _bypass_daily_cap:
+        record_classification_call()
+    elif not reserve_classification_call_slot(MAX_CLASSIFICATIONS_PER_DAY):
         raise DailyCapExceeded(
             f"Taegliches Claude-Klassifikations-Limit ({MAX_CLASSIFICATIONS_PER_DAY}) "
             "erreicht - um die API-Kosten zu begrenzen, werden bis zum naechsten Tag "
             "(UTC) keine weiteren Statements klassifiziert. Siehe "
             "MAX_CLASSIFICATIONS_PER_DAY in .env."
         )
-    if not _bypass_daily_cap:
-        record_classification_call()
 
     context_block = _build_context_block(recent_context)
     response = await _client.messages.create(

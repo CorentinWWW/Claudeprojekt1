@@ -100,7 +100,10 @@
     Automatische Einschätzung via Claude – keine Finanzberatung. Aktualisiert alle 15s.
   </div>
 
-  <div id="banners"></div>
+  <div id="banners">
+    <div id="authBanner"></div>
+    <div id="healthBanners"></div>
+  </div>
 
   <div class="panel">
     <h2>Zugriff</h2>
@@ -179,13 +182,33 @@ async function apiFetch(url, options = {}) {
   const headers = Object.assign({}, options.headers || {});
   if (key) headers['X-API-Key'] = key;
   const res = await fetch(url, Object.assign({}, options, { headers }));
+  // Eigener #authBanner-Container statt in #banners hineinzuschreiben: loadHealth()
+  // (unauthentifiziert, siehe unten) laeuft parallel via Promise.all in refreshAll()
+  // und wuerde ein gemeinsames #banners.innerHTML nicht-deterministisch ueberschreiben
+  // - je nach Promise-Reihenfolge verschwand die 401-Meldung dadurch wieder. Jede
+  // Quelle schreibt jetzt nur noch in ihren eigenen, festen Container.
+  const authBanner = document.getElementById('authBanner');
   if (res.status === 401) {
-    const banners = document.getElementById('banners');
-    banners.innerHTML =
-      '<div class="banner error">⛔ Fehlender/falscher API-Key - oben unter "Zugriff" den korrekten X-API-Key eintragen.</div>' +
-      banners.innerHTML;
+    authBanner.innerHTML =
+      '<div class="banner error">⛔ Fehlender/falscher API-Key - oben unter "Zugriff" den korrekten X-API-Key eintragen.</div>';
+  } else {
+    authBanner.innerHTML = '';
   }
   return res;
+}
+
+// Nur http(s)-Links werden je gerendert - ein Statement-Text/URL-Feld kommt letztlich
+// aus externen Quellen (RSS/GDELT/Truth Social); ohne Schema-Pruefung koennte eine
+// "javascript:"-URL in href="..." beim Klick Code im Dashboard-Origin ausfuehren (der
+// auch den DASHBOARD_API_KEY in localStorage haelt) - escapeAttr() allein schuetzt nur
+// vor dem Ausbrechen aus dem Attribut, nicht vor einem gefaehrlichen Schema selbst.
+function safeUrl(url) {
+  try {
+    const parsed = new URL(url, window.location.href);
+    return (parsed.protocol === 'http:' || parsed.protocol === 'https:') ? parsed.href : null;
+  } catch {
+    return null;
+  }
 }
 
 function timeAgo(ts) {
@@ -236,7 +259,8 @@ function renderCard(item) {
   const conf = item.confidence != null ? Math.round(item.confidence * 100) + '%' : '–';
   const tickers = renderTickerCalls(item.tickers);
   const sectors = (item.sectors || []).map(s => `<span class="tag">${escapeHtml(s)}</span>`).join('') || '–';
-  const link = item.url ? `<a href="${escapeAttr(item.url)}" target="_blank">Quelle</a>` : '';
+  const itemUrl = item.url ? safeUrl(item.url) : null;
+  const link = itemUrl ? `<a href="${escapeAttr(itemUrl)}" target="_blank">Quelle</a>` : '';
 
   return `
     <div class="card ${sentimentClass(item.sentiment)}${isDup ? ' duplicate' : ''}">
@@ -250,11 +274,16 @@ function renderCard(item) {
 }
 
 async function loadHealth() {
-  const res = await apiFetch('/api/health');
+  // Bewusst normales fetch() statt apiFetch(): /api/health ist serverseitig absichtlich
+  // OHNE Auth erreichbar (siehe app/dashboard.py). Ueber apiFetch() liefe dieser Call
+  // durch dieselbe 401/Erfolgs-Behandlung wie die authentifizierten Endpunkte und
+  // wuerde - da alle refreshAll()-Aufrufe parallel per Promise.all laufen - je nach
+  // Timing den echten #authBanner-Status von loadFeed()/loadStats() wieder loeschen.
+  const res = await fetch('/api/health');
   const health = await res.json();
 
-  const banners = document.getElementById('banners');
-  banners.innerHTML = [
+  const healthBanners = document.getElementById('healthBanners');
+  healthBanners.innerHTML = [
     ...health.errors.map(e => `<div class="banner error">⛔ ${escapeHtml(e)}</div>`),
     ...health.warnings.map(w => `<div class="banner warning">⚠️ ${escapeHtml(w)}</div>`),
   ].join('');
