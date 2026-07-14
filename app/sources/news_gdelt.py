@@ -33,7 +33,15 @@ class GdeltNewsSource(Source):
 
     async def poll(self) -> list[RawStatement]:
         params = {
-            "query": f'Trump ({MARKET_KEYWORDS})',
+            # sourcelang:english schraenkt auf englischsprachige Artikel ein - GDELT
+            # deckt Nachrichten global in vielen Sprachen ab, und dieselbe Aussage wird
+            # oft von Dutzenden Outlets in unterschiedlichen Sprachen (uebersetzt/
+            # umformuliert) gemeldet. Die Text-Duplikaterkennung (Tier 1, difflib) UND
+            # der Themen-Abgleich innerhalb einer Charge (siehe orchestrator.py:
+            # _partition_duplicates) vergleichen nur auf Zeichenebene und koennen
+            # ueber Sprachgrenzen hinweg keine Duplikate erkennen - ohne dieses Filter
+            # kam dieselbe Meldung dadurch wiederholt als "neues" Statement durch.
+            "query": f'Trump ({MARKET_KEYWORDS}) sourcelang:english',
             "mode": "ArtList",
             "format": "json",
             "maxrecords": "75",

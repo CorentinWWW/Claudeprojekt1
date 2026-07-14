@@ -156,13 +156,21 @@ Chunks (Standard 30s), keine Wort-für-Wort-Live-Transkription.
     (auch bei ganz anderem Wortlaut), wird sie nur dann erneut alarmiert, wenn sie
     eine **wesentliche Eskalation** darstellt (z.B. von Androhung zu tatsächlicher
     Umsetzung) - reine Wiederholungen/Umformulierungen bleiben stumm.
+  - Beide Tiers vergleichen nur auf Zeichen-/Sprachebene innerhalb derselben
+    Sprache. GDELT deckt Nachrichten global in vielen Sprachen ab und würde
+    dieselbe Aussage sonst über zig fremdsprachige Übersetzungen/Umformulierungen
+    immer wieder als "neues" Statement liefern - die GDELT-Abfrage ist deshalb
+    fest auf `sourcelang:english` eingeschränkt.
 - **Long/Short-Einschätzung pro Ticker**: statt nur "betroffene Ticker" gibt Claude
   für jeden genannten Ticker eine `long`/`short`-Einschätzung mit Begründung ab -
   auch innerhalb derselben Meldung können unterschiedliche Ticker unterschiedlich
   betroffen sein (z.B. Zölle die Stahlproduzenten nützen, aber Autobauern schaden).
-- **Nebenläufige Klassifikation**: mehrere neue Statements pro Poll-Zyklus werden
-  parallel klassifiziert (begrenzt durch `MAX_CONCURRENT_CLASSIFICATIONS`), statt
-  nacheinander.
+- **Klassifikation standardmäßig seriell** (`MAX_CONCURRENT_CLASSIFICATIONS=1`):
+  zwei fast zeitgleich klassifizierte Statements zum selben Thema können sich
+  gegenseitig nicht als Duplikat erkennen, weil der Themen-Kontext (Tier 2) erst
+  NACH Abschluss einer Klassifikation wächst. Serielle Verarbeitung schließt dieses
+  Risiko aus; höhere Werte sind möglich, erhöhen aber die Chance auf doppelte
+  Alerts bei einem Nachrichtenschub.
 - **Gebündelte Alerts statt Nachrichtenflut**: sind in einem Zyklus mehr als
   `ALERT_DIGEST_THRESHOLD` (Standard 3) Meldungen gleichzeitig alarmwürdig (z.B. bei
   einer echten Großlage mit vielen unterschiedlichen Artikeln), wird daraus EINE
@@ -347,7 +355,7 @@ Siehe `.env.example` für alle Variablen. Wichtige zusätzliche Stellschrauben:
 | Variable | Bedeutung |
 |---|---|
 | `ALERT_CONFIDENCE_THRESHOLD` | Ab welcher Claude-Konfidenz (0-1) ein Telegram-Alert geschickt wird (Standard 0.5) |
-| `MAX_CONCURRENT_CLASSIFICATIONS` | Wie viele Claude-Calls parallel laufen dürfen (Standard 3) |
+| `MAX_CONCURRENT_CLASSIFICATIONS` | Wie viele Claude-Calls parallel laufen dürfen (Standard **1** = seriell, siehe Duplikat-Hinweis oben; höher = schneller bei Nachrichtenschüben, aber Risiko doppelter Alerts) |
 | `DEDUP_SIMILARITY_THRESHOLD` | Ab welcher Textähnlichkeit (0-1) zwei Statements als Duplikat gelten (Standard 0.82) |
 | `DEDUP_WINDOW_SECONDS` | Zeitfenster für die Text-Duplikatsuche, Tier 1 (Standard 24h) |
 | `TOPIC_CONTEXT_WINDOW_HOURS` / `TOPIC_CONTEXT_MAX_ITEMS` | Wie viele Stunden zurück / wie viele Meldungen als Themen-Kontext an Claude mitgegeben werden, Tier 2 (Standard 24h / 20) |

@@ -39,7 +39,15 @@ ALERT_CONFIDENCE_THRESHOLD = float(os.getenv("ALERT_CONFIDENCE_THRESHOLD", "0.5"
 # gebuendelten Sammel-Nachricht gewechselt wird statt einer Einzelnachricht pro Statement
 # (verhindert eine Alert-Flut bei einem ploetzlichen Nachrichtenschub).
 ALERT_DIGEST_THRESHOLD = int(os.getenv("ALERT_DIGEST_THRESHOLD", "3"))
-MAX_CONCURRENT_CLASSIFICATIONS = int(os.getenv("MAX_CONCURRENT_CLASSIFICATIONS", "3"))
+# Statements, die GLEICHZEITIG (innerhalb derselben Semaphore-Runde) klassifiziert
+# werden, sehen sich gegenseitig nicht im Themen-Kontext (recent_context waechst
+# erst, NACHDEM eine Klassifikation fertig ist - siehe orchestrator.py:
+# _classify_and_store). Bei Werten > 1 koennen zwei fast zeitgleiche Meldungen zum
+# selben Thema (z.B. von zwei verschiedenen Nachrichtenquellen) beide unabhaengig
+# als "neu" durchgehen und beide einen Alert ausloesen. Default bewusst auf 1
+# (seriell) gesetzt, um dieses Duplikat-Risiko auszuschliessen - auf Kosten von
+# etwas laengerer Verarbeitungszeit bei einem ploetzlichen Nachrichtenschub.
+MAX_CONCURRENT_CLASSIFICATIONS = int(os.getenv("MAX_CONCURRENT_CLASSIFICATIONS", "1"))
 
 # Statements, deren Text zu >= diesem Wert (0-1, difflib-Aehnlichkeit) einem kuerzlich
 # gesehenen Statement gleicht, gelten als Duplikat (z.B. dieselbe Meldung bei

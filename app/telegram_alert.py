@@ -24,20 +24,6 @@ def _direction_arrow(direction: Optional[str]) -> str:
     return "◽"
 
 
-def _format_ticker_calls(ticker_calls: list[dict]) -> str:
-    if not ticker_calls:
-        return "–"
-    lines = []
-    for tc in ticker_calls:
-        ticker = html.escape(tc.get("ticker", "?"))
-        direction = html.escape(tc.get("direction") or "?")
-        reasoning = html.escape(tc.get("reasoning", ""))
-        arrow = _direction_arrow(tc.get("direction"))
-        suffix = f" – {reasoning}" if reasoning else ""
-        lines.append(f"{arrow} {ticker} ({direction}){suffix}")
-    return "\n".join(lines)
-
-
 def _format_ticker_calls_compact(ticker_calls: list[dict]) -> str:
     if not ticker_calls:
         return "–"
@@ -47,31 +33,30 @@ def _format_ticker_calls_compact(ticker_calls: list[dict]) -> str:
     )
 
 
+# Auf Nutzerwunsch bewusst extrem kurz: NUR Konfidenz, ein kurzer Einzeiler worum
+# es geht, und die betroffenen Ticker (mit Long/Short-Pfeil) - keine Rohtext-
+# Wiedergabe, kein Sektoren-/Begruendungs-Block, kein Disclaimer pro Nachricht.
+_HEADLINE_MAX_LENGTH = 100
+
+
+def _short_headline(classification: Classification, raw: RawStatement, max_length: int = _HEADLINE_MAX_LENGTH) -> str:
+    text = (classification.reasoning or raw.text or "").strip()
+    if len(text) <= max_length:
+        return text
+    cut = text[:max_length].rsplit(" ", 1)[0]
+    return (cut or text[:max_length]) + "…"
+
+
 def _format_message(raw: RawStatement, classification: Classification) -> str:
     emoji = SENTIMENT_EMOJI.get(classification.sentiment, "⚪")
-    sectors = ", ".join(classification.sectors) or "—"
-    lines = [
-        f"{emoji} <b>Markt-relevante Trump-Aussage</b> "
-        f"({html.escape(classification.sentiment)}, "
-        f"Konfidenz {classification.confidence:.0%})",
-    ]
-    if classification.related_topic_id is not None and classification.is_major_escalation:
-        lines.append(
-            f"⚠️ Eskalation von Statement #{html.escape(str(classification.related_topic_id))}"
-        )
-    lines += [
-        f"Quelle: {html.escape(raw.source)}",
-        "",
-        html.escape(raw.text[:500]),
-        "",
-        f"Ticker:\n{_format_ticker_calls(classification.ticker_calls)}",
-        f"Sektoren: {html.escape(sectors)}",
-        f"Begründung: {html.escape(classification.reasoning)}",
-        "<i>Keine Finanzberatung – eigene Anlageentscheidung auf eigenes Risiko.</i>",
-    ]
-    if raw.url:
-        lines.append(f'<a href="{html.escape(raw.url)}">Link zur Quelle</a>')
-    return "\n".join(lines)
+    escalation_prefix = (
+        "⚠️ "
+        if classification.related_topic_id is not None and classification.is_major_escalation
+        else ""
+    )
+    headline = html.escape(escalation_prefix + _short_headline(classification, raw))
+    ticker_str = _format_ticker_calls_compact(classification.ticker_calls)
+    return f"{emoji} {classification.confidence:.0%} — {headline}\n📈 {ticker_str}"
 
 
 async def _send(text: str, retries: int = 2) -> bool:
@@ -122,39 +107,35 @@ async def send_alert(raw: RawStatement, classification: Classification) -> bool:
     return await _send(_format_message(raw, classification))
 
 
+_DIGEST_HEADLINE_MAX_LENGTH = 70
+
+
 def _format_digest(items: list[tuple[RawStatement, Classification, int]]) -> str:
     sentiment_counts = Counter(c.sentiment for _, c, _ in items)
     counts_str = " ".join(
         f"{SENTIMENT_EMOJI.get(s, '⚪')} {n}" for s, n in sentiment_counts.items()
     )
-    header = (
-        f"📊 <b>{len(items)} marktrelevante Trump-Meldungen in diesem Zyklus</b>\n{counts_str}"
-    )
-    footer = "<i>Keine Finanzberatung – eigene Anlageentscheidung auf eigenes Risiko.</i>"
+    header = f"📊 <b>{len(items)} Meldungen</b> {counts_str}"
 
     sorted_items = sorted(items, key=lambda item: item[1].confidence, reverse=True)
     candidate_lines = []
     for raw, classification, _ in sorted_items[:DIGEST_MAX_DETAIL_LINES]:
         emoji = SENTIMENT_EMOJI.get(classification.sentiment, "⚪")
-        title = html.escape(raw.text[:120])
+        headline = html.escape(_short_headline(classification, raw, max_length=_DIGEST_HEADLINE_MAX_LENGTH))
         ticker_str = _format_ticker_calls_compact(classification.ticker_calls)
-        candidate_lines.append(f"{emoji} {title} (Ticker: {ticker_str})")
+        candidate_lines.append(f"{emoji} {classification.confidence:.0%} {headline} — {ticker_str}")
 
     # Zeilenweise statt zeichenweise budgetieren: eine reine Zeichen-Kappung des
-    # fertigen Texts (wie zuvor) koennte mitten in einem HTML-Tag oder einer Entity
-    # enden - Telegram wuerde dann die GESAMTE Nachricht wegen ungueltigem HTML
-    # ablehnen. Stattdessen wird bei Platzmangel immer nur eine ganze Detailzeile
-    # weniger angezeigt, nie ein Teilstring einer Zeile.
+    # fertigen Texts koennte mitten in einem HTML-Tag oder einer Entity enden -
+    # Telegram wuerde dann die GESAMTE Nachricht wegen ungueltigem HTML ablehnen.
+    # Stattdessen wird bei Platzmangel immer nur eine ganze Detailzeile weniger
+    # angezeigt, nie ein Teilstring einer Zeile.
     included_lines: list[str] = []
     for line in candidate_lines:
         remaining_after = len(items) - (len(included_lines) + 1)
-        placeholder = (
-            f"\n… und {remaining_after} weitere (Details im Log der Ausfuehrung)"
-            if remaining_after > 0
-            else ""
-        )
+        placeholder = f"\n+{remaining_after} weitere" if remaining_after > 0 else ""
         trial_body = "\n".join(included_lines + [line])
-        trial_text = f"{header}\n\n{trial_body}{placeholder}\n\n{footer}"
+        trial_text = f"{header}\n\n{trial_body}{placeholder}"
         if len(trial_text) > TELEGRAM_MAX_LENGTH:
             break
         included_lines.append(line)
@@ -162,13 +143,13 @@ def _format_digest(items: list[tuple[RawStatement, Classification, int]]) -> str
     remaining = len(items) - len(included_lines)
     body = "\n".join(included_lines)
     if remaining > 0:
-        body += f"\n… und {remaining} weitere (Details im Log der Ausfuehrung)"
+        body += f"\n+{remaining} weitere"
 
-    text = f"{header}\n\n{body}\n\n{footer}"
+    text = f"{header}\n\n{body}"
     if len(text) > TELEGRAM_MAX_LENGTH:
-        # Aeusserster Notfall (z.B. schon Header+Footer allein zu lang): komplett
+        # Aeusserster Notfall (z.B. schon der Header allein zu lang): komplett
         # ohne Detailzeilen - immer noch vollstaendiges, gueltiges HTML.
-        text = f"{header}\n\n{footer}"
+        text = header
     return text
 
 
