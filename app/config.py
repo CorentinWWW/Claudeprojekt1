@@ -49,6 +49,19 @@ ALERT_DIGEST_THRESHOLD = int(os.getenv("ALERT_DIGEST_THRESHOLD", "3"))
 # etwas laengerer Verarbeitungszeit bei einem ploetzlichen Nachrichtenschub.
 MAX_CONCURRENT_CLASSIFICATIONS = int(os.getenv("MAX_CONCURRENT_CLASSIFICATIONS", "1"))
 
+# Harter Kostendeckel: mehr als so viele Claude-Klassifikations-Calls finden an einem
+# Tag (UTC) nicht mehr statt, egal wie viele neue Statements eintreffen - schuetzt vor
+# einem einzelnen Nachrichtenschub, der sonst unbegrenzt Kosten verursachen wuerde
+# (jeder NEUE, noch nicht bekannte Statement-Text kostet einen Call, auch wenn er sich
+# danach als Themen-Duplikat herausstellt - die Zweistufige-Duplikaterkennung spart
+# also Alerts, aber nicht diesen Call selbst). Bei ~1000-1500 Input- und 200-400
+# Output-Tokens pro Call kostet der Default von 100 Calls/Tag bei Sonnet-Preisen
+# (Stand: $2-3 / $10-15 pro 1 Mio. Token) grob geschaetzt max. ca. 0.40-0.70 EUR/Tag,
+# unabhaengig vom tatsaechlichen Nachrichtenaufkommen. Persistiert in SQLite, gilt also
+# auch ueber einzelne GitHub-Actions-Laeufe hinweg (siehe app/db.py:
+# get_classification_calls_today/record_classification_call).
+MAX_CLASSIFICATIONS_PER_DAY = int(os.getenv("MAX_CLASSIFICATIONS_PER_DAY", "100"))
+
 # Statements, deren Text zu >= diesem Wert (0-1, difflib-Aehnlichkeit) einem kuerzlich
 # gesehenen Statement gleicht, gelten als Duplikat (z.B. dieselbe Meldung bei
 # GDELT und RSS, oder von vielen Portalen wortgleich syndiziert) und werden nicht

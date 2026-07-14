@@ -13,8 +13,9 @@ from app.config import (
     CLAUDE_MAX_RETRIES,
     CLAUDE_MODEL,
     CLAUDE_TIMEOUT_SECONDS,
+    MAX_CLASSIFICATIONS_PER_DAY,
 )
-from app.db import Classification
+from app.db import Classification, get_classification_calls_today, record_classification_call
 
 logger = logging.getLogger(__name__)
 
@@ -188,6 +189,13 @@ FALLBACK_CLASSIFICATION = Classification(
 )
 
 
+class DailyCapExceeded(RuntimeError):
+    """Signalisiert, dass MAX_CLASSIFICATIONS_PER_DAY erreicht ist - eigene Klasse
+    (statt generischem RuntimeError), damit Aufrufer das gezielt und ohne vollen
+    Traceback pro uebersprungenem Statement loggen koennen (siehe orchestrator.py:
+    _classify_and_store)."""
+
+
 def _parse_response(response) -> Classification:
     for block in response.content:
         if block.type == "tool_use" and block.name == "classify_statement":
@@ -216,9 +224,29 @@ def _parse_response(response) -> Classification:
     return FALLBACK_CLASSIFICATION
 
 
-async def classify(text: str, recent_context: Optional[list[dict]] = None) -> Classification:
+async def classify(
+    text: str,
+    recent_context: Optional[list[dict]] = None,
+    _bypass_daily_cap: bool = False,
+) -> Classification:
     if _client is None:
         raise RuntimeError("ANTHROPIC_API_KEY ist nicht gesetzt")
+
+    # Zentraler Kostendeckel: JEDER Aufrufer (Orchestrator, Dashboard-/api/test,
+    # manueller Test in run_once.py) laeuft ueber diese eine Funktion, daher genuegt
+    # die Pruefung hier statt an jeder einzelnen Aufrufstelle. _bypass_daily_cap ist
+    # ausschliesslich fuer selftest() gedacht - ein bereits ausgeschoepftes Tages-
+    # Limit soll nicht dazu fuehren, dass der Claude-Erreichbarkeits-Check beim Start
+    # fehlschlaegt und der gesamte Monitoring-Loop deswegen gar nicht erst anspringt.
+    if not _bypass_daily_cap and get_classification_calls_today() >= MAX_CLASSIFICATIONS_PER_DAY:
+        raise DailyCapExceeded(
+            f"Taegliches Claude-Klassifikations-Limit ({MAX_CLASSIFICATIONS_PER_DAY}) "
+            "erreicht - um die API-Kosten zu begrenzen, werden bis zum naechsten Tag "
+            "(UTC) keine weiteren Statements klassifiziert. Siehe "
+            "MAX_CLASSIFICATIONS_PER_DAY in .env."
+        )
+    if not _bypass_daily_cap:
+        record_classification_call()
 
     context_block = _build_context_block(recent_context)
     response = await _client.messages.create(
@@ -259,7 +287,8 @@ async def selftest() -> None:
 
     try:
         result = await classify(
-            "Testaussage: Ich werde neue Zoelle auf importierte Stahlprodukte verhaengen."
+            "Testaussage: Ich werde neue Zoelle auf importierte Stahlprodukte verhaengen.",
+            _bypass_daily_cap=True,
         )
     except APIStatusError as exc:
         raise RuntimeError(

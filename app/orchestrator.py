@@ -2,7 +2,7 @@ import asyncio
 import logging
 import time
 
-from app.classifier import classify
+from app.classifier import DailyCapExceeded, classify
 from app.config import (
     ALERT_CONFIDENCE_THRESHOLD,
     ALERT_DIGEST_THRESHOLD,
@@ -124,6 +124,13 @@ async def _classify_and_store(raw, semaphore: asyncio.Semaphore, recent_context:
     async with semaphore:
         try:
             classification = await classify(raw.text, recent_context=recent_context)
+        except DailyCapExceeded as exc:
+            # Kein logger.exception() (kein Traceback-Spam): sobald das Tages-Limit
+            # erreicht ist, trifft das jedes weitere Statement in diesem und allen
+            # folgenden Zyklen bis Mitternacht UTC - eine kurze Warnung pro
+            # uebersprungenem Statement reicht.
+            logger.warning("[%s] %s :: %s", raw.source, exc, raw.text[:80])
+            return None
         except Exception:
             logger.exception("Klassifikation fehlgeschlagen fuer: %s", raw.text[:80])
             return None

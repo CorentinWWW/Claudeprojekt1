@@ -175,6 +175,19 @@ Chunks (Standard 30s), keine Wort-für-Wort-Live-Transkription.
   `ALERT_DIGEST_THRESHOLD` (Standard 3) Meldungen gleichzeitig alarmwürdig (z.B. bei
   einer echten Großlage mit vielen unterschiedlichen Artikeln), wird daraus EINE
   Sammel-Nachricht statt einer Flut von Einzelnachrichten.
+- **Harter Kostendeckel (`MAX_CLASSIFICATIONS_PER_DAY`, Standard 100/Tag)**: jede
+  neue, noch nicht bekannte Meldung kostet einen echten Claude-Call - auch wenn sie
+  sich danach als Themen-Duplikat herausstellt (die Duplikaterkennung erspart den
+  erneuten *Alert*, nicht den Call selbst, der ja gerade erst festgestellt hat, dass
+  es ein Duplikat ist). Ohne Deckel kann ein einzelner Nachrichtenschub (z.B. eine
+  große Breaking-News-Lage mit vielen Artikeln) an einem einzigen Tag überraschend
+  hohe Kosten verursachen. Der Zähler ist in der SQLite-DB persistiert (`app/db.py`:
+  `get_classification_calls_today`/`record_classification_call`), gilt also auch über
+  einzelne GitHub-Actions-Läufe hinweg über den ganzen UTC-Tag. Ist das Limit erreicht,
+  werden weitere Meldungen bis Mitternacht (UTC) einfach übersprungen (kurze Warnung
+  im Log) statt einen weiteren Call auszulösen - der Claude-Selftest beim Start ist
+  davon ausgenommen, damit ein ausgeschöpftes Tages-Limit nicht auch noch den
+  Verbindungs-Check und damit den gesamten Monitoring-Start blockiert.
 - **Pending-Alert-Wiederholung**: Statements, die als marktrelevant eingestuft aber
   nie tatsächlich alarmiert wurden (z.B. weil ein Lauf mitten drin abgebrochen wurde
   oder Telegram kurzzeitig nicht erreichbar war), werden beim nächsten Zyklus
@@ -360,6 +373,7 @@ Siehe `.env.example` für alle Variablen. Wichtige zusätzliche Stellschrauben:
 | `DEDUP_WINDOW_SECONDS` | Zeitfenster für die Text-Duplikatsuche, Tier 1 (Standard 24h) |
 | `TOPIC_CONTEXT_WINDOW_HOURS` / `TOPIC_CONTEXT_MAX_ITEMS` | Wie viele Stunden zurück / wie viele Meldungen als Themen-Kontext an Claude mitgegeben werden, Tier 2 (Standard 24h / 20) |
 | `ALERT_DIGEST_THRESHOLD` | Ab wie vielen gleichzeitigen Alerts zu einer Sammel-Nachricht gebündelt wird (Standard 3) |
+| `MAX_CLASSIFICATIONS_PER_DAY` | Harter Kostendeckel: mehr Claude-Calls finden an einem Tag (UTC) nicht mehr statt (Standard 100 ≈ max. 0.40-0.70 €/Tag) - siehe Abschnitt unten |
 | `TELEGRAM_STARTUP_NOTICE` | Heartbeat-Nachricht beim Start senden (Standard an) |
 | `TRUTH_SOCIAL_BROWSER_FALLBACK` | Playwright-Fallback für Truth Social an/aus (Standard an) |
 | `CLAUDE_MAX_RETRIES` / `CLAUDE_TIMEOUT_SECONDS` | Robustheit der Claude-API-Calls |

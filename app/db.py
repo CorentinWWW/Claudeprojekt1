@@ -1,3 +1,4 @@
+import datetime
 import json
 import sqlite3
 import time
@@ -29,6 +30,17 @@ CREATE TABLE IF NOT EXISTS statements (
     is_major_escalation INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_statements_ingested_at ON statements(ingested_at DESC);
+
+-- Ein Datensatz pro tatsaechlichem Claude-Klassifikations-Call (siehe app/classifier.py:
+-- classify()) - unabhaengig davon, ob das Statement am Ende als Themen-Duplikat verworfen
+-- wird (der Call selbst ist trotzdem schon bezahlt). Dient als harter, ueber GitHub-Actions-
+-- Laeufe hinweg persistenter Kostendeckel (MAX_CLASSIFICATIONS_PER_DAY), nachdem ein einzelner
+-- Nachrichtenschub an einem Tag spuerbare API-Kosten verursacht hat.
+CREATE TABLE IF NOT EXISTS classification_calls (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    called_at REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_classification_calls_called_at ON classification_calls(called_at);
 """
 
 # Fuer DBs, die vor der Einfuehrung von related_topic_id/is_major_escalation angelegt
@@ -91,6 +103,33 @@ def init_db():
         for col_name, alter_sql in _MIGRATION_COLUMNS.items():
             if col_name not in existing_cols:
                 conn.execute(alter_sql)
+
+
+def _utc_day_start_epoch() -> float:
+    now = datetime.datetime.now(datetime.timezone.utc)
+    start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    return start.timestamp()
+
+
+def get_classification_calls_today() -> int:
+    """Anzahl tatsaechlicher Claude-Klassifikations-Calls seit Mitternacht UTC - Basis
+    fuer den Kostendeckel MAX_CLASSIFICATIONS_PER_DAY (siehe app/classifier.py)."""
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT COUNT(*) AS c FROM classification_calls WHERE called_at >= ?",
+            (_utc_day_start_epoch(),),
+        ).fetchone()
+    return row["c"]
+
+
+def record_classification_call() -> None:
+    """Vermerkt einen tatsaechlich ausgefuehrten Claude-Klassifikations-Call. Raeumt bei
+    dieser Gelegenheit gleich Eintraege auf, die aelter als 2 Tage sind, statt einen
+    eigenen Cron-/Wartungsjob fuer diese kleine Tabelle zu brauchen."""
+    now = time.time()
+    with get_conn() as conn:
+        conn.execute("INSERT INTO classification_calls (called_at) VALUES (?)", (now,))
+        conn.execute("DELETE FROM classification_calls WHERE called_at < ?", (now - 2 * 86400,))
 
 
 def get_known_source_ids(source_ids: list[str]) -> set[str]:
