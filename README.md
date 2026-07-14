@@ -180,6 +180,17 @@ Chunks (Standard 30s), keine Wort-für-Wort-Live-Transkription.
   `claude-haiku-4-5` gut aus und kostet nur einen Bruchteil von Sonnet pro Call. Über
   `CLAUDE_MODEL` in `.env` z.B. auf `claude-sonnet-5` umstellbar, falls die
   Einschätzungsqualität wichtiger ist als die Kosten.
+- **Auf Signalqualität geschärfter Prompt (kostenneutral)**: der Klassifikations-Prompt
+  trennt klar zwischen konkreten, neuen, handlungsrelevanten Aussagen (bezifferte
+  Zollrate, namentlich genannte Firma/Deal, konkrete Sanktion, Fed-Personalie) und
+  vager Wirtschaftsrhetorik ohne neuen Informationsgehalt ("die Wirtschaft läuft
+  großartig") - Letztere führt zu `is_market_relevant=false` oder niedriger Konfidenz.
+  Hohe Konfidenz (>0.7) nur bei konkret+neu; bloße Wiederholung einer längst bekannten
+  Position bekommt niedrigere Konfidenz. Das reduziert Fehlalarme, **ohne** zusätzliche
+  Claude-Calls. Gegenfinanziert durch etwas kompaktere Themen-Kontext-Snippets
+  (`CONTEXT_SNIPPET_MAX_CHARS`, 100 statt 150 Zeichen) - dieselbe Zahl sichtbarer
+  Themen, nur knappere Beschreibungen, sodass die Kosten pro Call praktisch gleich
+  bleiben.
 - **Harter Kostendeckel (`MAX_CLASSIFICATIONS_PER_DAY`, Standard 100/Tag)**: jede
   neue, noch nicht bekannte Meldung kostet einen echten Claude-Call - auch wenn sie
   sich danach als Themen-Duplikat herausstellt (die Duplikaterkennung erspart den

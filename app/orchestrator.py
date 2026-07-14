@@ -2,7 +2,7 @@ import asyncio
 import logging
 import time
 
-from app.classifier import DailyCapExceeded, classify
+from app.classifier import CONTEXT_SNIPPET_MAX_CHARS, DailyCapExceeded, classify
 from app.config import (
     ALERT_CONFIDENCE_THRESHOLD,
     ALERT_DIGEST_THRESHOLD,
@@ -197,7 +197,11 @@ async def _classify_and_store(raw, semaphore: asyncio.Semaphore, recent_context:
         # wenn sie unterschiedlich formuliert ist und Tier 1 (Textvergleich) das
         # nicht faengt.
         recent_context.append(
-            {"id": statement_id, "text": raw.text[:150], "sentiment": classification.sentiment}
+            {
+                "id": statement_id,
+                "text": raw.text[:CONTEXT_SNIPPET_MAX_CHARS],
+                "sentiment": classification.sentiment,
+            }
         )
 
     return (raw, classification, statement_id)

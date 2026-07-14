@@ -148,8 +148,19 @@ def _system_prompt() -> str:
         "Zentralbank/Zinsen, konkrete Unternehmen/Branchen, Regulierung, Sanktionen, "
         "Steuerpolitik, Ausgabenprogramme, Aussenpolitik mit Marktrelevanz). Reine "
         "politische/persoenliche Aussagen ohne Marktbezug sind is_market_relevant=false. "
-        "Nenne nur Ticker, bei denen du wirklich sicher bist - im Zweifel lieber nur den "
-        "Sektor nennen und ticker_calls leer lassen. Bei jedem Ticker gib eine "
+        "WICHTIG - unterscheide konkrete, handlungsrelevante Aussagen von allgemeiner "
+        "Wirtschaftsrhetorik: eine konkrete NEUE Entwicklung (z.B. eine bezifferte "
+        "Zollrate, eine namentlich genannte Firma/Uebernahme/ein Deal, eine konkrete "
+        "Sanktion, eine Personalie bei der Fed) ist marktrelevant; vage Stimmungsmache "
+        "ohne neuen Informationsgehalt ('die Wirtschaft laeuft grossartig', 'wir "
+        "gewinnen') ist es nicht oder nur mit niedriger Konfidenz. "
+        "Konfidenz kalibrieren: hohe Werte (>0.7) NUR bei konkreten, spezifischen, "
+        "unmittelbar marktbewegenden Aussagen; niedrige Werte bei Vagem, Unklarem oder "
+        "wenn die Aussage nur eine laengst bekannte Position wiederholt, ohne dass sich "
+        "etwas Neues ergibt (blosse Wiederholung != neues Signal). "
+        "Nenne nur Ticker, bei denen du dir des Kuerzels wirklich sicher bist - erfinde "
+        "niemals einen Ticker und rate nicht; im Zweifel lieber nur den Sektor nennen "
+        "und ticker_calls leer lassen. Bei jedem Ticker gib eine "
         "long/short-Einschaetzung ab: ueberlege konkret, ob diese Aussage fuer GENAU "
         "dieses Unternehmen eher steigende (long) oder fallende (short) Kurse erwarten "
         "laesst - das kann pro Ticker unterschiedlich sein (Gewinner vs. Verlierer "
@@ -163,11 +174,20 @@ def _system_prompt() -> str:
     )
 
 
+# Kontext-Snippet-Laenge: reicht, um ein Thema wiederzuerkennen (Tier-2-Dedup), spart
+# aber gegenueber dem frueheren Wert (150) Input-Tokens pro Call - ohne die Anzahl der
+# sichtbaren Themen (TOPIC_CONTEXT_MAX_ITEMS) zu reduzieren, die Dedup-Abdeckung bleibt
+# also unveraendert. Gleicht die etwas ausfuehrlicheren Relevanz-/Konfidenz-Hinweise im
+# System-Prompt kostenmaessig aus.
+CONTEXT_SNIPPET_MAX_CHARS = 100
+
+
 def _build_context_block(recent_context: Optional[list[dict]]) -> str:
     if not recent_context:
         return ""
     lines = [
-        f"[{item['id']}] {item['text'][:150]} (sentiment: {item.get('sentiment') or 'unbekannt'})"
+        f"[{item['id']}] {item['text'][:CONTEXT_SNIPPET_MAX_CHARS]} "
+        f"(sentiment: {item.get('sentiment') or 'unbekannt'})"
         for item in recent_context
     ]
     return (
