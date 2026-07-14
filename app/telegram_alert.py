@@ -24,22 +24,37 @@ def _direction_arrow(direction: Optional[str]) -> str:
     return "◽"
 
 
+def _sorted_by_confidence(ticker_calls: list[dict]) -> list[dict]:
+    # Auf Nutzerwunsch: die Einschaetzung, bei der Claude am sichersten ist, steht
+    # ganz oben. Fehlende/None-Konfidenz (z.B. alte DB-Zeilen vor Einfuehrung dieses
+    # Felds) wird dabei als 0.0 behandelt statt einen Vergleichsfehler auszuloesen.
+    return sorted(ticker_calls, key=lambda tc: tc.get("confidence") or 0.0, reverse=True)
+
+
 def _format_ticker_calls_compact(ticker_calls: list[dict]) -> str:
     if not ticker_calls:
         return "–"
     return ", ".join(
         f"{html.escape(tc.get('ticker', '?'))}{_direction_arrow(tc.get('direction'))}"
-        for tc in ticker_calls
+        f"{(tc.get('confidence') or 0.0):.0%}"
+        for tc in _sorted_by_confidence(ticker_calls)
     )
 
 
-# Auf Nutzerwunsch bewusst extrem kurz: NUR Konfidenz, ein kurzer Einzeiler worum
-# es geht, und die betroffenen Ticker (mit Long/Short-Pfeil) - keine Rohtext-
-# Wiedergabe, kein Sektoren-/Begruendungs-Block, kein Disclaimer pro Nachricht.
-_HEADLINE_MAX_LENGTH = 100
+def _format_ticker_lines(ticker_calls: list[dict]) -> str:
+    """Eine Zeile pro Ticker mit ausgeschriebenem Long/Short und eigener Konfidenz,
+    sortiert nach Konfidenz absteigend (sicherste Einschaetzung zuerst)."""
+    if not ticker_calls:
+        return "📈 –"
+    lines = [
+        f"{_direction_arrow(tc.get('direction'))} {html.escape(tc.get('ticker') or '?')} "
+        f"({html.escape(tc.get('direction') or '?')}) – {(tc.get('confidence') or 0.0):.0%}"
+        for tc in _sorted_by_confidence(ticker_calls)
+    ]
+    return "\n".join(lines)
 
 
-def _short_headline(classification: Classification, raw: RawStatement, max_length: int = _HEADLINE_MAX_LENGTH) -> str:
+def _short_headline(classification: Classification, raw: RawStatement, max_length: int) -> str:
     text = (classification.reasoning or raw.text or "").strip()
     if len(text) <= max_length:
         return text
@@ -54,9 +69,35 @@ def _format_message(raw: RawStatement, classification: Classification) -> str:
         if classification.related_topic_id is not None and classification.is_major_escalation
         else ""
     )
-    headline = html.escape(escalation_prefix + _short_headline(classification, raw))
-    ticker_str = _format_ticker_calls_compact(classification.ticker_calls)
-    return f"{emoji} {classification.confidence:.0%} — {headline}\n📈 {ticker_str}"
+    ticker_lines = _format_ticker_lines(classification.ticker_calls)
+    # Auf Nutzerwunsch: die Ueberschrift wird NICHT um ihrer selbst willen abgekuerzt
+    # (voller Begruendungstext). _short_headline() truncatet nur, wenn der Text den
+    # verbleibenden Platz in der Nachricht tatsaechlich sprengen wuerde - ein reines
+    # Sicherheitsnetz fuer einen pathologisch langen Begruendungstext, das im
+    # Normalfall (System-Prompt verlangt 1-2 Saetze) nie greift, weil max_length dann
+    # weit ueber jeder realistischen Textlaenge liegt.
+    # Vorab-Budget (Normalfall): +1 fuer die von _short_headline() ggf. angehaengte
+    # Ellipse. Reicht bei ganz normalem Text locker, verhindert aber NICHT, dass
+    # html.escape() den Text nachtraeglich nochmal deutlich verlaengert, falls er
+    # ungewoehnlich viele "<"/"&"/etc. enthaelt (jedes Zeichen kann bis zu 5 Zeichen
+    # werden - "<" -> "&lt;") - dafuer gibt es den harten Notfall-Schnitt danach.
+    fixed_overhead = len(f"{emoji} {classification.confidence:.0%} — \n{ticker_lines}") + len(escalation_prefix)
+    max_headline_len = max(50, TELEGRAM_MAX_LENGTH - fixed_overhead - 1)
+    headline = html.escape(escalation_prefix + _short_headline(classification, raw, max_headline_len))
+    text = f"{emoji} {classification.confidence:.0%} — {headline}\n{ticker_lines}"
+
+    if len(text) > TELEGRAM_MAX_LENGTH:
+        # Absoluter Notfall (z.B. Begruendungstext voller "<"/"&", die durchs
+        # Escaping stark aufblaehen): bereits escapten Ueberschrift-String hart auf
+        # den tatsaechlich verbleibenden Platz kuerzen. Im Extremfall entsteht dabei
+        # ein abgeschnittenes HTML-Entity-Fragment (z.B. "&am" statt "&amp;") - das
+        # zeigt Telegram als harmlosen literalen Text, bricht aber (anders als ein
+        # abgeschnittenes Tag) niemals die HTML-Struktur der Nachricht, da hier keine
+        # Tags im Spiel sind.
+        overflow = len(text) - TELEGRAM_MAX_LENGTH
+        headline = headline[:-overflow] if overflow < len(headline) else ""
+        text = f"{emoji} {classification.confidence:.0%} — {headline}\n{ticker_lines}"
+    return text
 
 
 async def _send(text: str, retries: int = 2) -> bool:

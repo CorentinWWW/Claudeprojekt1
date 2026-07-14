@@ -76,12 +76,21 @@ CLASSIFY_TOOL = {
                                 "Stahl einkaufen, short bedeuten)."
                             ),
                         },
+                        "confidence": {
+                            "type": "number",
+                            "description": (
+                                "Konfidenz (0.0-1.0) SPEZIELL fuer diesen Ticker - kann von der "
+                                "Gesamt-Konfidenz abweichen (z.B. ist der Sektor-Zusammenhang "
+                                "klar, aber die Auswirkung auf GENAU dieses Unternehmen weniger "
+                                "sicher, oder umgekehrt)."
+                            ),
+                        },
                         "reasoning": {
                             "type": "string",
                             "description": "Ein kurzer Satz, warum long/short fuer diesen Ticker.",
                         },
                     },
-                    "required": ["ticker", "direction", "reasoning"],
+                    "required": ["ticker", "direction", "confidence", "reasoning"],
                 },
                 "description": (
                     "Konkret betroffene Boersenticker mit je einer Long/Short-Einschaetzung. "
@@ -161,11 +170,14 @@ def _system_prompt() -> str:
         "Nenne nur Ticker, bei denen du dir des Kuerzels wirklich sicher bist - erfinde "
         "niemals einen Ticker und rate nicht; im Zweifel lieber nur den Sektor nennen "
         "und ticker_calls leer lassen. Bei jedem Ticker gib eine "
-        "long/short-Einschaetzung ab: ueberlege konkret, ob diese Aussage fuer GENAU "
-        "dieses Unternehmen eher steigende (long) oder fallende (short) Kurse erwarten "
-        "laesst - das kann pro Ticker unterschiedlich sein (Gewinner vs. Verlierer "
-        "derselben Massnahme, z.B. Zoelle die einer Branche nuetzen und einer anderen "
-        "schaden). Falls eine Liste bereits heute gemeldeter Themen mitgegeben wird, "
+        "long/short-Einschaetzung UND eine eigene Konfidenz dafuer ab: ueberlege konkret, "
+        "ob diese Aussage fuer GENAU dieses Unternehmen eher steigende (long) oder "
+        "fallende (short) Kurse erwarten laesst - das kann pro Ticker unterschiedlich "
+        "sein (Gewinner vs. Verlierer derselben Massnahme, z.B. Zoelle die einer Branche "
+        "nuetzen und einer anderen schaden), und die Konfidenz pro Ticker kann von der "
+        "Gesamt-Konfidenz abweichen (z.B. sicher, DASS ein Sektor betroffen ist, aber "
+        "weniger sicher, WIE STARK genau dieser Ticker reagiert). Falls eine Liste "
+        "bereits heute gemeldeter Themen mitgegeben wird, "
         "prüfe ob die neue Aussage im Kern dazugehoert und ob sie eine derart deutliche "
         "Verschaerfung darstellt, dass ein erneuter Alert gerechtfertigt ist (siehe "
         "related_topic_id/is_major_escalation). Deine Einschaetzung ist Analyse "
@@ -216,23 +228,31 @@ class DailyCapExceeded(RuntimeError):
     _classify_and_store)."""
 
 
+def _clamped_confidence(value) -> float:
+    # Ein explizit gesetztes JSON "null" (statt fehlendem Feld) liefert bei .get()
+    # trotzdem None zurueck - float(None) wuerde mit TypeError crashen. Ausserdem
+    # koennte ein Modell ausserhalb des Schemas einen Wert > 1, < 0 oder einen
+    # nicht-numerischen String liefern.
+    try:
+        parsed = float(value) if value is not None else 0.0
+    except (TypeError, ValueError):
+        parsed = 0.0
+    return max(0.0, min(1.0, parsed))
+
+
 def _classification_from_tool_input(data: dict) -> Classification:
     raw_ticker_calls = data.get("ticker_calls") or []
     ticker_calls = [
         {
             "ticker": tc.get("ticker", ""),
             "direction": tc.get("direction") or "long",
+            "confidence": _clamped_confidence(tc.get("confidence")),
             "reasoning": tc.get("reasoning", ""),
         }
         for tc in raw_ticker_calls
         if isinstance(tc, dict) and tc.get("ticker")
     ]
-    # data.get("confidence", 0.0) wuerde bei einem explizit gesetzten JSON "null" (statt
-    # fehlendem Feld) trotzdem None zurueckgeben - float(None) crasht mit TypeError.
-    # Ebenso koennte ein Modell ausserhalb des Schemas einen Wert > 1 oder < 0 liefern.
-    confidence = data.get("confidence")
-    confidence = float(confidence) if confidence is not None else 0.0
-    confidence = max(0.0, min(1.0, confidence))
+    confidence = _clamped_confidence(data.get("confidence"))
     return Classification(
         is_market_relevant=bool(data.get("is_market_relevant", False)),
         sentiment=data.get("sentiment") or "neutral",

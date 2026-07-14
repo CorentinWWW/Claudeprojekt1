@@ -253,13 +253,16 @@ def mark_alert_sent(statement_id: int):
 
 def _normalize_ticker_calls(raw_tickers: list) -> list[dict]:
     # Vor der Einfuehrung von Long/Short-Empfehlungen wurden hier einfache
-    # Ticker-Strings gespeichert. Alte, aus einem GitHub-Actions-Cache
-    # ueberlebende Zeilen sollen die Anzeige nicht zum Absturz bringen.
+    # Ticker-Strings gespeichert; vor der Einfuehrung von Pro-Ticker-Konfidenz fehlte
+    # das "confidence"-Feld in sonst schon dict-foermigen Eintraegen. Alte, aus einem
+    # GitHub-Actions-Cache ueberlebende Zeilen sollen die Anzeige nicht zum Absturz
+    # bringen bzw. keinen KeyError/None-Vergleich beim Sortieren nach Konfidenz ausloesen.
     normalized = []
     for t in raw_tickers:
         if isinstance(t, str):
-            normalized.append({"ticker": t, "direction": None, "reasoning": ""})
+            normalized.append({"ticker": t, "direction": None, "confidence": None, "reasoning": ""})
         else:
+            t.setdefault("confidence", None)
             normalized.append(t)
     return normalized
 

@@ -161,10 +161,15 @@ Chunks (Standard 30s), keine Wort-für-Wort-Live-Transkription.
     dieselbe Aussage sonst über zig fremdsprachige Übersetzungen/Umformulierungen
     immer wieder als "neues" Statement liefern - die GDELT-Abfrage ist deshalb
     fest auf `sourcelang:english` eingeschränkt.
-- **Long/Short-Einschätzung pro Ticker**: statt nur "betroffene Ticker" gibt Claude
-  für jeden genannten Ticker eine `long`/`short`-Einschätzung mit Begründung ab -
-  auch innerhalb derselben Meldung können unterschiedliche Ticker unterschiedlich
-  betroffen sein (z.B. Zölle die Stahlproduzenten nützen, aber Autobauern schaden).
+- **Long/Short-Einschätzung pro Ticker, jeweils mit eigener Konfidenz**: statt nur
+  "betroffene Ticker" gibt Claude für jeden genannten Ticker eine `long`/`short`-
+  Einschätzung UND eine eigene Konfidenz dafür ab - auch innerhalb derselben Meldung
+  können unterschiedliche Ticker unterschiedlich betroffen und unterschiedlich sicher
+  eingeschätzt sein (z.B. Zölle die Stahlproduzenten sicher nützen, aber Autobauern nur
+  mit geringerer Sicherheit schaden). Der Telegram-Alert zeigt die vollständige
+  Überschrift (nicht abgekürzt) sowie alle Ticker als eigene Zeile mit Long/Short-Wort
+  und Prozent-Konfidenz, sortiert nach Konfidenz absteigend - die sicherste
+  Einschätzung steht ganz oben.
 - **Klassifikation standardmäßig seriell** (`MAX_CONCURRENT_CLASSIFICATIONS=1`):
   zwei fast zeitgleich klassifizierte Statements zum selben Thema können sich
   gegenseitig nicht als Duplikat erkennen, weil der Themen-Kontext (Tier 2) erst
