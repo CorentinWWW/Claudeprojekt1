@@ -1,0 +1,32 @@
+name: Tests
+
+# Laeuft bei jedem Push: fuehrt die komplette Test-Suite (tests/) aus, damit eine
+# Regression sofort als rotes Kreuz am Commit sichtbar wird, statt erst im naechsten
+# echten Monitor-Lauf (oder gar erst per verpasstem Telegram-Alert) aufzufallen.
+# Kostenhinweis: die Tests laufen in Sekunden und machen KEINE echten Claude-/
+# Telegram-Calls (alles gemockt) - weder API-Kosten noch nennenswerte
+# Actions-Minuten.
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Syntax-Check aller Module
+        run: python -m py_compile app/*.py app/sources/*.py main.py run_once.py
+
+      - name: Test-Suite
+        run: python tests/run_tests.py

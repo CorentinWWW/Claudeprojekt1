@@ -422,5 +422,21 @@ Einschätzung abgleichen).
 | `GET /` | Dashboard | – |
 | `GET /api/statements?limit=&only_relevant=` | Feed als JSON | `X-API-Key`, falls `DASHBOARD_API_KEY` gesetzt |
 | `GET /api/stats` | Aggregierte Statistik | `X-API-Key`, falls `DASHBOARD_API_KEY` gesetzt |
-| `GET /api/health` | Status pro Quelle, Konfigurationsfehler/-warnungen, Uptime | – (bewusst offen für Uptime-Checks) |
+| `GET /api/health` | Status pro Quelle, Konfigurationsfehler/-warnungen, Uptime, heutiger Verbrauch des Tages-Kostendeckels (`classification_calls_today`/`_limit`) | – (bewusst offen für Uptime-Checks) |
 | `POST /api/test` | Beliebigen Text durch die volle Pipeline schicken (siehe oben), max. 4000 Zeichen | `X-API-Key`, falls `DASHBOARD_API_KEY` gesetzt |
+
+## Tests
+
+Die Test-Suite liegt in `tests/` (60+ Checks: Duplikaterkennung, Tages-Kostendeckel
+inkl. Race-Sicherheit, Schema-Migration, Telegram-Formatierung inkl. HTML-Injection-
+und Längen-Edge-Cases, Dashboard-Auth, Quellen-Filter). Alle Claude-/Telegram-Calls
+sind gemockt - die Tests kosten nichts und laufen in Sekunden:
+
+```bash
+python tests/run_tests.py
+```
+
+Jede Testdatei läuft in einem eigenen Prozess (bewusst kein pytest, siehe Kommentar
+in `tests/run_tests.py`). Über `.github/workflows/tests.yml` läuft die Suite
+automatisch bei jedem Push - eine Regression erscheint sofort als rotes Kreuz am
+Commit.

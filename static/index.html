@@ -243,8 +243,14 @@ function directionArrow(direction) {
 
 function renderTickerCalls(tickerCalls) {
   if (!tickerCalls || !tickerCalls.length) return '–';
-  return tickerCalls.map(tc => {
-    const label = tc.direction ? `${tc.ticker} (${tc.direction})` : tc.ticker;
+  // Gleiche Darstellung wie im Telegram-Alert: nach Ticker-Konfidenz absteigend
+  // sortiert (sicherste Einschaetzung zuerst) und mit Prozent-Angabe. Alte DB-Zeilen
+  // ohne confidence-Feld (vor dessen Einfuehrung) werden ans Ende sortiert und ohne
+  // Prozent angezeigt statt ein irrefuehrendes "0%" zu behaupten.
+  const sorted = [...tickerCalls].sort((a, b) => (b.confidence || 0) - (a.confidence || 0));
+  return sorted.map(tc => {
+    const conf = tc.confidence != null ? ` ${Math.round(tc.confidence * 100)}%` : '';
+    const label = tc.direction ? `${tc.ticker} (${tc.direction})${conf}` : `${tc.ticker}${conf}`;
     const title = tc.reasoning ? ` title="${escapeAttr(tc.reasoning)}"` : '';
     return `<span class="tag"${title}>${directionArrow(tc.direction)} ${escapeHtml(label)}</span>`;
   }).join('');
@@ -290,17 +296,27 @@ async function loadHealth() {
 
   const statusRow = document.getElementById('statusRow');
   const entries = Object.entries(health.sources || {});
-  if (!entries.length) {
-    statusRow.innerHTML = '<span class="empty">Keine Quellen aktiv.</span>';
-  } else {
-    statusRow.innerHTML = entries.map(([name, s]) => {
-      let dotClass = 'unknown';
-      if (s.last_success_at) dotClass = 'ok';
-      if (s.last_error && (s.last_error_at || 0) > (s.last_success_at || 0)) dotClass = 'warn';
-      return `<div class="status-chip"><span class="dot ${dotClass}"></span>
-        <span>${escapeHtml(name)} · letzter Poll ${timeAgo(s.last_poll_at)} · ${s.total_fetched} gesamt</span></div>`;
-    }).join('');
+  const chips = entries.map(([name, s]) => {
+    let dotClass = 'unknown';
+    if (s.last_success_at) dotClass = 'ok';
+    if (s.last_error && (s.last_error_at || 0) > (s.last_success_at || 0)) dotClass = 'warn';
+    return `<div class="status-chip"><span class="dot ${dotClass}"></span>
+      <span>${escapeHtml(name)} · letzter Poll ${timeAgo(s.last_poll_at)} · ${s.total_fetched} gesamt</span></div>`;
+  });
+
+  // Kostentransparenz: wie viel vom Tages-Kostendeckel (MAX_CLASSIFICATIONS_PER_DAY)
+  // ist heute schon verbraucht? Faerbt sich gelb ab 80%, rot bei erreichtem Limit.
+  if (health.classification_calls_today != null && health.classification_calls_limit != null) {
+    const used = health.classification_calls_today;
+    const limit = health.classification_calls_limit;
+    let dotClass = 'ok';
+    if (used >= limit) dotClass = 'error';
+    else if (used >= limit * 0.8) dotClass = 'warn';
+    chips.push(`<div class="status-chip"><span class="dot ${dotClass}"></span>
+      <span>Claude-Calls heute: ${used}/${limit}</span></div>`);
   }
+
+  statusRow.innerHTML = chips.length ? chips.join('') : '<span class="empty">Keine Quellen aktiv.</span>';
 }
 
 async function loadStats() {

@@ -12,6 +12,7 @@ from app import config
 from app.classifier import DailyCapExceeded, classify, selftest
 from app.db import (
     RawStatement,
+    get_classification_calls_today,
     get_recent,
     get_stats,
     init_db,
@@ -101,6 +102,16 @@ def api_health():
     # abgefragt werden koennen. Gibt nur Status/Fehlertexte preis, keine Statement-Inhalte.
     now = time.time()
     started_at = run_health.get("started_at")
+
+    # Kostentransparenz: wie viele Claude-Calls der Tages-Kostendeckel heute schon
+    # verbraucht hat. Defensiv, damit /api/health auch dann noch antwortet, wenn die
+    # DB gar nicht initialisiert werden konnte (genau dann ist der Endpunkt zur
+    # Diagnose ja am wichtigsten).
+    try:
+        calls_today = get_classification_calls_today()
+    except Exception:
+        calls_today = None
+
     return {
         "ok": not _startup_errors,
         "errors": _startup_errors,
@@ -108,6 +119,8 @@ def api_health():
         "uptime_seconds": (now - started_at) if started_at else None,
         "loop_restarts": run_health.get("loop_restarts", 0),
         "last_cycle_at": run_health.get("last_cycle_at"),
+        "classification_calls_today": calls_today,
+        "classification_calls_limit": config.MAX_CLASSIFICATIONS_PER_DAY,
         "sources": source_health,
     }
 
