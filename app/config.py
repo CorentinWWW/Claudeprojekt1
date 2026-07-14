@@ -23,7 +23,11 @@ def _str(name: str, default: str = "") -> str:
 
 
 ANTHROPIC_API_KEY = _str("ANTHROPIC_API_KEY")
-CLAUDE_MODEL = _str("CLAUDE_MODEL", "claude-sonnet-5")
+# Haiku statt Sonnet als Default: die Klassifikation ist eine strukturierte,
+# schema-gefuehrte Aufgabe (Tool-Use mit festem JSON-Schema) - dafuer reicht Haiku in
+# der Praxis gut aus, kostet aber nur einen Bruchteil pro Call. Bei Bedarf in .env auf
+# z.B. "claude-sonnet-5" fuer potenziell bessere Einschaetzungsqualitaet umstellen.
+CLAUDE_MODEL = _str("CLAUDE_MODEL", "claude-haiku-4-5")
 CLAUDE_MAX_RETRIES = int(os.getenv("CLAUDE_MAX_RETRIES", "3"))
 CLAUDE_TIMEOUT_SECONDS = float(os.getenv("CLAUDE_TIMEOUT_SECONDS", "30"))
 
@@ -55,8 +59,8 @@ MAX_CONCURRENT_CLASSIFICATIONS = int(os.getenv("MAX_CONCURRENT_CLASSIFICATIONS",
 # (jeder NEUE, noch nicht bekannte Statement-Text kostet einen Call, auch wenn er sich
 # danach als Themen-Duplikat herausstellt - die Zweistufige-Duplikaterkennung spart
 # also Alerts, aber nicht diesen Call selbst). Bei ~1000-1500 Input- und 200-400
-# Output-Tokens pro Call kostet der Default von 100 Calls/Tag bei Sonnet-Preisen
-# (Stand: $2-3 / $10-15 pro 1 Mio. Token) grob geschaetzt max. ca. 0.40-0.70 EUR/Tag,
+# Output-Tokens pro Call kostet der Default von 100 Calls/Tag bei Haiku-4.5-Preisen
+# (Stand: $1 / $5 pro 1 Mio. Token) grob geschaetzt max. ca. 0.15-0.25 EUR/Tag,
 # unabhaengig vom tatsaechlichen Nachrichtenaufkommen. Persistiert in SQLite, gilt also
 # auch ueber einzelne GitHub-Actions-Laeufe hinweg (siehe app/db.py:
 # get_classification_calls_today/record_classification_call).

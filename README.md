@@ -175,6 +175,11 @@ Chunks (Standard 30s), keine Wort-für-Wort-Live-Transkription.
   `ALERT_DIGEST_THRESHOLD` (Standard 3) Meldungen gleichzeitig alarmwürdig (z.B. bei
   einer echten Großlage mit vielen unterschiedlichen Artikeln), wird daraus EINE
   Sammel-Nachricht statt einer Flut von Einzelnachrichten.
+- **Haiku statt Sonnet als Standard-Modell**: Klassifikation ist eine strukturierte,
+  schema-gefuehrte Aufgabe (Tool-Use mit festem JSON-Schema) - dafuer reicht
+  `claude-haiku-4-5` gut aus und kostet nur einen Bruchteil von Sonnet pro Call. Über
+  `CLAUDE_MODEL` in `.env` z.B. auf `claude-sonnet-5` umstellbar, falls die
+  Einschätzungsqualität wichtiger ist als die Kosten.
 - **Harter Kostendeckel (`MAX_CLASSIFICATIONS_PER_DAY`, Standard 100/Tag)**: jede
   neue, noch nicht bekannte Meldung kostet einen echten Claude-Call - auch wenn sie
   sich danach als Themen-Duplikat herausstellt (die Duplikaterkennung erspart den
@@ -373,7 +378,8 @@ Siehe `.env.example` für alle Variablen. Wichtige zusätzliche Stellschrauben:
 | `DEDUP_WINDOW_SECONDS` | Zeitfenster für die Text-Duplikatsuche, Tier 1 (Standard 24h) |
 | `TOPIC_CONTEXT_WINDOW_HOURS` / `TOPIC_CONTEXT_MAX_ITEMS` | Wie viele Stunden zurück / wie viele Meldungen als Themen-Kontext an Claude mitgegeben werden, Tier 2 (Standard 24h / 20) |
 | `ALERT_DIGEST_THRESHOLD` | Ab wie vielen gleichzeitigen Alerts zu einer Sammel-Nachricht gebündelt wird (Standard 3) |
-| `MAX_CLASSIFICATIONS_PER_DAY` | Harter Kostendeckel: mehr Claude-Calls finden an einem Tag (UTC) nicht mehr statt (Standard 100 ≈ max. 0.40-0.70 €/Tag) - siehe Abschnitt unten |
+| `CLAUDE_MODEL` | Modell fuer die Klassifikation (Standard `claude-haiku-4-5`, guenstig; `claude-sonnet-5` fuer potenziell bessere Qualitaet zu mehrfachen Kosten) |
+| `MAX_CLASSIFICATIONS_PER_DAY` | Harter Kostendeckel: mehr Claude-Calls finden an einem Tag (UTC) nicht mehr statt (Standard 100 ≈ max. 0.15-0.25 €/Tag bei Haiku) - siehe Abschnitt oben |
 | `TELEGRAM_STARTUP_NOTICE` | Heartbeat-Nachricht beim Start senden (Standard an) |
 | `TRUTH_SOCIAL_BROWSER_FALLBACK` | Playwright-Fallback für Truth Social an/aus (Standard an) |
 | `CLAUDE_MAX_RETRIES` / `CLAUDE_TIMEOUT_SECONDS` | Robustheit der Claude-API-Calls |
