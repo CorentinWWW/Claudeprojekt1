@@ -162,14 +162,16 @@ Chunks (Standard 30s), keine Wort-für-Wort-Live-Transkription.
     immer wieder als "neues" Statement liefern - die GDELT-Abfrage ist deshalb
     fest auf `sourcelang:english` eingeschränkt.
 - **Präzisions-Filter: nur die sichersten Trade-Signale (`ALERT_MIN_TICKER_CONFIDENCE`,
-  Standard 0.85)**: es wird **nur noch eine Telegram-Nachricht verschickt, wenn die
+  Standard 0.90)**: es wird **nur noch eine Telegram-Nachricht verschickt, wenn die
   Meldung mindestens eine konkrete Aktie mit klarer Long/Short-Richtung und sehr hoher
   Pro-Ticker-Konfidenz** enthält. Reine „marktrelevante" Meldungen ohne konkrete,
   hochsichere Aktie lösen bewusst **keinen** Alert mehr aus – das Ziel ist maximale
   Präzision statt Vollständigkeit (nur die klarsten „diese Aktie geht hoch/runter"-
-  Signale). Die Schwelle ist ein einziger Regler: `0.90` = sehr streng (nur die absolut
-  sichersten Trades), `0.85` = streng (Standard), `0.80` = moderat, `0` = Filter aus
+  Signale). Die Schwelle ist ein einziger Regler: `0.90` = sehr streng (Standard, nur
+  die absolut sichersten Trades), `0.85` = streng, `0.80` = moderat, `0` = Filter aus
   (altes Verhalten: jede marktrelevante Meldung oberhalb `ALERT_CONFIDENCE_THRESHOLD`).
+  Im GitHub-Actions-Betrieb ohne Code-Änderung anpassbar über eine Repository-Variable
+  `ALERT_MIN_TICKER_CONFIDENCE` (Settings → Secrets and variables → Actions → Variables).
   Die Entscheidung ist an **einer** Stelle zentralisiert (`orchestrator.py`:
   `is_alert_worthy`) und wird an **allen** Alarm-Pfaden angewandt – Primärpfad,
   manueller Test *und* der Wiederhol-Pfad für nicht zugestellte Alerts
@@ -446,7 +448,7 @@ Siehe `.env.example` für alle Variablen. Wichtige zusätzliche Stellschrauben:
 | Variable | Bedeutung |
 |---|---|
 | `ALERT_CONFIDENCE_THRESHOLD` | Ab welcher Gesamt-Konfidenz (0-1) eine Meldung überhaupt für einen Alert in Frage kommt (Standard 0.5) |
-| `ALERT_MIN_TICKER_CONFIDENCE` | Präzisions-Filter: Alert nur, wenn eine konkrete Aktie mit klarer Long/Short-Richtung diese Pro-Ticker-Konfidenz erreicht (Standard 0.85; `0.90` sehr streng, `0` schaltet den Filter ab) – siehe Abschnitt oben |
+| `ALERT_MIN_TICKER_CONFIDENCE` | Präzisions-Filter: Alert nur, wenn eine konkrete Aktie mit klarer Long/Short-Richtung diese Pro-Ticker-Konfidenz erreicht (Standard 0.90 = sehr streng; `0.85`/`0.80` lockern, `0` schaltet den Filter ab) – siehe Abschnitt oben |
 | `MAX_CONCURRENT_CLASSIFICATIONS` | Wie viele Claude-Calls parallel laufen dürfen (Standard **1** = seriell, siehe Duplikat-Hinweis oben; höher = schneller bei Nachrichtenschüben, aber Risiko doppelter Alerts) |
 | `DEDUP_SIMILARITY_THRESHOLD` | Ab welcher Textähnlichkeit (0-1) zwei Statements als Duplikat gelten (Standard 0.82) |
 | `DEDUP_WINDOW_SECONDS` | Zeitfenster für die Text-Duplikatsuche, Tier 1 (Standard 24h) |

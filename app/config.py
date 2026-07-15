@@ -61,10 +61,11 @@ ALERT_CONFIDENCE_THRESHOLD = _float("ALERT_CONFIDENCE_THRESHOLD", 0.5)
 # einer Pro-Ticker-Konfidenz >= diesem Wert enthaelt. Zweck: der Nutzer will nur die
 # sichersten, direkt handelbaren Signale ("eine bestimmte Aktie geht hoch/runter") und
 # keine allgemeinen marktrelevanten Meldungen ohne konkrete, hochsichere Aktie. Hoeher
-# = weniger, aber sicherere Nachrichten; niedriger = mehr Nachrichten. 0.85 = streng
-# (nur klare, hochsichere Signale). Auf 0 setzen, um wieder JEDE marktrelevante Meldung
-# oberhalb von ALERT_CONFIDENCE_THRESHOLD zu alarmieren (altes Verhalten).
-ALERT_MIN_TICKER_CONFIDENCE = _float("ALERT_MIN_TICKER_CONFIDENCE", 0.85)
+# = weniger, aber sicherere Nachrichten; niedriger = mehr Nachrichten. 0.90 = sehr
+# streng (nur die absolut sichersten Signale, teils tagelang keine); 0.85 = streng;
+# 0.80 = moderat. Auf 0 setzen, um wieder JEDE marktrelevante Meldung oberhalb von
+# ALERT_CONFIDENCE_THRESHOLD zu alarmieren (altes Verhalten).
+ALERT_MIN_TICKER_CONFIDENCE = _float("ALERT_MIN_TICKER_CONFIDENCE", 0.90)
 # Ab wie vielen gleichzeitig alarmwuerdigen Statements in EINEM Poll-Zyklus zu einer
 # gebuendelten Sammel-Nachricht gewechselt wird statt einer Einzelnachricht pro Statement
 # (verhindert eine Alert-Flut bei einem ploetzlichen Nachrichtenschub).

@@ -60,6 +60,13 @@ jobs:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           TELEGRAM_STARTUP_NOTICE: "false"
+          # Praezisions-Schwelle fuer Alerts (siehe app/config.py:
+          # ALERT_MIN_TICKER_CONFIDENCE). Optional ueber eine GitHub-Repository-Variable
+          # (Settings -> Secrets and variables -> Actions -> Variables) einstellbar, ohne
+          # Code zu aendern. Ist die Variable nicht gesetzt, liefert GitHub hier einen
+          # leeren String, den config.py wie "nicht gesetzt" behandelt -> es gilt dann der
+          # Standard 0.90 aus dem Code.
+          ALERT_MIN_TICKER_CONFIDENCE: ${{ vars.ALERT_MIN_TICKER_CONFIDENCE }}
           MANUAL_TEST_TEXT: ${{ github.event.inputs.test_text }}
           ENABLE_LIVE_AUDIO: "false"
           # Playwright/Chromium ist hier bewusst nicht installiert, um Laeufe
