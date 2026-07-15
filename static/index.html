@@ -305,15 +305,26 @@ async function loadHealth() {
   });
 
   // Kostentransparenz: wie viel vom Tages-Kostendeckel (MAX_CLASSIFICATIONS_PER_DAY)
-  // ist heute schon verbraucht? Faerbt sich gelb ab 80%, rot bei erreichtem Limit.
+  // ist heute schon verbraucht? Grün < 80%, gelb ab 80% des normalen Limits bzw. im
+  // Reserve-Bereich (nur noch wichtige Meldungen), rot erst wenn auch die Reserve
+  // (Priority-Limit) ausgeschöpft ist.
   if (health.classification_calls_today != null && health.classification_calls_limit != null) {
     const used = health.classification_calls_today;
     const limit = health.classification_calls_limit;
+    const priorityLimit = health.classification_calls_priority_limit || limit;
     let dotClass = 'ok';
-    if (used >= limit) dotClass = 'error';
-    else if (used >= limit * 0.8) dotClass = 'warn';
+    let suffix = '';
+    if (used >= priorityLimit) {
+      dotClass = 'error';
+    } else if (used >= limit) {
+      dotClass = 'warn';
+      suffix = ' · nur noch wichtige Meldungen';
+    } else if (used >= limit * 0.8) {
+      dotClass = 'warn';
+    }
+    const cap = priorityLimit > limit ? `${limit} (+${priorityLimit - limit} Reserve)` : `${limit}`;
     chips.push(`<div class="status-chip"><span class="dot ${dotClass}"></span>
-      <span>Claude-Calls heute: ${used}/${limit}</span></div>`);
+      <span>Claude-Calls heute: ${used}/${cap}${suffix}</span></div>`);
   }
 
   statusRow.innerHTML = chips.length ? chips.join('') : '<span class="empty">Keine Quellen aktiv.</span>';

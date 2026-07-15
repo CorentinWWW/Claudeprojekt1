@@ -1,6 +1,7 @@
 import asyncio
 import datetime
 import logging
+import re
 import time
 
 from anthropic import AuthenticationError, NotFoundError, PermissionDeniedError
@@ -17,6 +18,7 @@ from app.config import (
     MAX_CLASSIFICATIONS_PER_DAY,
     MAX_CONCURRENT_CLASSIFICATIONS,
     POLL_INTERVAL_SECONDS,
+    PRIORITY_CLASSIFICATIONS_PER_DAY,
     TELEGRAM_STARTUP_NOTICE,
     TOPIC_CONTEXT_MAX_ITEMS,
     TOPIC_CONTEXT_WINDOW_HOURS,
@@ -53,6 +55,34 @@ logger = logging.getLogger(__name__)
 # nach einem Neustart baut sich der Status einfach durch die naechsten Polls neu auf.
 source_health: dict[str, dict] = {}
 run_health: dict = {"started_at": None, "loop_restarts": 0, "last_cycle_at": None}
+
+# Wortgrenzen-Muster fuer die "besonders wichtig"-Einstufung (siehe is_high_priority).
+# Bewusst STRENGER als der GDELT-Ingestion-Filter (der schon 'market'/'stock'/'trade'
+# etc. abdeckt) - hier zaehlen nur die haertesten, unmittelbar marktbewegenden Themen,
+# damit die knappe Prioritaets-Reserve nicht sofort von jeder markt-nahen Meldung
+# aufgebraucht wird. Rein aus billigen Textsignalen bestimmt (KEIN Claude-Call), da die
+# Wichtigkeit ueber das Tages-Limit entscheiden muss, BEVOR ein Call ausgegeben wird.
+_HIGH_PRIORITY_PATTERN = re.compile(
+    r"\b("
+    r"tariff|tariffs|zoll|zoelle|zölle|sanction|sanctions|sanktion|"
+    r"federal reserve|interest rate|rate cut|rate hike|zinsen|leitzins|"
+    r"executive order|shutdown|default|embargo|nationaliz|verstaatlich|"
+    r"bailout|stimulus|export ban|import ban|price cap"
+    r")\b",
+    re.IGNORECASE,
+)
+
+
+def is_high_priority(raw) -> bool:
+    """Billige, Claude-freie Einschaetzung, ob eine Meldung wichtig genug ist, um die
+    Prioritaets-Reserve oberhalb des normalen Tages-Limits nutzen zu duerfen. True bei
+    (a) direkten Trump-Posts von Truth Social (seine eigenen Worte, am unmittelbarsten
+    handlungsrelevant und ohnehin selten) ODER (b) einem der haertesten Wirtschafts-
+    Signalwoerter im Text. Bewusst konservativ - lieber ein paar wichtige Meldungen
+    verpassen als die Reserve verwaessern."""
+    if getattr(raw, "source", "") == "truth_social":
+        return True
+    return bool(_HIGH_PRIORITY_PATTERN.search(raw.text or ""))
 
 
 def build_sources():
@@ -141,18 +171,34 @@ async def _notify_daily_cap_once():
     Wiederholungs-Schleife)."""
     today = datetime.datetime.now(datetime.timezone.utc).date().isoformat()
     if try_claim_meta_key(f"cap_notice_{today}"):
-        await send_text(
-            f"⏸️ Tages-Limit von {MAX_CLASSIFICATIONS_PER_DAY} Claude-Analysen erreicht - "
-            "neue Meldungen werden bis Mitternacht (UTC) uebersprungen, damit die "
-            "API-Kosten gedeckelt bleiben. Limit anpassbar ueber "
-            "MAX_CLASSIFICATIONS_PER_DAY (.env bzw. GitHub-Variable)."
-        )
+        if PRIORITY_CLASSIFICATIONS_PER_DAY > 0:
+            body = (
+                f"⏸️ Normales Tages-Limit von {MAX_CLASSIFICATIONS_PER_DAY} Claude-Analysen "
+                "erreicht. Bis Mitternacht (UTC) werden nur noch als besonders wichtig "
+                "eingestufte Meldungen analysiert (direkte Trump-Posts sowie harte "
+                "Wirtschaftsthemen wie Zoelle, Sanktionen, Zinsen) - bis zu einer Reserve "
+                f"von insgesamt {MAX_CLASSIFICATIONS_PER_DAY + PRIORITY_CLASSIFICATIONS_PER_DAY} "
+                "Analysen/Tag. So bleiben die Kosten gedeckelt. Limits anpassbar ueber "
+                "MAX_CLASSIFICATIONS_PER_DAY / PRIORITY_CLASSIFICATIONS_PER_DAY "
+                "(.env bzw. GitHub-Variable)."
+            )
+        else:
+            body = (
+                f"⏸️ Tages-Limit von {MAX_CLASSIFICATIONS_PER_DAY} Claude-Analysen erreicht - "
+                "neue Meldungen werden bis Mitternacht (UTC) uebersprungen, damit die "
+                "API-Kosten gedeckelt bleiben. Limit anpassbar ueber "
+                "MAX_CLASSIFICATIONS_PER_DAY (.env bzw. GitHub-Variable)."
+            )
+        await send_text(body)
 
 
 async def _classify_and_store(raw, semaphore: asyncio.Semaphore, recent_context: list[dict]):
+    priority = is_high_priority(raw)
     async with semaphore:
         try:
-            classification = await classify(raw.text, recent_context=recent_context)
+            classification = await classify(
+                raw.text, recent_context=recent_context, priority=priority
+            )
         except DailyCapExceeded as exc:
             # Kein logger.exception() (kein Traceback-Spam): sobald das Tages-Limit
             # erreicht ist, trifft das jedes weitere Statement in diesem und allen
@@ -330,6 +376,13 @@ async def poll_once(sources, semaphore: asyncio.Semaphore):
             continue
 
         to_classify, duplicate_pairs = _partition_duplicates(raw_statements)
+
+        # Wichtige Meldungen zuerst klassifizieren: an einem Tag mit ausgeschoepftem
+        # Budget soll das (knappe) verbleibende Kontingent bevorzugt fuer die
+        # wichtigsten Meldungen ausgegeben werden, statt es an fruehere, unwichtigere
+        # Statements derselben Charge zu verlieren. Stabile Sortierung -> innerhalb
+        # gleicher Prioritaet bleibt die urspruengliche Reihenfolge erhalten.
+        to_classify.sort(key=is_high_priority, reverse=True)
 
         # Mutable statt statischer Snapshot (siehe _classify_and_store): waechst
         # waehrend der Verarbeitung dieser Charge, wenn zuvor gestartete Aufgaben

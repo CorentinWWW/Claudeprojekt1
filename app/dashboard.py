@@ -121,6 +121,12 @@ def api_health():
         "last_cycle_at": run_health.get("last_cycle_at"),
         "classification_calls_today": calls_today,
         "classification_calls_limit": config.MAX_CLASSIFICATIONS_PER_DAY,
+        # Absolutes Tages-Maximum inkl. der Reserve fuer wichtige Meldungen - oberhalb
+        # von classification_calls_limit werden nur noch als wichtig eingestufte
+        # Meldungen analysiert (siehe orchestrator.py: is_high_priority).
+        "classification_calls_priority_limit": (
+            config.MAX_CLASSIFICATIONS_PER_DAY + config.PRIORITY_CLASSIFICATIONS_PER_DAY
+        ),
         "sources": source_health,
     }
 
@@ -147,7 +153,10 @@ async def api_test(req: TestRequest):
         text=req.text,
     )
     try:
-        classification = await classify(raw.text)
+        # priority=True: ein manueller Test wird vom Nutzer bewusst ausgeloest (und ist
+        # selten + auth-geschuetzt), soll also nicht am normalen Tages-Limit scheitern,
+        # solange die Prioritaets-Reserve noch Luft hat.
+        classification = await classify(raw.text, priority=True)
     except DailyCapExceeded as exc:
         # Sonst wuerde ein bereits ausgeschoepftes Tages-Limit hier als undurchsichtiger
         # 500er landen, statt derselben klaren, erwarteten Meldung wie ueberall sonst

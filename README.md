@@ -172,6 +172,17 @@ Chunks (Standard 30s), keine Wort-für-Wort-Live-Transkription.
   Einschätzung steht ganz oben. Die Überschrift ist mit dem Quellartikel verlinkt
   (antippen öffnet den Original-Artikel; nur http/https, Link-Vorschau deaktiviert,
   damit die Nachricht kompakt bleibt).
+- **Robuste Ticker-Erkennung**: jeder von Claude gelieferte Ticker wird vor der Anzeige
+  normalisiert und validiert (`classifier.py`: `_normalize_ticker`/`_clean_ticker_calls`),
+  damit kein Müll beim Nutzer landet. Das entfernt Börsen-/Markt-Präfixe
+  (`NASDAQ:NVDA` → `NVDA`, `NYSE: XOM` → `XOM`) und Cashtag-`$` (`$AAPL` → `AAPL`),
+  vereinheitlicht auf Großbuchstaben und akzeptiert nur echte Kürzel-Formate (1-5
+  Buchstaben, optional ein Klassen-Suffix wie `BRK.B`). Ganze Firmennamen (`Nvidia`),
+  Sätze und Platzhalter (`TBD`, `N/A`, `NONE`, `XYZ` …) werden verworfen statt als
+  vermeintliches Kürzel angezeigt; mehrfach genannte Kürzel werden zusammengeführt (bei
+  Dubletten gewinnt der Eintrag mit der höchsten Ticker-Konfidenz). Zusätzlich schärft
+  der System-Prompt das gewünschte Format ein (offizielles US-Börsenkürzel in
+  Großbuchstaben, ohne Präfix; im Zweifel lieber nur den Sektor nennen als raten).
 - **Klassifikation standardmäßig seriell** (`MAX_CONCURRENT_CLASSIFICATIONS=1`):
   zwei fast zeitgleich klassifizierte Statements zum selben Thema können sich
   gegenseitig nicht als Duplikat erkennen, weil der Themen-Kontext (Tier 2) erst
@@ -213,6 +224,22 @@ Chunks (Standard 30s), keine Wort-für-Wort-Live-Transkription.
   Verbindungs-Check und damit den gesamten Monitoring-Start blockiert. Beim ERSTEN
   Zuschlagen des Limits an einem Tag kommt genau eine Telegram-Notiz - ein
   stummgeschalteter Monitor sähe sonst exakt so aus wie ein ruhiger Nachrichtentag.
+- **Prioritäts-Reserve für wirklich wichtige Meldungen (`PRIORITY_CLASSIFICATIONS_PER_DAY`,
+  Standard 30/Tag)**: ein reiner Hart-Deckel hätte das Problem, dass an einem lauten
+  Nachrichtentag eine echt marktbewegende Meldung stumm untergeht, nur weil das normale
+  Limit schon von unwichtigeren Meldungen aufgebraucht wurde. Deshalb gibt es ein
+  **zweites Kontingent oberhalb** von `MAX_CLASSIFICATIONS_PER_DAY`, das ausschließlich
+  als *wichtig* eingestufte Meldungen nutzen dürfen: direkte Trump-Posts von Truth Social
+  (seine eigenen Worte) sowie harte Wirtschaftsthemen (Zölle, Sanktionen, Zinsen/Fed,
+  Executive Orders, Shutdown, Embargo …). Die Wichtigkeit wird **billig und ohne
+  zusätzlichen Claude-Call** aus Quelle + Signalwörtern bestimmt (`orchestrator.py`:
+  `is_high_priority`) - sie muss ja *vor* dem Ausgeben eines Calls feststehen. Normale
+  Meldungen bleiben hart bei `MAX` gesperrt, wichtige kommen bis zum absoluten
+  Tages-Maximum `MAX + PRIORITY` (Standard 100 + 30 = **130**) noch durch. Technisch
+  derselbe atomare Zähler wie beim Hart-Deckel, nur mit höherem Limit für Prioritäts-Calls
+  (`db.py`: `reserve_classification_call_slot`). Innerhalb einer Charge werden wichtige
+  Meldungen außerdem **zuerst** klassifiziert, damit das knappe Restbudget bevorzugt an
+  sie geht. Auf `0` setzen macht `MAX` wieder zu einem harten Limit für *alle* Meldungen.
 - **Kein grün-aber-tot**: permanente Claude-Konfigurationsfehler (401 = kaputter/
   widerrufener API-Key, 403 = fehlende Berechtigung, 404 = gelöschtes/falsches
   Modell) werden nicht mehr pro Statement geschluckt, sondern beenden den
@@ -410,6 +437,7 @@ Siehe `.env.example` für alle Variablen. Wichtige zusätzliche Stellschrauben:
 | `ALERT_DIGEST_THRESHOLD` | Ab wie vielen gleichzeitigen Alerts zu einer Sammel-Nachricht gebündelt wird (Standard 3) |
 | `CLAUDE_MODEL` | Modell fuer die Klassifikation (Standard `claude-haiku-4-5`, guenstig; `claude-sonnet-5` fuer potenziell bessere Qualitaet zu mehrfachen Kosten) |
 | `MAX_CLASSIFICATIONS_PER_DAY` | Harter Kostendeckel: mehr Claude-Calls finden an einem Tag (UTC) nicht mehr statt (Standard 100 ≈ max. 0.15-0.25 €/Tag bei Haiku) - siehe Abschnitt oben |
+| `PRIORITY_CLASSIFICATIONS_PER_DAY` | Extra-Reserve oberhalb von `MAX`, die nur wichtige Meldungen (direkte Trump-Posts, harte Wirtschaftsthemen) nutzen dürfen - absolutes Tages-Maximum = `MAX + PRIORITY` (Standard 30, also 130 gesamt; `0` deaktiviert die Reserve) - siehe Abschnitt oben |
 | `TELEGRAM_STARTUP_NOTICE` | Heartbeat-Nachricht beim Start senden (Standard an) |
 | `TRUTH_SOCIAL_BROWSER_FALLBACK` | Playwright-Fallback für Truth Social an/aus (Standard an) |
 | `CLAUDE_MAX_RETRIES` / `CLAUDE_TIMEOUT_SECONDS` | Robustheit der Claude-API-Calls |

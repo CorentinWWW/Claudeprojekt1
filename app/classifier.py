@@ -4,6 +4,7 @@ gemeldete Meldung, und falls ja, eskaliert es genug fuer einen erneuten Alert?
 """
 import datetime
 import logging
+import re
 from typing import Optional
 
 from anthropic import APIStatusError, AsyncAnthropic
@@ -14,6 +15,7 @@ from app.config import (
     CLAUDE_MODEL,
     CLAUDE_TIMEOUT_SECONDS,
     MAX_CLASSIFICATIONS_PER_DAY,
+    PRIORITY_CLASSIFICATIONS_PER_DAY,
 )
 from app.db import Classification, record_classification_call, reserve_classification_call_slot
 
@@ -169,7 +171,13 @@ def _system_prompt() -> str:
         "etwas Neues ergibt (blosse Wiederholung != neues Signal). "
         "Nenne nur Ticker, bei denen du dir des Kuerzels wirklich sicher bist - erfinde "
         "niemals einen Ticker und rate nicht; im Zweifel lieber nur den Sektor nennen "
-        "und ticker_calls leer lassen. Bei jedem Ticker gib eine "
+        "und ticker_calls leer lassen. Verwende AUSSCHLIESSLICH das offizielle "
+        "Boersenkuerzel der US-Boerse (NYSE/NASDAQ), in GROSSBUCHSTABEN, OHNE Boersen- "
+        "oder Waehrungsprefix - also 'NVDA' (nicht 'NASDAQ:NVDA', 'Nvidia' oder "
+        "'$NVDA'), 'XOM' fuer ExxonMobil, 'BRK.B' fuer Berkshire Hathaway Klasse B. "
+        "Bevorzuge das meistgehandelte Primaerlisting. Ist ein betroffenes Unternehmen "
+        "nicht boersennotiert oder kennst du sein exaktes Kuerzel nicht sicher, lass es "
+        "weg und nenne stattdessen nur den Sektor. Bei jedem Ticker gib eine "
         "long/short-Einschaetzung UND eine eigene Konfidenz dafuer ab: ueberlege konkret, "
         "ob diese Aussage fuer GENAU dieses Unternehmen eher steigende (long) oder "
         "fallende (short) Kurse erwarten laesst - das kann pro Ticker unterschiedlich "
@@ -240,18 +248,61 @@ def _clamped_confidence(value) -> float:
     return max(0.0, min(1.0, parsed))
 
 
-def _classification_from_tool_input(data: dict) -> Classification:
-    raw_ticker_calls = data.get("ticker_calls") or []
-    ticker_calls = [
-        {
-            "ticker": tc.get("ticker", ""),
+# Gueltiges US-Boersenkuerzel: 1-5 Grossbuchstaben, optional ein Klassen-/Vorzugs-
+# Suffix wie ".B" (BRK.B) oder "-A" (manche Broker-Notationen). Bewusst streng, damit
+# offensichtliche Nicht-Ticker (ganze Firmennamen, Saetze, "N/A", "TBD", eine Branche)
+# gar nicht erst als vermeintliches Kuerzel beim Nutzer landen.
+_TICKER_PATTERN = re.compile(r"^[A-Z]{1,5}(?:[.\-][A-Z]{1,2})?$")
+# Fuehrendes Boersen-/Marktkuerzel-Prefix ("NASDAQ:NVDA", "NYSE: XOM", "NYSEARCA:SPY"),
+# das manche Modelle mitliefern - wird vor der Validierung entfernt.
+_EXCHANGE_PREFIX = re.compile(r"^[A-Z]{2,8}:\s*", re.IGNORECASE)
+# Platzhalter, die zufaellig das Ticker-Format erfuellen, aber offensichtlich kein
+# echtes Kuerzel meinen (kommt vor, wenn das Modell keinen konkreten Ticker hat, das
+# Feld aber trotzdem fuellt). Werden verworfen.
+_TICKER_PLACEHOLDERS = {"TBD", "TBA", "NONE", "NULL", "UNKNOWN", "NA", "XYZ"}
+
+
+def _normalize_ticker(symbol) -> Optional[str]:
+    """Bereinigt ein von Claude geliefertes Ticker-Feld und gibt ein gueltiges Kuerzel
+    in Grossbuchstaben zurueck - oder None, wenn es kein plausibles Boersenkuerzel ist
+    (dann wird der Eintrag verworfen statt Muell an den Nutzer zu schicken)."""
+    if not isinstance(symbol, str):
+        return None
+    s = symbol.strip()
+    s = _EXCHANGE_PREFIX.sub("", s)  # "NASDAQ:NVDA" -> "NVDA"
+    s = s.lstrip("$").strip()        # "$AAPL" -> "AAPL" (Cashtag)
+    s = s.upper()
+    if s in _TICKER_PLACEHOLDERS:
+        return None
+    if _TICKER_PATTERN.match(s):
+        return s
+    return None
+
+
+def _clean_ticker_calls(raw_ticker_calls) -> list[dict]:
+    """Normalisiert/validiert die Ticker und dedupliziert sie (bei mehrfach genanntem
+    Kuerzel gewinnt der Eintrag mit der hoechsten Ticker-Konfidenz)."""
+    by_ticker: dict[str, dict] = {}
+    for tc in raw_ticker_calls:
+        if not isinstance(tc, dict):
+            continue
+        ticker = _normalize_ticker(tc.get("ticker"))
+        if ticker is None:
+            continue
+        entry = {
+            "ticker": ticker,
             "direction": tc.get("direction") or "long",
             "confidence": _clamped_confidence(tc.get("confidence")),
             "reasoning": tc.get("reasoning", ""),
         }
-        for tc in raw_ticker_calls
-        if isinstance(tc, dict) and tc.get("ticker")
-    ]
+        existing = by_ticker.get(ticker)
+        if existing is None or entry["confidence"] > existing["confidence"]:
+            by_ticker[ticker] = entry
+    return list(by_ticker.values())
+
+
+def _classification_from_tool_input(data: dict) -> Classification:
+    ticker_calls = _clean_ticker_calls(data.get("ticker_calls") or [])
     confidence = _clamped_confidence(data.get("confidence"))
     return Classification(
         is_market_relevant=bool(data.get("is_market_relevant", False)),
@@ -290,6 +341,7 @@ async def classify(
     text: str,
     recent_context: Optional[list[dict]] = None,
     _bypass_daily_cap: bool = False,
+    priority: bool = False,
 ) -> Classification:
     if _client is None:
         raise RuntimeError("ANTHROPIC_API_KEY ist nicht gesetzt")
@@ -303,15 +355,26 @@ async def classify(
     # Der Selftest-Call soll aber trotzdem GEZAEHLT werden (record_classification_call)
     # - sonst waere jeder Prozess-Neustart ein unsichtbarer, nicht mitgezaehlter
     # Kostenpunkt ausserhalb des dokumentierten "harten" Tages-Limits.
+    #
+    # priority=True (als besonders wichtig eingestufte Meldung, siehe orchestrator.py:
+    # is_high_priority) darf die Reserve oberhalb des normalen Limits nutzen: derselbe
+    # atomare Zaehler, nur mit hoeherem Limit (MAX + PRIORITY). Dadurch bleiben normale
+    # Meldungen ab MAX gesperrt, waehrend wichtige Meldungen bis zum absoluten
+    # Tages-Maximum (MAX + PRIORITY) noch durchkommen.
     if _bypass_daily_cap:
         record_classification_call()
-    elif not reserve_classification_call_slot(MAX_CLASSIFICATIONS_PER_DAY):
-        raise DailyCapExceeded(
-            f"Taegliches Claude-Klassifikations-Limit ({MAX_CLASSIFICATIONS_PER_DAY}) "
-            "erreicht - um die API-Kosten zu begrenzen, werden bis zum naechsten Tag "
-            "(UTC) keine weiteren Statements klassifiziert. Siehe "
-            "MAX_CLASSIFICATIONS_PER_DAY in .env."
-        )
+    else:
+        limit = MAX_CLASSIFICATIONS_PER_DAY
+        if priority:
+            limit += PRIORITY_CLASSIFICATIONS_PER_DAY
+        if not reserve_classification_call_slot(limit):
+            raise DailyCapExceeded(
+                f"Taegliches Claude-Klassifikations-Limit ({limit}) erreicht - um die "
+                "API-Kosten zu begrenzen, werden bis zum naechsten Tag (UTC) "
+                + ("auch keine wichtigen " if priority else "keine weiteren ")
+                + "Statements klassifiziert. Siehe MAX_CLASSIFICATIONS_PER_DAY / "
+                "PRIORITY_CLASSIFICATIONS_PER_DAY in .env."
+            )
 
     context_block = _build_context_block(recent_context)
     response = await _client.messages.create(

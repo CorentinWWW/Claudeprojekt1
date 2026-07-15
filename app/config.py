@@ -83,6 +83,17 @@ MAX_CONCURRENT_CLASSIFICATIONS = _int("MAX_CONCURRENT_CLASSIFICATIONS", 1)
 # get_classification_calls_today/record_classification_call).
 MAX_CLASSIFICATIONS_PER_DAY = _int("MAX_CLASSIFICATIONS_PER_DAY", 100)
 
+# ZUSAETZLICHE Reserve oberhalb von MAX_CLASSIFICATIONS_PER_DAY, die AUSSCHLIESSLICH
+# fuer als besonders wichtig eingestufte Meldungen (siehe orchestrator.py:
+# is_high_priority - direkte Trump-Posts, harte Wirtschaftsthemen wie Zoelle/Sanktionen/
+# Zinsen) verwendet werden darf. Zweck: an einem Tag mit einem Nachrichtenschub soll das
+# normale Limit nicht dazu fuehren, dass eine WIRKLICH wichtige Meldung stillschweigend
+# uebersprungen wird, nur weil vorher viel Unwichtiges den Zaehler gefuellt hat. Das
+# absolute Tages-Maximum bleibt hart gedeckelt bei MAX + PRIORITY (Default 100 + 30 =
+# 130) - die Kosten koennen also nicht davonlaufen. Auf 0 setzen, um die Reserve zu
+# deaktivieren (dann gilt wieder ein einziges hartes Limit fuer alle).
+PRIORITY_CLASSIFICATIONS_PER_DAY = _int("PRIORITY_CLASSIFICATIONS_PER_DAY", 30)
+
 # Statements, deren Text zu >= diesem Wert (0-1, difflib-Aehnlichkeit) einem kuerzlich
 # gesehenen Statement gleicht, gelten als Duplikat (z.B. dieselbe Meldung bei
 # GDELT und RSS, oder von vielen Portalen wortgleich syndiziert) und werden nicht

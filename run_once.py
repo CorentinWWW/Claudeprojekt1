@@ -56,7 +56,9 @@ async def main() -> int:
             text=test_text,
         )
         try:
-            classification = await classify(raw.text)
+            # priority=True: ein manuell per workflow_dispatch ausgeloester Test soll
+            # nicht am normalen Tages-Limit scheitern, solange die Reserve noch Luft hat.
+            classification = await classify(raw.text, priority=True)
         except DailyCapExceeded as exc:
             # Erwarteter, kein echter Fehler (z.B. wenn poll_once() oben im selben
             # Lauf das Tages-Limit schon ausgeschoepft hat) - soll den Workflow-Run

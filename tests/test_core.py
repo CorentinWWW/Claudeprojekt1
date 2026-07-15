@@ -229,7 +229,7 @@ def test_related_topic_id_validation():
     import app.orchestrator as orch
     from app.db import Classification, RawStatement
 
-    async def fake_classify(text, recent_context=None):
+    async def fake_classify(text, recent_context=None, priority=False, _bypass_daily_cap=False):
         return Classification(
             is_market_relevant=True,
             sentiment="negative",

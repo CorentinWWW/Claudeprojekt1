@@ -49,7 +49,7 @@ def test_try_claim_meta_key():
 def test_cap_notice_sent_exactly_once():
     tmp_name, db, orch = _fresh_modules()
 
-    async def fake_classify(text, recent_context=None):
+    async def fake_classify(text, recent_context=None, priority=False, _bypass_daily_cap=False):
         raise orch.DailyCapExceeded("Tages-Limit erreicht (Test)")
 
     sent = []
@@ -104,7 +104,7 @@ def test_permanent_error_propagates():
         "last_error": None, "last_error_at": None, "total_fetched": 0,
     }
 
-    async def fake_classify(text, recent_context=None):
+    async def fake_classify(text, recent_context=None, priority=False, _bypass_daily_cap=False):
         raise _make_auth_error()
 
     orig_classify = orch.classify
@@ -131,7 +131,7 @@ def test_transient_error_does_not_propagate():
         "last_error": None, "last_error_at": None, "total_fetched": 0,
     }
 
-    async def fake_classify(text, recent_context=None):
+    async def fake_classify(text, recent_context=None, priority=False, _bypass_daily_cap=False):
         raise RuntimeError("transienter Fehler (Test)")
 
     orig_classify = orch.classify

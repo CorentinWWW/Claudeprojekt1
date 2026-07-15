@@ -51,7 +51,7 @@ def main():
     raw_b = db.RawStatement(source="test", source_id="B", text="Neue Formulierung des alten Themas B")
     raw_c = db.RawStatement(source="test", source_id="C", text="Neue Formulierung des alten Themas C")
 
-    async def fake_classify(text, recent_context=None):
+    async def fake_classify(text, recent_context=None, priority=False, _bypass_daily_cap=False):
         return db.Classification(
             is_market_relevant=True, sentiment="negative", confidence=0.9,
             related_topic_id=already_id, is_major_escalation=False,
