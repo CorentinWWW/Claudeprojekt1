@@ -11,18 +11,26 @@ from app.config import (
     ALERT_CONFIDENCE_THRESHOLD,
     ALERT_DIGEST_THRESHOLD,
     ALERT_MIN_TICKER_CONFIDENCE,
+    BLOCKLIST_TICKERS,
+    CLAUDE_ESCALATION_MODEL,
     DEDUP_SIMILARITY_THRESHOLD,
+    ENABLE_BORDERLINE_ESCALATION,
     ENABLE_LIVE_AUDIO,
     ENABLE_NEWS,
+    ENABLE_PRICE_TRACKING,
     ENABLE_TRUTH_SOCIAL,
+    ESCALATION_BAND,
     LIVE_AUDIO_STREAM_URLS,
     MAX_CLASSIFICATIONS_PER_DAY,
     MAX_CONCURRENT_CLASSIFICATIONS,
     POLL_INTERVAL_SECONDS,
+    PRICE_OUTCOME_HORIZON_MINUTES,
     PRIORITY_CLASSIFICATIONS_PER_DAY,
     TELEGRAM_STARTUP_NOTICE,
     TOPIC_CONTEXT_MAX_ITEMS,
     TOPIC_CONTEXT_WINDOW_HOURS,
+    WATCHLIST_SECTORS,
+    WATCHLIST_TICKERS,
     WHISPER_MODEL_SIZE,
 )
 from app.db import (
@@ -30,13 +38,18 @@ from app.db import (
     RawStatement,
     get_dedup_candidates,
     get_known_source_ids,
+    get_outcomes_awaiting_followup,
     get_pending_alerts,
     get_recent_alerted,
+    get_topic_thread,
     init_db,
     insert_statement,
     mark_alert_sent,
+    record_alert_baseline,
+    set_outcome_followup,
     try_claim_meta_key,
 )
+from app import prices
 from app.sources.live_audio import LiveAudioSource
 from app.sources.news_gdelt import GdeltNewsSource
 from app.sources.news_rss import RssNewsSource
@@ -102,27 +115,66 @@ def _strongest_ticker_confidence(classification) -> float:
     return best
 
 
+def actionable_tickers(classification) -> list[dict]:
+    """Die konkret handelbaren Ticker einer Meldung: klare Long/Short-Richtung,
+    Pro-Ticker-Konfidenz >= Schwelle und nicht auf der Blockliste. Basis fuer die
+    Alarm-Entscheidung, die Chart-Buttons und das Preis-Tracking (eine gemeinsame
+    Definition, damit alle drei exakt dieselben Ticker meinen). Bei deaktiviertem
+    Praezisions-Filter (Schwelle <= 0) zaehlen alle Ticker mit klarer Richtung."""
+    result = []
+    for tc in classification.ticker_calls or []:
+        if not isinstance(tc, dict):
+            continue
+        if tc.get("direction") not in ("long", "short"):
+            continue
+        ticker = (tc.get("ticker") or "").upper()
+        if not ticker or ticker in BLOCKLIST_TICKERS:
+            continue
+        conf = tc.get("confidence")
+        conf = float(conf) if isinstance(conf, (int, float)) else 0.0
+        if ALERT_MIN_TICKER_CONFIDENCE > 0 and conf < ALERT_MIN_TICKER_CONFIDENCE:
+            continue
+        result.append(tc)
+    return result
+
+
+def _passes_watchlist(classification, actionable: list[dict]) -> bool:
+    """Persoenlicher Filter: ist keine Watchlist gesetzt, passt alles. Sonst muss
+    entweder ein handelbarer Ticker in WATCHLIST_TICKERS sein oder ein betroffener
+    Sektor auf WATCHLIST_SECTORS passen (Teilstring, case-insensitive)."""
+    if not WATCHLIST_TICKERS and not WATCHLIST_SECTORS:
+        return True
+    if any((tc.get("ticker") or "").upper() in WATCHLIST_TICKERS for tc in actionable):
+        return True
+    sectors = [str(s).lower() for s in (classification.sectors or [])]
+    return any(w in sec for w in WATCHLIST_SECTORS for sec in sectors)
+
+
 def is_alert_worthy(classification) -> bool:
     """Zentrale, EINZIGE Stelle, die entscheidet, ob eine Meldung eine Telegram-
     Nachricht ausloest. Es wird bewusst nur noch bei den sichersten, direkt
     handelbaren Signalen alarmiert: die Meldung muss marktrelevant sein UND mindestens
     einen konkreten Boersenticker mit klarer Long/Short-Richtung und einer Pro-Ticker-
-    Konfidenz >= ALERT_MIN_TICKER_CONFIDENCE enthalten. Reine 'marktrelevant'-Meldungen
-    ohne konkrete, hochsichere Aktie loesen KEINEN Alert mehr aus (der Nutzer will
-    ausschliesslich die klarsten 'diese Aktie geht hoch/runter'-Signale). Wird an allen
-    Alarm-Entscheidungspunkten verwendet (poll_once, Resend-Pfad, manuelle Tests),
-    damit die strenge Schwelle nirgends umgangen werden kann - insbesondere durfte der
-    Resend-Pfad (get_pending_alerts) frueher jede marktrelevante Meldung einen Zyklus
-    spaeter doch noch ungefiltert alarmieren."""
+    Konfidenz >= ALERT_MIN_TICKER_CONFIDENCE enthalten (und den persoenlichen
+    Watchlist-Filter passieren). Reine 'marktrelevant'-Meldungen ohne konkrete,
+    hochsichere Aktie loesen KEINEN Alert mehr aus. Wird an allen Alarm-
+    Entscheidungspunkten verwendet (poll_once, Resend-Pfad, manuelle Tests), damit die
+    strenge Schwelle nirgends umgangen werden kann - insbesondere durfte der Resend-Pfad
+    (get_pending_alerts) frueher jede marktrelevante Meldung einen Zyklus spaeter doch
+    noch ungefiltert alarmieren."""
     if classification is None or not classification.is_market_relevant:
         return False
     if classification.confidence < ALERT_CONFIDENCE_THRESHOLD:
         return False
     if ALERT_MIN_TICKER_CONFIDENCE <= 0:
         # Praezisions-Filter deaktiviert: altes Verhalten (jede marktrelevante Meldung
-        # oberhalb von ALERT_CONFIDENCE_THRESHOLD alarmiert).
-        return True
-    return _strongest_ticker_confidence(classification) >= ALERT_MIN_TICKER_CONFIDENCE
+        # oberhalb von ALERT_CONFIDENCE_THRESHOLD alarmiert) - aber der Watchlist-Filter
+        # gilt weiterhin, falls gesetzt.
+        return _passes_watchlist(classification, actionable_tickers(classification))
+    actionable = actionable_tickers(classification)
+    if not actionable:
+        return False
+    return _passes_watchlist(classification, actionable)
 
 
 def build_sources():
@@ -232,12 +284,48 @@ async def _notify_daily_cap_once():
         await send_text(body)
 
 
+async def _maybe_escalate(text, recent_context, priority, classification):
+    """Zweitmeinung fuer Grenzfaelle (#4): liegt die staerkste Ticker-Konfidenz knapp
+    um die Alarm-Schwelle (+/- ESCALATION_BAND), wird die Meldung EINMAL zusaetzlich
+    mit einem staerkeren Modell klassifiziert und dessen Ergebnis uebernommen. Reduziert
+    Fehlentscheidungen genau da, wo es aufs Geld geht, ohne jeden Call zu verteuern.
+    Best-effort: Tages-Limit/transiente Fehler behalten die Erstbewertung; nur echte
+    Konfigurationsfehler (falsches Eskalations-Modell = 404) schlagen wie ueberall durch."""
+    if not ENABLE_BORDERLINE_ESCALATION or not CLAUDE_ESCALATION_MODEL:
+        return classification
+    strongest = _strongest_ticker_confidence(classification)
+    if not (ALERT_MIN_TICKER_CONFIDENCE - ESCALATION_BAND <= strongest
+            <= ALERT_MIN_TICKER_CONFIDENCE + ESCALATION_BAND):
+        return classification
+    try:
+        second = await classify(
+            text, recent_context=recent_context, priority=priority,
+            model=CLAUDE_ESCALATION_MODEL,
+        )
+    except DailyCapExceeded:
+        logger.info("[borderline] Zweitmeinung wegen Tages-Limit uebersprungen.")
+        return classification
+    except PERMANENT_CLAUDE_ERRORS:
+        raise
+    except Exception:
+        logger.warning("[borderline] Zweitmeinung fehlgeschlagen, behalte Erstbewertung.", exc_info=True)
+        return classification
+    logger.info(
+        "[borderline] Zweitmeinung mit %s: staerkste Ticker-Konfidenz %.2f -> %.2f",
+        CLAUDE_ESCALATION_MODEL, strongest, _strongest_ticker_confidence(second),
+    )
+    return second
+
+
 async def _classify_and_store(raw, semaphore: asyncio.Semaphore, recent_context: list[dict]):
     priority = is_high_priority(raw)
     async with semaphore:
         try:
             classification = await classify(
                 raw.text, recent_context=recent_context, priority=priority
+            )
+            classification = await _maybe_escalate(
+                raw.text, recent_context, priority, classification
             )
         except DailyCapExceeded as exc:
             # Kein logger.exception() (kein Traceback-Spam): sobald das Tages-Limit
@@ -337,6 +425,45 @@ async def _classify_and_store(raw, semaphore: asyncio.Semaphore, recent_context:
     return (raw, classification, statement_id)
 
 
+async def _fetch_ticker_context(classification, statement_id) -> dict:
+    """Best-effort (#2/#8): fuer die handelbaren Ticker den aktuellen Kurs holen, ihn
+    als Ausgangspunkt fuers Backtesting speichern und die heutige Bewegung (Open->jetzt)
+    zurueckgeben, die im Alert angezeigt wird. Nur wenn ENABLE_PRICE_TRACKING gesetzt
+    ist. Jede Kursabfrage ist best-effort (prices.get_quote gibt bei Problemen None) -
+    ein nicht erreichbarer Kursdienst darf den Alert NIE aufhalten."""
+    change: dict[str, float] = {}
+    if not ENABLE_PRICE_TRACKING or statement_id is None:
+        return change
+    now = time.time()
+    for tc in actionable_tickers(classification):
+        ticker = (tc.get("ticker") or "").upper()
+        quote = await prices.get_quote(ticker)
+        if not quote or quote.get("price") is None:
+            continue
+        record_alert_baseline(
+            statement_id, ticker, tc.get("direction"), tc.get("confidence"),
+            now, quote.get("price"),
+        )
+        if quote.get("change_pct") is not None:
+            change[ticker] = quote["change_pct"]
+    return change
+
+
+async def _build_alert_extras(raw, classification, statement_id) -> dict:
+    """Sammelt die Zusatzinfos fuer einen Einzel-Alert: heutige Bewegung je Ticker
+    (#8, inkl. Baseline-Erfassung fuers Backtesting #2) und - bei einer Eskalation -
+    die Themen-Zeitleiste (#5)."""
+    extras: dict = {}
+    change = await _fetch_ticker_context(classification, statement_id)
+    if change:
+        extras["ticker_change"] = change
+    if classification is not None and classification.related_topic_id is not None:
+        thread = get_topic_thread(classification.related_topic_id)
+        if len(thread) > 1:
+            extras["thread"] = thread
+    return extras
+
+
 async def _send_alerts(alert_worthy: list[tuple]):
     """Schickt einzelne Alerts bei wenigen Treffern, sonst eine gebuendelte
     Sammel-Nachricht - verhindert eine Alert-Flut bei einem Nachrichtenschub
@@ -347,10 +474,16 @@ async def _send_alerts(alert_worthy: list[tuple]):
 
     if len(alert_worthy) <= ALERT_DIGEST_THRESHOLD:
         for raw, classification, statement_id in alert_worthy:
-            sent = await send_alert(raw, classification)
+            extras = await _build_alert_extras(raw, classification, statement_id)
+            sent = await send_alert(raw, classification, extras=extras)
             if sent:
                 mark_alert_sent(statement_id)
     else:
+        # Sammel-Nachricht: die Baselines fuers Backtesting trotzdem erfassen (damit ein
+        # Nachrichtenschub keine Luecke in der Erfolgsmessung reisst), aber ohne die
+        # reichhaltigen Einzel-Extras (Thread/Buttons) - der Digest bleibt kompakt.
+        for _, classification, statement_id in alert_worthy:
+            await _fetch_ticker_context(classification, statement_id)
         sent = await send_digest_alert(alert_worthy)
         if sent:
             for _, _, statement_id in alert_worthy:
@@ -403,8 +536,35 @@ async def _resend_pending_alerts():
     await _send_alerts(worthy)
 
 
+async def _evaluate_alert_outcomes():
+    """Backtesting (#2/#3): fuer alarmierte Ticker, deren Horizont abgelaufen ist, den
+    aktuellen Kurs nachmessen und die tatsaechliche Bewegung + ob sie zur Long/Short-
+    Einschaetzung passte festhalten. Best-effort; nur wenn ENABLE_PRICE_TRACKING."""
+    if not ENABLE_PRICE_TRACKING:
+        return
+    pending = get_outcomes_awaiting_followup(PRICE_OUTCOME_HORIZON_MINUTES * 60)
+    if not pending:
+        return
+    now = time.time()
+    for o in pending:
+        quote = await prices.get_quote(o["ticker"])
+        if not quote or not quote.get("price"):
+            continue
+        alert_price = o["alert_price"]
+        if not alert_price:
+            continue
+        followup_price = quote["price"]
+        return_pct = (followup_price - alert_price) / alert_price * 100.0
+        # "correct", wenn sich der Kurs in die eingeschaetzte Richtung bewegt hat.
+        correct = (return_pct > 0 and o["direction"] == "long") or (
+            return_pct < 0 and o["direction"] == "short"
+        )
+        set_outcome_followup(o["id"], now, followup_price, return_pct, correct)
+
+
 async def poll_once(sources, semaphore: asyncio.Semaphore):
     await _resend_pending_alerts()
+    await _evaluate_alert_outcomes()
 
     # Wird gesetzt, sobald ein permanenter Claude-Konfigurationsfehler (kaputter Key,
     # geloeschtes Modell) auftaucht - erst NACH Abschluss der kompletten Buchhaltung

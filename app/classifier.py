@@ -342,6 +342,7 @@ async def classify(
     recent_context: Optional[list[dict]] = None,
     _bypass_daily_cap: bool = False,
     priority: bool = False,
+    model: Optional[str] = None,
 ) -> Classification:
     if _client is None:
         raise RuntimeError("ANTHROPIC_API_KEY ist nicht gesetzt")
@@ -378,7 +379,9 @@ async def classify(
 
     context_block = _build_context_block(recent_context)
     response = await _client.messages.create(
-        model=CLAUDE_MODEL,
+        # model kann fuer die Zweitmeinung bei Grenzfaellen (orchestrator: Borderline-
+        # Eskalation) durch ein staerkeres Modell ueberschrieben werden.
+        model=model or CLAUDE_MODEL,
         max_tokens=2048,
         system=_system_prompt(),
         tools=[CLASSIFY_TOOL],

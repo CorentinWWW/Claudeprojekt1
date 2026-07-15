@@ -1,14 +1,24 @@
 import asyncio
 import html
 import logging
+import re
 import time
 from collections import Counter
 from typing import Optional
 
 import httpx
 
-from app.config import ALERT_MIN_TICKER_CONFIDENCE, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
+from app.config import (
+    ALERT_MIN_TICKER_CONFIDENCE,
+    CHART_URL_TEMPLATE,
+    ENABLE_CHART_BUTTONS,
+    ENABLE_MARKET_SESSION_INFO,
+    ENABLE_VOLATILITY_FLAG,
+    TELEGRAM_BOT_TOKEN,
+    TELEGRAM_CHAT_ID,
+)
 from app.db import Classification, RawStatement
+from app.market_hours import session_label, us_market_session
 
 logger = logging.getLogger(__name__)
 
@@ -20,6 +30,20 @@ DIGEST_MAX_DETAIL_LINES = 15
 # Gegensatz zu evtl. mitgelisteten Kontext-Tickern mit geringerer Konfidenz.
 _ACTIONABLE_MARKER = "⭐"
 
+# High-Volatility-Signalwoerter (#6): Themen, bei denen die Schwankung oft groesser ist
+# als die klare Richtung - dann ist ein direktionaler Trade riskanter als z.B. ein
+# Straddle. Bewusst breiter als der Prioritaets-Filter (harte geopolitische/geldpolitische
+# Ereignisse zusaetzlich).
+_VOLATILITY_PATTERN = re.compile(
+    r"\b("
+    r"tariffs?|zoll|zoelle|zölle|sanctions?|sanktion|embargo|shutdown|default|"
+    r"war|krieg|invasion|nuclear|militar\w*|airstrike|"
+    r"nationaliz\w*|verstaatlich\w*|export ban|import ban|price cap|"
+    r"bailout|stimulus|federal reserve|interest rate|rate cut|rate hike|zinsen|leitzins"
+    r")\b",
+    re.IGNORECASE,
+)
+
 
 def _direction_arrow(direction: Optional[str]) -> str:
     if direction == "long":
@@ -27,6 +51,61 @@ def _direction_arrow(direction: Optional[str]) -> str:
     if direction == "short":
         return "🔻"
     return "◽"
+
+
+def _session_segment() -> str:
+    """Kompaktes Boersen-Session-Segment fuer den Nachrichtenkopf (#7) - leer, wenn
+    deaktiviert oder keine Zeitzonendaten vorhanden."""
+    if not ENABLE_MARKET_SESSION_INFO:
+        return ""
+    label = session_label(us_market_session())
+    return f" · {label}" if label else ""
+
+
+def _volatility_flag(text: Optional[str]) -> str:
+    """High-Vol-Hinweiszeile (#6) oder leerer String."""
+    if not ENABLE_VOLATILITY_FLAG or not text:
+        return ""
+    if _VOLATILITY_PATTERN.search(text):
+        return "⚡ Hohe Volatilität – Richtung evtl. unsicher (ggf. Straddle)"
+    return ""
+
+
+def _thread_segment(thread: Optional[list]) -> str:
+    """Kompakte Verlaufs-Zeitleiste bei einer Eskalation (#5): wie viele Meldungen zum
+    Thema es gibt und wann/womit es begann. Der Basistext kommt aus der DB und wird
+    daher HTML-escaped."""
+    if not thread or len(thread) < 2:
+        return ""
+    root = thread[0]
+    root_age = _format_age(root.get("ingested_at"))
+    age_part = f" ({root_age})" if root_age else ""
+    snippet = html.escape((root.get("text") or "").strip()[:60])
+    return f"🧵 Teil einer Entwicklung ({len(thread)} Meldungen) – Beginn{age_part}: {snippet}"
+
+
+def _build_chart_markup(ticker_calls: list[dict]) -> Optional[dict]:
+    """Inline-Keyboard mit Chart-Links (#9) fuer die handelbaren Ticker (max. 3),
+    sortiert nach Konfidenz. None, wenn deaktiviert oder kein handelbarer Ticker."""
+    if not ENABLE_CHART_BUTTONS:
+        return None
+    buttons = []
+    for tc in _sorted_by_confidence(ticker_calls):
+        if not _is_actionable(tc):
+            continue
+        ticker = (tc.get("ticker") or "").strip().upper()
+        if not ticker:
+            continue
+        try:
+            url = CHART_URL_TEMPLATE.format(ticker=ticker)
+        except (KeyError, IndexError, ValueError):
+            return None  # kaputtes Template -> lieber gar keine Buttons als ein Crash
+        if not url.startswith(("http://", "https://")):
+            continue
+        buttons.append({"text": f"📈 {ticker}", "url": url})
+        if len(buttons) >= 3:
+            break
+    return {"inline_keyboard": [buttons]} if buttons else None
 
 
 def _is_actionable(tc: dict) -> bool:
@@ -77,20 +156,29 @@ def _format_ticker_calls_compact(ticker_calls: list[dict]) -> str:
     )
 
 
-def _format_ticker_lines(ticker_calls: list[dict]) -> str:
+def _format_ticker_lines(ticker_calls: list[dict], ticker_change: Optional[dict] = None) -> str:
     """Eine Zeile pro Ticker mit ausgeschriebenem Long/Short und eigener Konfidenz,
     sortiert nach Konfidenz absteigend (sicherste Einschaetzung zuerst). Ticker, die die
     Praezisions-Schwelle erreichen, werden mit einem Stern markiert - so ist auf einen
     Blick klar, welcher Ticker der eigentliche (handelbare) Ausloeser ist und welche nur
-    Kontext mit geringerer Sicherheit sind."""
+    Kontext mit geringerer Sicherheit sind. ticker_change (optional, {TICKER: prozent})
+    ergaenzt die heutige Kursbewegung (#8)."""
     if not ticker_calls:
         return "📈 –"
-    lines = [
-        f"{_direction_arrow(tc.get('direction'))} {html.escape(tc.get('ticker') or '?')} "
-        f"({html.escape(tc.get('direction') or '?')}) – {(tc.get('confidence') or 0.0):.0%}"
-        f"{' ' + _ACTIONABLE_MARKER if _is_actionable(tc) else ''}"
-        for tc in _sorted_by_confidence(ticker_calls)
-    ]
+    ticker_change = ticker_change or {}
+    lines = []
+    for tc in _sorted_by_confidence(ticker_calls):
+        ticker = tc.get("ticker") or "?"
+        line = (
+            f"{_direction_arrow(tc.get('direction'))} {html.escape(ticker)} "
+            f"({html.escape(tc.get('direction') or '?')}) – {(tc.get('confidence') or 0.0):.0%}"
+        )
+        if _is_actionable(tc):
+            line += f" {_ACTIONABLE_MARKER}"
+        change = ticker_change.get(ticker.upper())
+        if isinstance(change, (int, float)):
+            line += f" · heute {change:+.1f}%"
+        lines.append(line)
     return "\n".join(lines)
 
 
@@ -116,25 +204,39 @@ def _linkable_url(url: Optional[str]) -> Optional[str]:
     return html.escape(url, quote=True)
 
 
-def _format_message(raw: RawStatement, classification: Classification) -> str:
+def _format_message(
+    raw: RawStatement, classification: Classification, extras: Optional[dict] = None
+) -> str:
+    extras = extras or {}
     emoji = SENTIMENT_EMOJI.get(classification.sentiment, "⚪")
     escalation_prefix = (
         "⚠️ "
         if classification.related_topic_id is not None and classification.is_major_escalation
         else ""
     )
-    ticker_lines = _format_ticker_lines(classification.ticker_calls)
+    ticker_lines = _format_ticker_lines(classification.ticker_calls, extras.get("ticker_change"))
     url = _linkable_url(raw.url)
     age = _format_age(raw.published_at)
     age_str = f" · 🕒 {age}" if age else ""
+    session_str = _session_segment()
+
+    # Feste, quellenunabhaengige Zusatzzeilen (Volatilitaets-Hinweis, Themen-Zeitleiste).
+    # _thread_segment escaped den DB-Text selbst; _volatility_flag ist fester Text.
+    trailing = ticker_lines
+    vol_line = _volatility_flag(raw.text)
+    if vol_line:
+        trailing += f"\n{vol_line}"
+    thread_line = _thread_segment(extras.get("thread"))
+    if thread_line:
+        trailing += f"\n{thread_line}"
 
     def assemble(escaped_headline: str) -> str:
         # Anchor wird immer als Ganzes um die (ggf. gekuerzte) Ueberschrift gelegt,
         # nie mitgekuerzt - ein zerrissenes <a>-Tag wuerde Telegram die GESAMTE
-        # Nachricht ablehnen lassen. age_str ist fester, quellenunabhaengiger Text
-        # (keine Nutzereingabe) und muss daher nicht escaped werden.
+        # Nachricht ablehnen lassen. age_str/session_str sind feste, quellenunabhaengige
+        # Texte (keine Nutzereingabe) und muessen daher nicht escaped werden.
         inner = f'<a href="{url}">{escaped_headline}</a>' if url else escaped_headline
-        return f"{emoji} {classification.confidence:.0%}{age_str} — {inner}\n{ticker_lines}"
+        return f"{emoji} {classification.confidence:.0%}{age_str}{session_str} — {inner}\n{trailing}"
 
     # Auf Nutzerwunsch: die Ueberschrift wird NICHT um ihrer selbst willen abgekuerzt
     # (voller Begruendungstext). _short_headline() truncatet nur, wenn der Text den
@@ -164,7 +266,7 @@ def _format_message(raw: RawStatement, classification: Classification) -> str:
     return text
 
 
-async def _send(text: str, retries: int = 2) -> bool:
+async def _send(text: str, retries: int = 2, reply_markup: Optional[dict] = None) -> bool:
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         logger.debug("Telegram nicht konfiguriert, ueberspringe Nachricht.")
         return False
@@ -179,6 +281,10 @@ async def _send(text: str, retries: int = 2) -> bool:
         # anzeigen und die bewusst kompakten Alerts wieder aufblaehen.
         "disable_web_page_preview": True,
     }
+    if reply_markup:
+        # Inline-Buttons (z.B. Chart-Links) - Telegram erwartet reply_markup als Objekt
+        # (httpx json= serialisiert das verschachtelte dict korrekt mit).
+        payload["reply_markup"] = reply_markup
 
     attempt = 0
     async with httpx.AsyncClient(timeout=10) as client:
@@ -211,8 +317,12 @@ async def _send(text: str, retries: int = 2) -> bool:
                 await asyncio.sleep(2 * attempt)
 
 
-async def send_alert(raw: RawStatement, classification: Classification) -> bool:
-    return await _send(_format_message(raw, classification))
+async def send_alert(
+    raw: RawStatement, classification: Classification, extras: Optional[dict] = None
+) -> bool:
+    text = _format_message(raw, classification, extras=extras)
+    markup = _build_chart_markup(classification.ticker_calls)
+    return await _send(text, reply_markup=markup)
 
 
 _DIGEST_HEADLINE_MAX_LENGTH = 70

@@ -12,6 +12,7 @@ from app import config
 from app.classifier import DailyCapExceeded, classify, selftest
 from app.db import (
     RawStatement,
+    get_calibration_stats,
     get_classification_calls_today,
     get_recent,
     get_stats,
@@ -94,6 +95,15 @@ def api_statements(limit: int = 50, only_relevant: bool = False):
 @app.get("/api/stats", dependencies=[Depends(require_api_key)])
 def api_stats():
     return get_stats()
+
+
+@app.get("/api/calibration", dependencies=[Depends(require_api_key)])
+def api_calibration():
+    """Echte Trefferquote der bisherigen Alerts (#3, nur mit ENABLE_PRICE_TRACKING
+    befuellt): wie oft sich der Kurs tatsaechlich in die eingeschaetzte Richtung
+    bewegt hat - insgesamt, je Konfidenz-Bucket und je Richtung. Damit wird die
+    ALERT_MIN_TICKER_CONFIDENCE-Schwelle vom Bauchgefuehl zum belegten Wert."""
+    return get_calibration_stats()
 
 
 @app.get("/api/health")

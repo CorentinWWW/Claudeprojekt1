@@ -124,6 +124,11 @@
   </div>
 
   <div class="panel">
+    <h2>Trefferquote (Backtesting)</h2>
+    <div class="stats-row" id="calibrationRow"></div>
+  </div>
+
+  <div class="panel">
     <h2>Pipeline testen</h2>
     <div class="test-form">
       <textarea id="testText" placeholder="z.B. Ich werde 25% Zölle auf alle importierten Autos erheben.">Ich werde 25% Zölle auf alle importierten Halbleiter erheben, das betrifft auch Taiwan.</textarea>
@@ -346,6 +351,33 @@ async function loadStats() {
   `;
 }
 
+async function loadCalibration() {
+  const el = document.getElementById('calibrationRow');
+  let cal;
+  try {
+    const res = await apiFetch('/api/calibration');
+    if (!res.ok) return;
+    cal = await res.json();
+  } catch (err) {
+    return;
+  }
+  const pct = (v) => (v == null ? '–' : Math.round(v * 100) + '%');
+  if (!cal || (!cal.evaluated && !cal.pending)) {
+    el.innerHTML = '<div class="stat"><div class="value">–</div><div class="label">noch keine ausgewerteten Alerts (Preis-Tracking aus/zu neu)</div></div>';
+    return;
+  }
+  const long = (cal.by_direction && cal.by_direction.long) || {};
+  const short = (cal.by_direction && cal.by_direction.short) || {};
+  const avg = cal.avg_return_pct == null ? '–' : (cal.avg_return_pct >= 0 ? '+' : '') + cal.avg_return_pct.toFixed(2) + '%';
+  el.innerHTML = `
+    <div class="stat"><div class="value">${pct(cal.hit_rate)}</div><div class="label">Trefferquote (${cal.evaluated} ausgewertet)</div></div>
+    <div class="stat positive"><div class="value">${pct(long.hit_rate)}</div><div class="label">Long korrekt (${long.n || 0})</div></div>
+    <div class="stat negative"><div class="value">${pct(short.hit_rate)}</div><div class="label">Short korrekt (${short.n || 0})</div></div>
+    <div class="stat"><div class="value">${avg}</div><div class="label">Ø Bewegung</div></div>
+    <div class="stat"><div class="value">${cal.pending || 0}</div><div class="label">offen (Horizont läuft)</div></div>
+  `;
+}
+
 async function runTest() {
   const btn = document.getElementById('testBtn');
   const resultEl = document.getElementById('testResult');
@@ -386,7 +418,7 @@ async function runTest() {
 }
 
 async function refreshAll() {
-  await Promise.all([loadFeed(), loadHealth(), loadStats()]);
+  await Promise.all([loadFeed(), loadHealth(), loadStats(), loadCalibration()]);
 }
 
 document.getElementById('apiKeyInput').value = getApiKey();

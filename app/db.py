@@ -49,6 +49,28 @@ CREATE TABLE IF NOT EXISTS meta (
     key TEXT PRIMARY KEY,
     value TEXT
 );
+
+-- Ergebnis-Tracking (Backtesting, siehe app/prices.py + orchestrator): pro alarmiertem,
+-- handelbarem Ticker der Kurs zum Alarm-Zeitpunkt und - nach einem Horizont - erneut,
+-- um die tatsaechliche Kursbewegung (und ob sie zur Long/Short-Einschaetzung passte) zu
+-- messen. Basis fuer die Konfidenz-Kalibrierung im Dashboard. UNIQUE(statement_id,
+-- ticker), damit derselbe Alert-Ticker nicht doppelt erfasst wird.
+CREATE TABLE IF NOT EXISTS alert_outcomes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    statement_id INTEGER,
+    ticker TEXT NOT NULL,
+    direction TEXT,
+    confidence REAL,
+    alert_ts REAL NOT NULL,
+    alert_price REAL,
+    followup_ts REAL,
+    followup_price REAL,
+    return_pct REAL,
+    correct INTEGER,
+    UNIQUE(statement_id, ticker)
+);
+CREATE INDEX IF NOT EXISTS idx_alert_outcomes_pending
+    ON alert_outcomes(followup_price, alert_ts);
 """
 
 # Fuer DBs, die vor der Einfuehrung von related_topic_id/is_major_escalation angelegt
@@ -350,6 +372,143 @@ def get_pending_alerts(hours: int = 24) -> list[dict]:
             d["sectors"] = json.loads(d["sectors"]) if d["sectors"] else []
             result.append(d)
         return result
+
+
+def get_topic_thread(topic_id: int, hours: int = 48, limit: int = 10) -> list[dict]:
+    """Die Meldungen, die zu einem Thema gehoeren (die Wurzel selbst plus alle, die per
+    related_topic_id/duplicate_of_id darauf zeigen), zeitlich aufsteigend sortiert -
+    fuer eine kompakte Verlaufs-/Eskalations-Zeitleiste im Alert (#5)."""
+    cutoff = time.time() - hours * 3600
+    with get_conn() as conn:
+        rows = conn.execute(
+            """
+            SELECT id, text, ingested_at, is_major_escalation, alert_sent
+            FROM statements
+            WHERE (id = ? OR related_topic_id = ? OR duplicate_of_id = ?)
+                AND ingested_at >= ?
+            ORDER BY ingested_at ASC
+            LIMIT ?
+            """,
+            (topic_id, topic_id, topic_id, cutoff, limit),
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def record_alert_baseline(
+    statement_id: Optional[int],
+    ticker: str,
+    direction: Optional[str],
+    confidence: Optional[float],
+    alert_ts: float,
+    alert_price: Optional[float],
+) -> None:
+    """Legt zum Alarm-Zeitpunkt den Ausgangskurs eines handelbaren Tickers ab (#2).
+    INSERT OR IGNORE ueber UNIQUE(statement_id, ticker): ein erneuter Versuch (z.B.
+    Resend) legt nicht doppelt an und ueberschreibt den urspruenglichen Kurs nicht."""
+    with get_conn() as conn:
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO alert_outcomes
+                (statement_id, ticker, direction, confidence, alert_ts, alert_price)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (statement_id, ticker, direction, confidence, alert_ts, alert_price),
+        )
+
+
+def get_outcomes_awaiting_followup(horizon_seconds: float, limit: int = 50) -> list[dict]:
+    """Offene Ergebnis-Datensaetze, deren Horizont abgelaufen ist und die einen
+    Ausgangskurs haben, aber noch keine Nachmessung (followup_price IS NULL)."""
+    cutoff = time.time() - horizon_seconds
+    with get_conn() as conn:
+        rows = conn.execute(
+            """
+            SELECT id, statement_id, ticker, direction, confidence, alert_ts, alert_price
+            FROM alert_outcomes
+            WHERE followup_price IS NULL AND alert_price IS NOT NULL AND alert_ts <= ?
+            ORDER BY alert_ts ASC
+            LIMIT ?
+            """,
+            (cutoff, limit),
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def set_outcome_followup(
+    outcome_id: int,
+    followup_ts: float,
+    followup_price: float,
+    return_pct: float,
+    correct: bool,
+) -> None:
+    with get_conn() as conn:
+        conn.execute(
+            """
+            UPDATE alert_outcomes
+            SET followup_ts = ?, followup_price = ?, return_pct = ?, correct = ?
+            WHERE id = ?
+            """,
+            (followup_ts, followup_price, return_pct, int(correct), outcome_id),
+        )
+
+
+def get_calibration_stats() -> dict:
+    """Aggregiert die ausgewerteten Ergebnisse (#3): Gesamt-Trefferquote und je
+    Konfidenz-Bucket, plus je Richtung. Nur Datensaetze mit vorliegender Nachmessung
+    (correct IS NOT NULL) zaehlen."""
+    with get_conn() as conn:
+        overall = conn.execute(
+            """
+            SELECT COUNT(*) AS n,
+                   SUM(CASE WHEN correct = 1 THEN 1 ELSE 0 END) AS hits,
+                   AVG(return_pct) AS avg_return
+            FROM alert_outcomes WHERE correct IS NOT NULL
+            """
+        ).fetchone()
+        by_bucket = conn.execute(
+            """
+            SELECT CAST(confidence * 10 AS INT) AS bucket,
+                   COUNT(*) AS n,
+                   SUM(CASE WHEN correct = 1 THEN 1 ELSE 0 END) AS hits
+            FROM alert_outcomes
+            WHERE correct IS NOT NULL AND confidence IS NOT NULL
+            GROUP BY bucket ORDER BY bucket DESC
+            """
+        ).fetchall()
+        by_direction = conn.execute(
+            """
+            SELECT direction, COUNT(*) AS n,
+                   SUM(CASE WHEN correct = 1 THEN 1 ELSE 0 END) AS hits
+            FROM alert_outcomes WHERE correct IS NOT NULL
+            GROUP BY direction
+            """
+        ).fetchall()
+
+    n = overall["n"] or 0
+    hits = overall["hits"] or 0
+    pending = None
+    with get_conn() as conn:
+        pending = conn.execute(
+            "SELECT COUNT(*) AS c FROM alert_outcomes WHERE correct IS NULL"
+        ).fetchone()["c"]
+    return {
+        "evaluated": n,
+        "hits": hits,
+        "hit_rate": (hits / n) if n else None,
+        "avg_return_pct": overall["avg_return"],
+        "pending": pending,
+        "by_confidence_bucket": [
+            {"bucket": f"{row['bucket'] * 10}-{row['bucket'] * 10 + 10}%",
+             "n": row["n"], "hits": row["hits"],
+             "hit_rate": (row["hits"] / row["n"]) if row["n"] else None}
+            for row in by_bucket
+        ],
+        "by_direction": {
+            row["direction"]: {"n": row["n"], "hits": row["hits"],
+                               "hit_rate": (row["hits"] / row["n"]) if row["n"] else None}
+            for row in by_direction
+        },
+    }
 
 
 def get_stats() -> dict:

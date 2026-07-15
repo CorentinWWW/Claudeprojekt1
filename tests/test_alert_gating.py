@@ -123,7 +123,7 @@ def test_resend_path_respects_threshold():
 
     sent = []
 
-    async def fake_send_alert(raw, classification):
+    async def fake_send_alert(raw, classification, extras=None):
         sent.append(raw.source_id)
         return True
 

@@ -179,6 +179,34 @@ Chunks (Standard 30s), keine Wort-für-Wort-Live-Transkription.
   die Schwelle verfehlt, einen Zyklus später sonst doch noch ungefiltert alarmiert
   worden wäre. Hinweis: der Filter senkt bewusst die Trefferzahl – er ersetzt keine
   eigene Recherche und ist keine Anlageberatung.
+- **Trading-Ausbau (10 Verbesserungen)**: aufeinander abgestimmte Erweiterungen mit
+  dem Ziel, Signale früher, sicherer und handlungsnäher zu machen:
+  1. **Geringere Latenz** – Cron von 30 auf **15 Min** verkürzt, zusätzliche schnelle
+     RSS-Feeds; für echte Sekunden-Latenz der Always-on-Modus (Docker/systemd,
+     `run_forever`).
+  2. **Kurs-Feedback / Backtesting** (`ENABLE_PRICE_TRACKING`) – nach jedem Alert wird
+     der Kurs erfasst und nach einem Horizont erneut gemessen: **echte Trefferquote**
+     statt Bauchgefühl (`app/prices.py`, Tabelle `alert_outcomes`, best-effort Stooq).
+  3. **Konfidenz-Kalibrierung** – Dashboard-Panel „Trefferquote (Backtesting)" +
+     `/api/calibration`: Trefferquote gesamt, je Konfidenz-Bucket und je Richtung.
+  4. **Zweitmeinung für Grenzfälle** (`ENABLE_BORDERLINE_ESCALATION`) – Meldungen knapp
+     an der Schwelle werden mit einem stärkeren Modell zweitgeprüft (nur diese
+     Grenzfälle kosten extra, cap-bewusst).
+  5. **Story-Threads** – bei einer Eskalation zeigt der Alert eine kompakte Zeitleiste
+     der Themenentwicklung (`get_topic_thread`).
+  6. **Volatilitäts-Flag** – bei Zöllen/Sanktionen/Fed etc. markiert der Alert „hohe
+     Volatilität, Richtung evtl. unsicher (ggf. Straddle)".
+  7. **Börsen-Session im Alert** – ist der US-Markt gerade offen/vor-/nachbörslich/zu?
+     (`app/market_hours.py`).
+  8. **Kontext: heutige Bewegung** – je handelbarem Ticker die heutige %-Bewegung im
+     Alert (wenn `ENABLE_PRICE_TRACKING`).
+  9. **Chart-Buttons** – Inline-Buttons unter dem Alert öffnen den Chart des jeweiligen
+     Tickers (TradingView).
+  10. **Persönlicher Filter** – Watchlist/Blocklist nach Tickern und Sektoren
+      (`WATCHLIST_TICKERS`/`WATCHLIST_SECTORS`/`BLOCKLIST_TICKERS`).
+  Alle netzabhängigen Teile (#2/#3/#8) sind **best-effort und standardmäßig aus** – ist
+  der Kursdienst nicht erreichbar, entfällt das Feature still, der Poll-Zyklus läuft
+  normal weiter. Kurs-/Trefferquoten sind Analyse-Hilfen, **keine Anlageberatung**.
 - **Echte Nachrichtenzeit + Alter im Alert**: statt eines bloßen „gerade erfasst"-
   Zeitstempels liest jede Quelle jetzt die **tatsächliche Veröffentlichungszeit** aus
   (GDELT `seendate`, RSS `published_parsed`, Truth Social `created_at`; Fallback auf
@@ -461,6 +489,13 @@ Siehe `.env.example` für alle Variablen. Wichtige zusätzliche Stellschrauben:
 |---|---|
 | `ALERT_CONFIDENCE_THRESHOLD` | Ab welcher Gesamt-Konfidenz (0-1) eine Meldung überhaupt für einen Alert in Frage kommt (Standard 0.5) |
 | `ALERT_MIN_TICKER_CONFIDENCE` | Präzisions-Filter: Alert nur, wenn eine konkrete Aktie mit klarer Long/Short-Richtung diese Pro-Ticker-Konfidenz erreicht (Standard 0.90 = sehr streng; `0.85`/`0.80` lockern, `0` schaltet den Filter ab) – siehe Abschnitt oben |
+| `WATCHLIST_TICKERS` / `WATCHLIST_SECTORS` | Nur diese Ticker/Sektoren melden (Komma-Listen); leer = alle (#10) |
+| `BLOCKLIST_TICKERS` | Diese Ticker nie melden (Komma-Liste) (#10) |
+| `ENABLE_MARKET_SESSION_INFO` | US-Börsen-Session (offen/vor-/nachbörslich/zu) im Alert (Standard an) (#7) |
+| `ENABLE_VOLATILITY_FLAG` | High-Volatility-Hinweis im Alert bei Zöllen/Sanktionen/Fed etc. (Standard an) (#6) |
+| `ENABLE_CHART_BUTTONS` / `CHART_URL_TEMPLATE` | Inline-Chart-Buttons pro handelbarem Ticker (TradingView), `{ticker}` wird ersetzt (Standard an) (#9) |
+| `ENABLE_BORDERLINE_ESCALATION` / `CLAUDE_ESCALATION_MODEL` / `ESCALATION_BAND` | Grenzfälle nahe der Schwelle mit stärkerem Modell zweitprüfen (Standard **aus**, kostet Extra-Calls) (#4) |
+| `ENABLE_PRICE_TRACKING` / `PRICE_OUTCOME_HORIZON_MINUTES` | Kurs-Feedback/Backtesting + heutige Bewegung im Alert, best-effort über Stooq (Standard **aus**) (#2/#3/#8) |
 | `MAX_CONCURRENT_CLASSIFICATIONS` | Wie viele Claude-Calls parallel laufen dürfen (Standard **1** = seriell, siehe Duplikat-Hinweis oben; höher = schneller bei Nachrichtenschüben, aber Risiko doppelter Alerts) |
 | `DEDUP_SIMILARITY_THRESHOLD` | Ab welcher Textähnlichkeit (0-1) zwei Statements als Duplikat gelten (Standard 0.82) |
 | `DEDUP_WINDOW_SECONDS` | Zeitfenster für die Text-Duplikatsuche, Tier 1 (Standard 24h) |

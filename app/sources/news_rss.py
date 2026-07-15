@@ -36,6 +36,10 @@ FEEDS = [
     "https://feeds.marketwatch.com/marketwatch/topstories/",
     "https://www.cnbc.com/id/15839135/device/rss/rss.html",  # CNBC Markets
     "https://finance.yahoo.com/news/rssindex",
+    # Zusaetzliche, oft schnell aktualisierte Quellen (#1 Latenz senken):
+    "https://www.cnbc.com/id/100003114/device/rss/rss.html",  # CNBC Top News
+    "https://feeds.marketwatch.com/marketwatch/marketpulse/",  # MarketWatch MarketPulse
+    "https://www.investing.com/rss/news_25.rss",  # Investing.com Economy
 ]
 
 # Wortgrenze, damit "trumpet"/"trumped-up" etc. nicht faelschlich matchen, aber

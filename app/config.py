@@ -39,6 +39,14 @@ def _float(name: str, default: float) -> float:
     return float(val.strip())
 
 
+def _strlist(name: str, upper: bool = False) -> list[str]:
+    """Komma-separierte Liste aus einer Env-Variable (leere Elemente/Whitespace werden
+    verworfen). Fuer Watchlists o.ae. Leere/ungesetzte Variable -> leere Liste."""
+    raw = os.getenv(name, "")
+    items = [p.strip() for p in raw.split(",") if p.strip()]
+    return [p.upper() for p in items] if upper else items
+
+
 ANTHROPIC_API_KEY = _str("ANTHROPIC_API_KEY")
 # Haiku statt Sonnet als Default: die Klassifikation ist eine strukturierte,
 # schema-gefuehrte Aufgabe (Tool-Use mit festem JSON-Schema) - dafuer reicht Haiku in
@@ -66,6 +74,46 @@ ALERT_CONFIDENCE_THRESHOLD = _float("ALERT_CONFIDENCE_THRESHOLD", 0.5)
 # 0.80 = moderat. Auf 0 setzen, um wieder JEDE marktrelevante Meldung oberhalb von
 # ALERT_CONFIDENCE_THRESHOLD zu alarmieren (altes Verhalten).
 ALERT_MIN_TICKER_CONFIDENCE = _float("ALERT_MIN_TICKER_CONFIDENCE", 0.90)
+
+# --- Persoenlicher Filter (Watchlist/Blocklist) ---
+# Wenn WATCHLIST_TICKERS und/oder WATCHLIST_SECTORS gesetzt sind, wird nur noch
+# alarmiert, wenn ein handelbarer Ticker in der Watchlist ist ODER ein betroffener
+# Sektor auf WATCHLIST_SECTORS passt (Teilstring, case-insensitive). Leer = kein
+# Filter (alles erlaubt). BLOCKLIST_TICKERS entfernt einzelne Ticker generell aus der
+# Alarm-Bewertung (z.B. Werte, die du ohnehin nicht handelst).
+WATCHLIST_TICKERS = _strlist("WATCHLIST_TICKERS", upper=True)
+WATCHLIST_SECTORS = [s.lower() for s in _strlist("WATCHLIST_SECTORS")]
+BLOCKLIST_TICKERS = _strlist("BLOCKLIST_TICKERS", upper=True)
+
+# --- Alert-Anreicherung ---
+# US-Boersen-Session (offen/vor-/nachboerslich/zu) im Alert anzeigen - hilft
+# einzuschaetzen, ob ein Signal gerade ueberhaupt handelbar ist.
+ENABLE_MARKET_SESSION_INFO = _bool("ENABLE_MARKET_SESSION_INFO", True)
+# High-Volatility-Flag (Zoelle/Sanktionen/Krieg/Fed etc.): markiert Meldungen, bei denen
+# die Schwankung oft groesser ist als die klare Richtung (ggf. Straddle statt Direktional).
+ENABLE_VOLATILITY_FLAG = _bool("ENABLE_VOLATILITY_FLAG", True)
+# Inline-Buttons mit Chart-Links (TradingView) pro handelbarem Ticker unter dem Alert.
+ENABLE_CHART_BUTTONS = _bool("ENABLE_CHART_BUTTONS", True)
+# Basis-URL fuer die Chart-Buttons; {ticker} wird ersetzt.
+CHART_URL_TEMPLATE = _str("CHART_URL_TEMPLATE", "https://www.tradingview.com/chart/?symbol={ticker}")
+
+# --- Zweitmeinung fuer Grenzfaelle (#4) ---
+# Meldungen, deren staerkste Ticker-Konfidenz knapp um die Alarm-Schwelle liegt
+# (+/- ESCALATION_BAND), werden zur Absicherung ein zweites Mal mit einem staerkeren
+# Modell klassifiziert. Kostet nur fuer diese Grenzfaelle einen Extra-Call (zaehlt gegen
+# das Tages-Limit). Standardmaessig AUS, da es zusaetzliche Kosten verursacht.
+ENABLE_BORDERLINE_ESCALATION = _bool("ENABLE_BORDERLINE_ESCALATION", False)
+CLAUDE_ESCALATION_MODEL = _str("CLAUDE_ESCALATION_MODEL", "claude-sonnet-5")
+ESCALATION_BAND = _float("ESCALATION_BAND", 0.1)
+
+# --- Preis-Feedback / Backtesting (#2/#3/#8) ---
+# Nach jedem Alert den Kurs der handelbaren Ticker erfassen und nach einem Horizont
+# erneut messen, um die echte Trefferquote zu ermitteln (Dashboard-Kalibrierung) und
+# die heutige Bewegung im Alert anzuzeigen. Best-effort ueber eine kostenlose Quelle
+# (Stooq), ohne API-Key. Standardmaessig AUS: haengt von ausgehender Netz-Erreichbarkeit
+# ab und macht pro Alert zusaetzliche HTTP-Calls - erst einschalten, wenn gewuenscht.
+ENABLE_PRICE_TRACKING = _bool("ENABLE_PRICE_TRACKING", False)
+PRICE_OUTCOME_HORIZON_MINUTES = _int("PRICE_OUTCOME_HORIZON_MINUTES", 60)
 # Ab wie vielen gleichzeitig alarmwuerdigen Statements in EINEM Poll-Zyklus zu einer
 # gebuendelten Sammel-Nachricht gewechselt wird statt einer Einzelnachricht pro Statement
 # (verhindert eine Alert-Flut bei einem ploetzlichen Nachrichtenschub).

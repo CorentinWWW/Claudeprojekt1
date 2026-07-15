@@ -2,9 +2,13 @@ name: Trump Market Monitor
 
 on:
   schedule:
-    # Alle 30 Minuten. Bei oeffentlichen Repos sind GitHub-Actions-Minuten
-    # unbegrenzt, dann kann man hier z.B. auf */15 verkuerzen.
-    - cron: "*/30 * * * *"
+    # Alle 15 Minuten (vorher 30) - Latenz senken (#1): Trump-Schlagzeilen werden
+    # schnell eingepreist, jede Minute frueher zaehlt. Kuerzer als */15 ist bei
+    # GitHub-Actions-Cron unzuverlaessig (geplante Laeufe werden bei Last teils
+    # verzoegert oder zusammengefasst) - fuer echte Sekunden-Latenz den Always-on-
+    # Modus nutzen (siehe README: run_forever/Docker/systemd statt Cron). Bei
+    # oeffentlichen Repos sind Actions-Minuten unbegrenzt.
+    - cron: "*/15 * * * *"
   workflow_dispatch:
     inputs:
       test_text:
