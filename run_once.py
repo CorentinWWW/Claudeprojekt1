@@ -18,7 +18,7 @@ import time
 from app.classifier import DailyCapExceeded, classify
 from app.config import MAX_CONCURRENT_CLASSIFICATIONS, validate
 from app.db import RawStatement, init_db, insert_statement, mark_alert_sent
-from app.orchestrator import build_sources, poll_once
+from app.orchestrator import build_sources, is_alert_worthy, poll_once
 from app.telegram_alert import send_alert
 
 logging.basicConfig(
@@ -75,11 +75,16 @@ async def main() -> int:
             classification.confidence,
             classification.ticker_calls,
         )
-        if classification.is_market_relevant:
+        if is_alert_worthy(classification):
             sent = await send_alert(raw, classification)
             if sent:
                 mark_alert_sent(statement_id)
             logger.info("Telegram-Alert gesendet: %s", sent)
+        else:
+            logger.info(
+                "[manual_test] Kein Alert: keine konkrete Aktie mit ausreichend hoher "
+                "Konfidenz (siehe ALERT_MIN_TICKER_CONFIDENCE)."
+            )
 
     return 0
 

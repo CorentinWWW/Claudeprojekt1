@@ -19,7 +19,7 @@ from app.db import (
     insert_statement,
     mark_alert_sent,
 )
-from app.orchestrator import run_forever, run_health, source_health
+from app.orchestrator import is_alert_worthy, run_forever, run_health, source_health
 from app.telegram_alert import send_alert
 
 logger = logging.getLogger(__name__)
@@ -165,7 +165,10 @@ async def api_test(req: TestRequest):
     statement_id = insert_statement(raw, classification)
 
     alert_sent = False
-    if req.send_telegram and classification.is_market_relevant:
+    # Gleicher strenger Filter wie im echten Betrieb: ein Alert wird nur ausgeloest,
+    # wenn eine konkrete Aktie mit ausreichend hoher Konfidenz betroffen ist - so ist
+    # der Test-Button ein echter Test dessen, was spaeter auch tatsaechlich alarmiert.
+    if req.send_telegram and is_alert_worthy(classification):
         alert_sent = await send_alert(raw, classification)
         if alert_sent:
             mark_alert_sent(statement_id)

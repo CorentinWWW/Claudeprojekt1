@@ -10,6 +10,7 @@ from app.classifier import CONTEXT_SNIPPET_MAX_CHARS, DailyCapExceeded, classify
 from app.config import (
     ALERT_CONFIDENCE_THRESHOLD,
     ALERT_DIGEST_THRESHOLD,
+    ALERT_MIN_TICKER_CONFIDENCE,
     DEDUP_SIMILARITY_THRESHOLD,
     ENABLE_LIVE_AUDIO,
     ENABLE_NEWS,
@@ -83,6 +84,45 @@ def is_high_priority(raw) -> bool:
     if getattr(raw, "source", "") == "truth_social":
         return True
     return bool(_HIGH_PRIORITY_PATTERN.search(raw.text or ""))
+
+
+def _strongest_ticker_confidence(classification) -> float:
+    """Hoechste Pro-Ticker-Konfidenz unter den Tickern mit klarer Long/Short-Richtung
+    (0.0, wenn es keinen solchen Ticker gibt). Robust gegen alte DB-Zeilen ohne
+    confidence-Feld (dort None -> zaehlt als 0.0) und gegen fehlerhafte Eintraege."""
+    best = 0.0
+    for tc in classification.ticker_calls or []:
+        if not isinstance(tc, dict):
+            continue
+        if tc.get("direction") not in ("long", "short"):
+            continue
+        conf = tc.get("confidence")
+        if isinstance(conf, (int, float)) and conf > best:
+            best = float(conf)
+    return best
+
+
+def is_alert_worthy(classification) -> bool:
+    """Zentrale, EINZIGE Stelle, die entscheidet, ob eine Meldung eine Telegram-
+    Nachricht ausloest. Es wird bewusst nur noch bei den sichersten, direkt
+    handelbaren Signalen alarmiert: die Meldung muss marktrelevant sein UND mindestens
+    einen konkreten Boersenticker mit klarer Long/Short-Richtung und einer Pro-Ticker-
+    Konfidenz >= ALERT_MIN_TICKER_CONFIDENCE enthalten. Reine 'marktrelevant'-Meldungen
+    ohne konkrete, hochsichere Aktie loesen KEINEN Alert mehr aus (der Nutzer will
+    ausschliesslich die klarsten 'diese Aktie geht hoch/runter'-Signale). Wird an allen
+    Alarm-Entscheidungspunkten verwendet (poll_once, Resend-Pfad, manuelle Tests),
+    damit die strenge Schwelle nirgends umgangen werden kann - insbesondere durfte der
+    Resend-Pfad (get_pending_alerts) frueher jede marktrelevante Meldung einen Zyklus
+    spaeter doch noch ungefiltert alarmieren."""
+    if classification is None or not classification.is_market_relevant:
+        return False
+    if classification.confidence < ALERT_CONFIDENCE_THRESHOLD:
+        return False
+    if ALERT_MIN_TICKER_CONFIDENCE <= 0:
+        # Praezisions-Filter deaktiviert: altes Verhalten (jede marktrelevante Meldung
+        # oberhalb von ALERT_CONFIDENCE_THRESHOLD alarmiert).
+        return True
+    return _strongest_ticker_confidence(classification) >= ALERT_MIN_TICKER_CONFIDENCE
 
 
 def build_sources():
@@ -279,7 +319,7 @@ async def _classify_and_store(raw, semaphore: asyncio.Semaphore, recent_context:
         raw.text[:100],
     )
 
-    if classification.is_market_relevant and classification.confidence >= ALERT_CONFIDENCE_THRESHOLD:
+    if is_alert_worthy(classification):
         # Sofort sichtbar fuer noch laufende Geschwister-Klassifikationen in dieser
         # Charge (recent_context ist eine geteilte, mutable Liste - siehe poll_once):
         # mindert (loest aber nicht vollstaendig fuer die ersten gleichzeitig
@@ -341,12 +381,21 @@ async def _resend_pending_alerts():
     pending = get_pending_alerts()
     if not pending:
         return
+    # Denselben strengen Alarm-Filter wie im Primaerpfad anwenden: get_pending_alerts
+    # liefert JEDE marktrelevante, noch nicht alarmierte Meldung - ohne diesen Filter
+    # wuerde eine Meldung, die die strenge Ticker-Schwelle nicht erreicht, hier einen
+    # Zyklus spaeter doch noch alarmiert (die Schwelle waere faktisch wirkungslos).
+    # Nicht-alarmwuerdige Eintraege bleiben unmarkiert und altern nach 24h aus dem
+    # get_pending_alerts-Fenster heraus (kein erneuter Claude-Call, nur ein Filter).
+    worthy = [t for t in (_row_to_alert_tuple(row) for row in pending) if is_alert_worthy(t[1])]
+    if not worthy:
+        return
     logger.info(
-        "%d marktrelevante Statement(s) ohne erfolgreichen Alert aus vorherigem(n) "
+        "%d handelbare(s) Statement(s) ohne erfolgreichen Alert aus vorherigem(n) "
         "Lauf/Laeufen gefunden, versuche erneut.",
-        len(pending),
+        len(worthy),
     )
-    await _send_alerts([_row_to_alert_tuple(row) for row in pending])
+    await _send_alerts(worthy)
 
 
 async def poll_once(sources, semaphore: asyncio.Semaphore):
@@ -424,10 +473,7 @@ async def poll_once(sources, semaphore: asyncio.Semaphore):
                 dup_raw.text[:80],
             )
 
-        alert_worthy = [
-            r for r in results
-            if r[1] is not None and r[1].is_market_relevant and r[1].confidence >= ALERT_CONFIDENCE_THRESHOLD
-        ]
+        alert_worthy = [r for r in results if is_alert_worthy(r[1])]
         await _send_alerts(alert_worthy)
 
     if permanent_error is not None:
