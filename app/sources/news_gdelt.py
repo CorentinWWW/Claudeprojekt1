@@ -12,7 +12,7 @@ import httpx
 
 from app.db import RawStatement
 from app.sources.base import Source
-from app.util import BoundedSeenSet, retry_async
+from app.util import BoundedSeenSet, parse_compact_utc_epoch, retry_async
 
 logger = logging.getLogger(__name__)
 
@@ -80,13 +80,17 @@ class GdeltNewsSource(Source):
                 if not title:
                     continue
 
+                # GDELT liefert pro Artikel ein 'seendate' (Zeitpunkt, zu dem GDELT den
+                # Artikel gesehen hat, ~Veroeffentlichungszeit) - deutlich aussagekraeftiger
+                # als der Ingest-Zeitpunkt. Fallback auf jetzt, falls Feld fehlt/kaputt.
+                published_at = parse_compact_utc_epoch(art.get("seendate")) or time.time()
                 results.append(
                     RawStatement(
                         source=self.name,
                         source_id=source_id,
                         text=f"{title} (Quelle: {art.get('domain', 'unbekannt')})",
                         url=art.get("url"),
-                        published_at=time.time(),
+                        published_at=published_at,
                     )
                 )
             return results

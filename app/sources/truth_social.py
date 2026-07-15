@@ -33,7 +33,7 @@ from app.config import (
 )
 from app.db import RawStatement
 from app.sources.base import Source
-from app.util import BoundedSeenSet
+from app.util import BoundedSeenSet, parse_iso8601_epoch
 
 logger = logging.getLogger(__name__)
 
@@ -220,13 +220,17 @@ class TruthSocialSource(Source):
             if not text:
                 continue
 
+            # created_at ist die echte Post-Zeit (ISO-8601) - fuer Trumps eigene Posts
+            # das wichtigste Signal, daher zaehlt hier das tatsaechliche Alter am meisten.
+            # Fallback auf jetzt, falls das Feld fehlt/nicht parsebar ist.
+            published_at = parse_iso8601_epoch(status.get("created_at")) or time.time()
             results.append(
                 RawStatement(
                     source=self.name,
                     source_id=source_id,
                     text=text,
                     url=status.get("url"),
-                    published_at=time.time(),
+                    published_at=published_at,
                 )
             )
         return results

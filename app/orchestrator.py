@@ -358,7 +358,12 @@ async def _send_alerts(alert_worthy: list[tuple]):
 
 
 def _row_to_alert_tuple(row: dict) -> tuple:
-    raw = RawStatement(source=row["source"], source_id=row["source_id"], text=row["text"], url=row["url"])
+    # published_at mitnehmen, damit ein spaeter nachgeschickter Alert (Resend-Pfad) das
+    # echte Alter der Meldung anzeigen kann statt gar keins.
+    raw = RawStatement(
+        source=row["source"], source_id=row["source_id"], text=row["text"],
+        url=row["url"], published_at=row.get("published_at"),
+    )
     classification = Classification(
         is_market_relevant=bool(row["is_market_relevant"]),
         sentiment=row["sentiment"],

@@ -3,6 +3,7 @@
 RSS-Feeds aktualisieren oft schneller als GDELT (Minuten statt ~15 Min), sind aber
 pro Feed nur so vollstaendig wie der jeweilige Anbieter.
 """
+import calendar
 import logging
 import re
 import time
@@ -15,6 +16,21 @@ from app.sources.base import Source
 from app.util import BoundedSeenSet, retry_async
 
 logger = logging.getLogger(__name__)
+
+
+def _entry_published_epoch(entry) -> float:
+    """Echte Veroeffentlichungszeit eines RSS-Eintrags (feedparser normalisiert
+    published_parsed/updated_parsed auf einen UTC-struct_time) -> Unix-Epoch. Fallback
+    auf jetzt, wenn der Feed kein (parsebares) Datum liefert. Wichtig fuers Alter im
+    Alert: eine 5 Stunden alte Meldung ist fuer einen Trade oft schon eingepreist."""
+    for key in ("published_parsed", "updated_parsed"):
+        st = entry.get(key)
+        if st is not None:
+            try:
+                return calendar.timegm(st)
+            except (TypeError, ValueError, OverflowError):
+                continue
+    return time.time()
 
 FEEDS = [
     "https://feeds.marketwatch.com/marketwatch/topstories/",
@@ -72,7 +88,7 @@ class RssNewsSource(Source):
                                 source_id=link,
                                 text=text.strip(),
                                 url=link,
-                                published_at=time.time(),
+                                published_at=_entry_published_epoch(entry),
                             )
                         )
                     except Exception:

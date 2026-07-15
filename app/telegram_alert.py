@@ -1,12 +1,13 @@
 import asyncio
 import html
 import logging
+import time
 from collections import Counter
 from typing import Optional
 
 import httpx
 
-from app.config import TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
+from app.config import ALERT_MIN_TICKER_CONFIDENCE, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
 from app.db import Classification, RawStatement
 
 logger = logging.getLogger(__name__)
@@ -14,6 +15,10 @@ logger = logging.getLogger(__name__)
 SENTIMENT_EMOJI = {"positive": "🟢", "negative": "🔴", "neutral": "⚪"}
 TELEGRAM_MAX_LENGTH = 4096
 DIGEST_MAX_DETAIL_LINES = 15
+# Markiert im Alert die Ticker, die die Praezisions-Schwelle (ALERT_MIN_TICKER_CONFIDENCE)
+# tatsaechlich erreichen - also die eigentlich handelbaren, hochsicheren Signale, im
+# Gegensatz zu evtl. mitgelisteten Kontext-Tickern mit geringerer Konfidenz.
+_ACTIONABLE_MARKER = "⭐"
 
 
 def _direction_arrow(direction: Optional[str]) -> str:
@@ -22,6 +27,37 @@ def _direction_arrow(direction: Optional[str]) -> str:
     if direction == "short":
         return "🔻"
     return "◽"
+
+
+def _is_actionable(tc: dict) -> bool:
+    """True, wenn dieser Ticker die Praezisions-Schwelle erreicht (konkrete Richtung +
+    Konfidenz >= ALERT_MIN_TICKER_CONFIDENCE) - dann bekommt er im Alert eine Markierung.
+    Bei deaktiviertem Filter (Schwelle <= 0) wird nichts markiert (sonst haette jeder
+    Ticker die Markierung, was sie wertlos machte)."""
+    if ALERT_MIN_TICKER_CONFIDENCE <= 0:
+        return False
+    return tc.get("direction") in ("long", "short") and (tc.get("confidence") or 0.0) >= ALERT_MIN_TICKER_CONFIDENCE
+
+
+def _format_age(published_at) -> str:
+    """Kompakte Altersangabe ('gerade eben' / 'vor 3 Min' / 'vor 2 Std' / 'vor 4 Tg')
+    aus der echten Veroeffentlichungszeit - fuer eine Handelsentscheidung entscheidend,
+    ob eine Meldung frisch oder laengst eingepreist ist. Leerer String, wenn kein
+    (brauchbarer) Zeitstempel vorliegt (z.B. alte DB-Zeilen)."""
+    if not isinstance(published_at, (int, float)) or published_at <= 0:
+        return ""
+    delta = time.time() - published_at
+    if delta < 0:  # kleine Uhr-Abweichung zwischen Quelle und uns
+        delta = 0
+    minutes = int(delta // 60)
+    if minutes < 1:
+        return "gerade eben"
+    if minutes < 60:
+        return f"vor {minutes} Min"
+    hours = minutes // 60
+    if hours < 24:
+        return f"vor {hours} Std"
+    return f"vor {hours // 24} Tg"
 
 
 def _sorted_by_confidence(ticker_calls: list[dict]) -> list[dict]:
@@ -36,19 +72,23 @@ def _format_ticker_calls_compact(ticker_calls: list[dict]) -> str:
         return "–"
     return ", ".join(
         f"{html.escape(tc.get('ticker', '?'))}{_direction_arrow(tc.get('direction'))}"
-        f"{(tc.get('confidence') or 0.0):.0%}"
+        f"{(tc.get('confidence') or 0.0):.0%}{_ACTIONABLE_MARKER if _is_actionable(tc) else ''}"
         for tc in _sorted_by_confidence(ticker_calls)
     )
 
 
 def _format_ticker_lines(ticker_calls: list[dict]) -> str:
     """Eine Zeile pro Ticker mit ausgeschriebenem Long/Short und eigener Konfidenz,
-    sortiert nach Konfidenz absteigend (sicherste Einschaetzung zuerst)."""
+    sortiert nach Konfidenz absteigend (sicherste Einschaetzung zuerst). Ticker, die die
+    Praezisions-Schwelle erreichen, werden mit einem Stern markiert - so ist auf einen
+    Blick klar, welcher Ticker der eigentliche (handelbare) Ausloeser ist und welche nur
+    Kontext mit geringerer Sicherheit sind."""
     if not ticker_calls:
         return "📈 –"
     lines = [
         f"{_direction_arrow(tc.get('direction'))} {html.escape(tc.get('ticker') or '?')} "
         f"({html.escape(tc.get('direction') or '?')}) – {(tc.get('confidence') or 0.0):.0%}"
+        f"{' ' + _ACTIONABLE_MARKER if _is_actionable(tc) else ''}"
         for tc in _sorted_by_confidence(ticker_calls)
     ]
     return "\n".join(lines)
@@ -85,13 +125,16 @@ def _format_message(raw: RawStatement, classification: Classification) -> str:
     )
     ticker_lines = _format_ticker_lines(classification.ticker_calls)
     url = _linkable_url(raw.url)
+    age = _format_age(raw.published_at)
+    age_str = f" · 🕒 {age}" if age else ""
 
     def assemble(escaped_headline: str) -> str:
         # Anchor wird immer als Ganzes um die (ggf. gekuerzte) Ueberschrift gelegt,
         # nie mitgekuerzt - ein zerrissenes <a>-Tag wuerde Telegram die GESAMTE
-        # Nachricht ablehnen lassen.
+        # Nachricht ablehnen lassen. age_str ist fester, quellenunabhaengiger Text
+        # (keine Nutzereingabe) und muss daher nicht escaped werden.
         inner = f'<a href="{url}">{escaped_headline}</a>' if url else escaped_headline
-        return f"{emoji} {classification.confidence:.0%} — {inner}\n{ticker_lines}"
+        return f"{emoji} {classification.confidence:.0%}{age_str} — {inner}\n{ticker_lines}"
 
     # Auf Nutzerwunsch: die Ueberschrift wird NICHT um ihrer selbst willen abgekuerzt
     # (voller Begruendungstext). _short_headline() truncatet nur, wenn der Text den
@@ -193,7 +236,9 @@ def _format_digest(items: list[tuple[RawStatement, Classification, int]]) -> str
             # Zeilen, ein <a>-Tag kann also nie zerrissen werden.
             headline = f'<a href="{url}">{headline}</a>'
         ticker_str = _format_ticker_calls_compact(classification.ticker_calls)
-        candidate_lines.append(f"{emoji} {classification.confidence:.0%} {headline} — {ticker_str}")
+        age = _format_age(raw.published_at)
+        age_str = f" · 🕒 {age}" if age else ""
+        candidate_lines.append(f"{emoji} {classification.confidence:.0%}{age_str} {headline} — {ticker_str}")
 
     # Zeilenweise statt zeichenweise budgetieren: eine reine Zeichen-Kappung des
     # fertigen Texts koennte mitten in einem HTML-Tag oder einer Entity enden -

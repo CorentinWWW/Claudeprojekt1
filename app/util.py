@@ -1,14 +1,47 @@
 import asyncio
+import datetime
 import logging
 from collections import deque
 from difflib import SequenceMatcher
-from typing import Awaitable, Callable, TypeVar
+from typing import Awaitable, Callable, Optional, TypeVar
 
 import httpx
 
 logger = logging.getLogger(__name__)
 
 T = TypeVar("T")
+
+
+def parse_iso8601_epoch(value) -> Optional[float]:
+    """ISO-8601-Zeitstempel (z.B. Truth Socials 'created_at': '2026-07-15T13:30:00.000Z')
+    -> Unix-Epoch (float, UTC), oder None wenn nicht parsebar. Fuer die echte
+    Veroeffentlichungszeit einer Meldung (statt des Ingest-Zeitpunkts), damit der Alert
+    das Alter anzeigen kann - fuer eine Handelsentscheidung ist entscheidend, ob eine
+    Nachricht frisch oder laengst eingepreist ist."""
+    if not isinstance(value, str) or not value.strip():
+        return None
+    # datetime.fromisoformat akzeptiert das 'Z'-Suffix erst ab Python 3.11 - defensiv
+    # ersetzen, damit es auch auf aelteren Interpretern funktioniert.
+    s = value.strip().replace("Z", "+00:00")
+    try:
+        dt = datetime.datetime.fromisoformat(s)
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=datetime.timezone.utc)
+    return dt.timestamp()
+
+
+def parse_compact_utc_epoch(value) -> Optional[float]:
+    """Kompakter UTC-Zeitstempel im GDELT-Format 'YYYYMMDDTHHMMSSZ'
+    (z.B. '20260715T133000Z') -> Unix-Epoch (float), oder None wenn nicht parsebar."""
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        dt = datetime.datetime.strptime(value.strip(), "%Y%m%dT%H%M%SZ")
+    except ValueError:
+        return None
+    return dt.replace(tzinfo=datetime.timezone.utc).timestamp()
 
 
 async def retry_async(

@@ -179,6 +179,18 @@ Chunks (Standard 30s), keine Wort-für-Wort-Live-Transkription.
   die Schwelle verfehlt, einen Zyklus später sonst doch noch ungefiltert alarmiert
   worden wäre. Hinweis: der Filter senkt bewusst die Trefferzahl – er ersetzt keine
   eigene Recherche und ist keine Anlageberatung.
+- **Echte Nachrichtenzeit + Alter im Alert**: statt eines bloßen „gerade erfasst"-
+  Zeitstempels liest jede Quelle jetzt die **tatsächliche Veröffentlichungszeit** aus
+  (GDELT `seendate`, RSS `published_parsed`, Truth Social `created_at`; Fallback auf
+  „jetzt", wenn die Quelle keins liefert). Der Alert zeigt daraus ein kompaktes Alter
+  („🕒 vor 3 Min" / „vor 2 Std") – für eine Handelsentscheidung entscheidend, denn eine
+  Stunden alte Meldung ist oft schon eingepreist, während eine gerade erschienene noch
+  Bewegung bringen kann.
+- **Markierung des handelbaren Tickers**: im Alert bekommen die Ticker, die die
+  Präzisions-Schwelle (`ALERT_MIN_TICKER_CONFIDENCE`) tatsächlich erreichen, einen
+  Stern `⭐`. So ist auf einen Blick klar, welcher Ticker der eigentliche, hochsichere
+  Auslöser ist und welche nur Kontext mit geringerer Sicherheit sind (die weiterhin
+  angezeigt werden, nach Konfidenz sortiert).
 - **Long/Short-Einschätzung pro Ticker, jeweils mit eigener Konfidenz**: statt nur
   "betroffene Ticker" gibt Claude für jeden genannten Ticker eine `long`/`short`-
   Einschätzung UND eine eigene Konfidenz dafür ab - auch innerhalb derselben Meldung
