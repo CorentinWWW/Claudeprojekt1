@@ -10,6 +10,7 @@ import httpx
 
 from app.config import (
     ALERT_MIN_TICKER_CONFIDENCE,
+    BLOCKLIST_TICKERS,
     CHART_URL_TEMPLATE,
     ENABLE_CHART_BUTTONS,
     ENABLE_MARKET_SESSION_INFO,
@@ -110,10 +111,16 @@ def _build_chart_markup(ticker_calls: list[dict]) -> Optional[dict]:
 
 def _is_actionable(tc: dict) -> bool:
     """True, wenn dieser Ticker die Praezisions-Schwelle erreicht (konkrete Richtung +
-    Konfidenz >= ALERT_MIN_TICKER_CONFIDENCE) - dann bekommt er im Alert eine Markierung.
+    Konfidenz >= ALERT_MIN_TICKER_CONFIDENCE) und nicht auf der Blockliste steht - dann
+    bekommt er im Alert eine Markierung und einen Chart-Button. Muss dieselben Ticker
+    meinen wie orchestrator.actionable_tickers (die Alarm-Entscheidung): sonst koennte
+    ein geblockter Ticker zwar nie den Alarm ausloesen, aber trotzdem als vermeintliches
+    Signal markiert werden, wenn ein ANDERER Ticker den Alert getriggert hat.
     Bei deaktiviertem Filter (Schwelle <= 0) wird nichts markiert (sonst haette jeder
     Ticker die Markierung, was sie wertlos machte)."""
     if ALERT_MIN_TICKER_CONFIDENCE <= 0:
+        return False
+    if (tc.get("ticker") or "").upper() in BLOCKLIST_TICKERS:
         return False
     return tc.get("direction") in ("long", "short") and (tc.get("confidence") or 0.0) >= ALERT_MIN_TICKER_CONFIDENCE
 
