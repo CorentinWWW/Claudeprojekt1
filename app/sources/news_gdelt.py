@@ -74,11 +74,15 @@ class GdeltNewsSource(Source):
                 source_id = art.get("url", "")
                 if not source_id or source_id in self._seen:
                     continue
-                self._seen.add(source_id)
 
                 title = (art.get("title") or "").strip()
                 if not title:
+                    # NICHT als gesehen markieren: GDELT kann einen Artikel schon
+                    # gelistet haben, bevor der Titel indexiert ist - wuerde man ihn
+                    # trotzdem als "gesehen" vermerken, waere er dauerhaft uebersprungen,
+                    # selbst wenn ein spaeterer Poll den (dann befuellten) Titel liefert.
                     continue
+                self._seen.add(source_id)
 
                 # GDELT liefert pro Artikel ein 'seendate' (Zeitpunkt, zu dem GDELT den
                 # Artikel gesehen hat, ~Veroeffentlichungszeit) - deutlich aussagekraeftiger

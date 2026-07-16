@@ -271,7 +271,11 @@ function renderCard(item) {
   const tickers = renderTickerCalls(item.tickers);
   const sectors = (item.sectors || []).map(s => `<span class="tag">${escapeHtml(s)}</span>`).join('') || '–';
   const itemUrl = item.url ? safeUrl(item.url) : null;
-  const link = itemUrl ? `<a href="${escapeAttr(itemUrl)}" target="_blank">Quelle</a>` : '';
+  // rel="noopener noreferrer": itemUrl kommt aus externen, nicht vertrauenswuerdigen
+  // Quellen (RSS/GDELT/Truth Social) - ohne noopener koennte die geoeffnete Seite per
+  // window.opener dieses Dashboard-Tab umleiten (Reverse-Tabnabbing), z.B. auf eine
+  // Phishing-Seite fuer den in localStorage liegenden DASHBOARD_API_KEY.
+  const link = itemUrl ? `<a href="${escapeAttr(itemUrl)}" target="_blank" rel="noopener noreferrer">Quelle</a>` : '';
 
   return `
     <div class="card ${sentimentClass(item.sentiment)}${isDup ? ' duplicate' : ''}">
@@ -356,9 +360,16 @@ async function loadCalibration() {
   let cal;
   try {
     const res = await apiFetch('/api/calibration');
-    if (!res.ok) return;
+    if (!res.ok) {
+      // Sichtbar machen statt schweigend die letzten (moeglicherweise laengst
+      // veralteten) Zahlen stehen zu lassen - sonst saehe ein dauerhaft fehlschlagender
+      // Abruf (falscher API-Key, DB-Fehler) genauso aus wie ein aktueller Stand.
+      el.innerHTML = '<div class="stat"><div class="value">⚠️</div><div class="label">Trefferquote konnte nicht aktualisiert werden (Status ' + res.status + ')</div></div>';
+      return;
+    }
     cal = await res.json();
   } catch (err) {
+    el.innerHTML = '<div class="stat"><div class="value">⚠️</div><div class="label">Trefferquote konnte nicht aktualisiert werden</div></div>';
     return;
   }
   const pct = (v) => (v == null ? '–' : Math.round(v * 100) + '%');

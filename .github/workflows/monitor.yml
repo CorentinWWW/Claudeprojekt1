@@ -31,12 +31,21 @@ concurrency:
 jobs:
   poll:
     runs-on: ubuntu-latest
-    # Grosszuegig bemessen: ein Nachrichtenschub (viele echte, unterschiedliche
-    # Trump/Markt-Meldungen gleichzeitig) kann mehrere Minuten Klassifikation
-    # brauchen. Lieber laenger warten als einen Lauf mitten in der Verarbeitung
-    # abzubrechen (siehe _resend_pending_alerts() in orchestrator.py als
-    # zusaetzliches Sicherheitsnetz, falls es doch mal knapp wird).
-    timeout-minutes: 20
+    # WICHTIG: bewusst DEUTLICH unter dem Cron-Intervall (*/15 oben) gehalten. Ein
+    # Timeout >= dem Intervall (frueher 20 bei ebenfalls */15) kann dazu fuehren, dass
+    # ein Lauf noch laeuft, wenn der naechste UND uebernaechste geplante Trigger
+    # feuern - "concurrency: cancel-in-progress: false" haelt aber nur GENAU EINEN
+    # wartenden Lauf in der Warteschlange; ein dritter ueberlappender Trigger wird von
+    # GitHub NICHT eingereiht, sondern still verworfen (kein rotes Kreuz, keine
+    # Fehler-Mail - der Zyklus faellt einfach lautlos aus, ausgerechnet waehrend eines
+    # Nachrichtenschubs). 10 Minuten reichen bei serieller Klassifikation
+    # (MAX_CONCURRENT_CLASSIFICATIONS=1, gedeckelt durch den Tages-Kostendeckel) und
+    # nebenlaeufigem RSS-Abruf (siehe news_rss.py: alle Feeds gleichzeitig statt
+    # nacheinander) fuer einen normalen bis maessig starken Nachrichtenschub; ein
+    # abgebrochener Lauf verliert dank _resend_pending_alerts() in orchestrator.py
+    # ohnehin keine marktrelevante Meldung dauerhaft - der naechste (puenktlich
+    # startende) Lauf holt sie nach.
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
 

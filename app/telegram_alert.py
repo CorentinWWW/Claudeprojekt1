@@ -85,16 +85,38 @@ def _thread_segment(thread: Optional[list]) -> str:
     return f"🧵 Teil einer Entwicklung ({len(thread)} Meldungen) – Beginn{age_part}: {snippet}"
 
 
+def _safe_ticker(tc: dict, default: str = "?") -> str:
+    """Robuste Ticker-String-Extraktion aus einem ticker_calls-Eintrag: liefert IMMER
+    einen String (default, falls das Feld fehlt, None ist, oder - z.B. bei einer alten/
+    fremden DB-Zeile - keinen String enthaelt, etwa eine Zahl). '.get(key, default)'
+    allein faengt nur eine FEHLENDE Taste ab, kein explizites None und keinen falschen
+    Typ - beides wuerde .upper()/.strip()/html.escape() sonst mit einem
+    AttributeError/TypeError zum Absturz bringen."""
+    val = tc.get("ticker")
+    return val if isinstance(val, str) and val else default
+
+
 def _build_chart_markup(ticker_calls: list[dict]) -> Optional[dict]:
     """Inline-Keyboard mit Chart-Links (#9) fuer die handelbaren Ticker (max. 3),
-    sortiert nach Konfidenz. None, wenn deaktiviert oder kein handelbarer Ticker."""
+    sortiert nach Konfidenz. None, wenn deaktiviert, das URL-Template kaputt ist oder
+    kein handelbarer Ticker uebrig bleibt."""
     if not ENABLE_CHART_BUTTONS:
+        return None
+    if "{ticker}" not in CHART_URL_TEMPLATE:
+        # str.format() ignoriert ueberzaehlige/fehlende Platzhalter still (kein
+        # KeyError) - ohne diese explizite Pruefung wuerde ein CHART_URL_TEMPLATE ohne
+        # {ticker} (z.B. eine falsch kopierte feste URL) fuer JEDEN Ticker denselben
+        # Button erzeugen, ohne jede Fehlermeldung.
+        logger.warning(
+            "CHART_URL_TEMPLATE enthaelt keinen {ticker}-Platzhalter - Chart-Buttons "
+            "werden uebersprungen: %s", CHART_URL_TEMPLATE,
+        )
         return None
     buttons = []
     for tc in _sorted_by_confidence(ticker_calls):
-        if not _is_actionable(tc):
+        if not _has_clear_direction_and_confidence(tc):
             continue
-        ticker = (tc.get("ticker") or "").strip().upper()
+        ticker = _safe_ticker(tc, "").strip().upper()
         if not ticker:
             continue
         try:
@@ -109,20 +131,51 @@ def _build_chart_markup(ticker_calls: list[dict]) -> Optional[dict]:
     return {"inline_keyboard": [buttons]} if buttons else None
 
 
+def _has_clear_direction_and_confidence(tc: dict) -> bool:
+    """True, wenn dieser Ticker eine klare Long/Short-Richtung hat, nicht auf der
+    Blockliste steht, UND (falls der Praezisions-Filter aktiv ist) dessen Konfidenz
+    erreicht. Deckt sich bewusst mit orchestrator.actionable_tickers's Semantik
+    (inklusive: bei deaktiviertem Filter zaehlt jeder Ticker mit klarer Richtung) -
+    im Unterschied zu _is_actionable() (Stern-Markierung), die bei deaktiviertem
+    Filter IMMER False liefert. Fuer Chart-Buttons gibt es keinen Grund, sie bei
+    deaktiviertem Filter komplett abzuschalten - anders als beim Stern (der sonst
+    bedeutungslos waere, weil er dann jeden Ticker markieren wuerde) ist ein Chart-
+    Link fuer jeden Ticker mit klarer Richtung weiterhin sinnvoll und nicht irrefuehrend."""
+    if _safe_ticker(tc, "").upper() in BLOCKLIST_TICKERS:
+        return False
+    if tc.get("direction") not in ("long", "short"):
+        return False
+    if ALERT_MIN_TICKER_CONFIDENCE <= 0:
+        return True
+    return (tc.get("confidence") or 0.0) >= ALERT_MIN_TICKER_CONFIDENCE
+
+
 def _is_actionable(tc: dict) -> bool:
     """True, wenn dieser Ticker die Praezisions-Schwelle erreicht (konkrete Richtung +
     Konfidenz >= ALERT_MIN_TICKER_CONFIDENCE) und nicht auf der Blockliste steht - dann
-    bekommt er im Alert eine Markierung und einen Chart-Button. Muss dieselben Ticker
-    meinen wie orchestrator.actionable_tickers (die Alarm-Entscheidung): sonst koennte
-    ein geblockter Ticker zwar nie den Alarm ausloesen, aber trotzdem als vermeintliches
-    Signal markiert werden, wenn ein ANDERER Ticker den Alert getriggert hat.
-    Bei deaktiviertem Filter (Schwelle <= 0) wird nichts markiert (sonst haette jeder
-    Ticker die Markierung, was sie wertlos machte)."""
+    bekommt er im Alert eine STERN-Markierung. Bei deaktiviertem Filter (Schwelle <= 0)
+    wird bewusst NIE markiert (sonst haette jeder Ticker die Markierung, was sie
+    wertlos machte) - siehe _has_clear_direction_and_confidence() fuer die Chart-
+    Button-Eignung, die bei deaktiviertem Filter NICHT auf 'nie' faellt."""
     if ALERT_MIN_TICKER_CONFIDENCE <= 0:
         return False
-    if (tc.get("ticker") or "").upper() in BLOCKLIST_TICKERS:
+    if _safe_ticker(tc, "").upper() in BLOCKLIST_TICKERS:
         return False
     return tc.get("direction") in ("long", "short") and (tc.get("confidence") or 0.0) >= ALERT_MIN_TICKER_CONFIDENCE
+
+
+def _visible_ticker_calls(ticker_calls: list[dict]) -> list[dict]:
+    """Entfernt Ticker auf der Blockliste aus der ANZEIGE - unabhaengig davon, ob der
+    Praezisions-Filter (ALERT_MIN_TICKER_CONFIDENCE) aktiv ist. BLOCKLIST_TICKERS
+    bedeutet 'diese Ticker nie melden', nicht nur 'nie als Alarm-Ausloeser verwenden'.
+    Ohne diesen Filter wuerde ein geblockter Ticker trotzdem als normale (nur nicht mit
+    Stern markierte) Zeile in jedem Alert auftauchen, der aus einem ANDEREN Grund
+    feuert (z.B. ein zweiter, nicht geblockter Ticker, oder - bei deaktiviertem
+    Praezisions-Filter - jede marktrelevante Meldung unabhaengig von Tickern)."""
+    return [
+        tc for tc in (ticker_calls or [])
+        if isinstance(tc, dict) and _safe_ticker(tc, "").upper() not in BLOCKLIST_TICKERS
+    ]
 
 
 def _format_age(published_at) -> str:
@@ -153,14 +206,29 @@ def _sorted_by_confidence(ticker_calls: list[dict]) -> list[dict]:
     return sorted(ticker_calls, key=lambda tc: tc.get("confidence") or 0.0, reverse=True)
 
 
+# Harte Obergrenze fuer die Anzahl gerenderter Ticker-Zeilen: das Claude-Tool-Schema
+# begrenzt die Laenge von ticker_calls nicht (kein maxItems), und das bestehende
+# Laengen-Sicherheitsnetz in _format_message kuerzt nur Ueberschrift/URL, nie die
+# Ticker-Zeilen selbst - eine sehr lange Liste koennte die Nachricht sonst ueber
+# TELEGRAM_MAX_LENGTH aufblaehen und den GESAMTEN Alert verlieren (Telegram lehnt die
+# komplette Nachricht ab). Die Liste ist vorher schon nach Konfidenz absteigend
+# sortiert, die wichtigsten/sichersten Ticker bleiben also in jedem Fall erhalten.
+_MAX_TICKER_LINES = 12
+
+
 def _format_ticker_calls_compact(ticker_calls: list[dict]) -> str:
     if not ticker_calls:
         return "–"
-    return ", ".join(
-        f"{html.escape(tc.get('ticker', '?'))}{_direction_arrow(tc.get('direction'))}"
+    sorted_calls = _sorted_by_confidence(ticker_calls)
+    overflow = max(0, len(sorted_calls) - _MAX_TICKER_LINES)
+    parts = [
+        f"{html.escape(_safe_ticker(tc))}{_direction_arrow(tc.get('direction'))}"
         f"{(tc.get('confidence') or 0.0):.0%}{_ACTIONABLE_MARKER if _is_actionable(tc) else ''}"
-        for tc in _sorted_by_confidence(ticker_calls)
-    )
+        for tc in sorted_calls[:_MAX_TICKER_LINES]
+    ]
+    if overflow:
+        parts.append(f"+{overflow} weitere")
+    return ", ".join(parts)
 
 
 def _format_ticker_lines(ticker_calls: list[dict], ticker_change: Optional[dict] = None) -> str:
@@ -169,13 +237,15 @@ def _format_ticker_lines(ticker_calls: list[dict], ticker_change: Optional[dict]
     Praezisions-Schwelle erreichen, werden mit einem Stern markiert - so ist auf einen
     Blick klar, welcher Ticker der eigentliche (handelbare) Ausloeser ist und welche nur
     Kontext mit geringerer Sicherheit sind. ticker_change (optional, {TICKER: prozent})
-    ergaenzt die heutige Kursbewegung (#8)."""
+    ergaenzt die heutige Kursbewegung (#8). Zeigt hoechstens _MAX_TICKER_LINES Zeilen."""
     if not ticker_calls:
         return "📈 –"
     ticker_change = ticker_change or {}
+    sorted_calls = _sorted_by_confidence(ticker_calls)
+    overflow = max(0, len(sorted_calls) - _MAX_TICKER_LINES)
     lines = []
-    for tc in _sorted_by_confidence(ticker_calls):
-        ticker = tc.get("ticker") or "?"
+    for tc in sorted_calls[:_MAX_TICKER_LINES]:
+        ticker = _safe_ticker(tc)
         line = (
             f"{_direction_arrow(tc.get('direction'))} {html.escape(ticker)} "
             f"({html.escape(tc.get('direction') or '?')}) – {(tc.get('confidence') or 0.0):.0%}"
@@ -186,6 +256,8 @@ def _format_ticker_lines(ticker_calls: list[dict], ticker_change: Optional[dict]
         if isinstance(change, (int, float)):
             line += f" · heute {change:+.1f}%"
         lines.append(line)
+    if overflow:
+        lines.append(f"… +{overflow} weitere Ticker")
     return "\n".join(lines)
 
 
@@ -221,7 +293,7 @@ def _format_message(
         if classification.related_topic_id is not None and classification.is_major_escalation
         else ""
     )
-    ticker_lines = _format_ticker_lines(classification.ticker_calls, extras.get("ticker_change"))
+    ticker_lines = _format_ticker_lines(_visible_ticker_calls(classification.ticker_calls), extras.get("ticker_change"))
     url = _linkable_url(raw.url)
     age = _format_age(raw.published_at)
     age_str = f" · 🕒 {age}" if age else ""
@@ -328,7 +400,7 @@ async def send_alert(
     raw: RawStatement, classification: Classification, extras: Optional[dict] = None
 ) -> bool:
     text = _format_message(raw, classification, extras=extras)
-    markup = _build_chart_markup(classification.ticker_calls)
+    markup = _build_chart_markup(_visible_ticker_calls(classification.ticker_calls))
     return await _send(text, reply_markup=markup)
 
 

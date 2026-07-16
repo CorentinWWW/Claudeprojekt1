@@ -374,22 +374,66 @@ def get_pending_alerts(hours: int = 24) -> list[dict]:
         return result
 
 
+def _resolve_thread_root(conn, topic_id: int, max_hops: int = 20) -> int:
+    """Folgt der related_topic_id/duplicate_of_id-Kette RUECKWAERTS bis zur
+    eigentlichen Wurzel des Themas. Noetig, weil topic_id selbst schon eine
+    Eskalation einer frueheren Meldung sein kann (Claude verlinkt bei einer
+    Mehrfach-Eskalation nicht zwangslaeufig auf den urspruenglichen Ur-Alert,
+    sondern kann genausogut auf den letzten Zwischenschritt zeigen) - ohne diese
+    Aufloesung wuerde die Zeitleiste bei mehrfachen Eskalationen faelschlich nur
+    den letzten Zwischenschritt als "Beginn" zeigen und fruehere Glieder verlieren.
+    max_hops + seen-Set schuetzen vor einer (eigentlich unmoeglichen, da IDs nur
+    auf strikt frueher eingefuegte Zeilen zeigen koennen) Zyklus-Endlosschleife."""
+    current = topic_id
+    seen = {current}
+    for _ in range(max_hops):
+        row = conn.execute(
+            "SELECT related_topic_id, duplicate_of_id FROM statements WHERE id = ?",
+            (current,),
+        ).fetchone()
+        if row is None:
+            break
+        nxt = row["related_topic_id"] or row["duplicate_of_id"]
+        if nxt is None or nxt in seen:
+            break
+        current = nxt
+        seen.add(current)
+    return current
+
+
 def get_topic_thread(topic_id: int, hours: int = 48, limit: int = 10) -> list[dict]:
-    """Die Meldungen, die zu einem Thema gehoeren (die Wurzel selbst plus alle, die per
-    related_topic_id/duplicate_of_id darauf zeigen), zeitlich aufsteigend sortiert -
-    fuer eine kompakte Verlaufs-/Eskalations-Zeitleiste im Alert (#5)."""
+    """Alle Meldungen, die zu einem Thema gehoeren, zeitlich aufsteigend sortiert -
+    fuer eine kompakte Verlaufs-/Eskalations-Zeitleiste im Alert (#5).
+
+    Loest zuerst die echte Wurzel auf (siehe _resolve_thread_root) und sammelt dann
+    per rekursivem CTE die GESAMTE Kette, die (direkt oder ueber Zwischenglieder)
+    darauf zeigt - ein einfacher Ein-Hop-Vergleich wuerde bei einer Mehrfach-
+    Eskalation (C zeigt auf B, B zeigt auf die Wurzel A) das jeweils uebernaechste
+    Kettenglied verlieren. hours begrenzt nur, wie weit zurueck ZUSAETZLICHE
+    Kettenglieder gezeigt werden - die aufgeloeste Wurzel selbst wird nie allein
+    wegen des Zeitfensters ausgeschlossen (sie ist dem Aufrufer per topic_id bereits
+    bekannt/relevant, siehe orchestrator.py: topic_id stammt aus validiertem,
+    zeitlich ohnehin begrenztem Themen-Kontext)."""
     cutoff = time.time() - hours * 3600
     with get_conn() as conn:
+        root_id = _resolve_thread_root(conn, topic_id)
         rows = conn.execute(
             """
+            WITH RECURSIVE thread_ids(id) AS (
+                SELECT ?
+                UNION
+                SELECT s.id FROM statements s
+                JOIN thread_ids t
+                    ON s.related_topic_id = t.id OR s.duplicate_of_id = t.id
+            )
             SELECT id, text, ingested_at, is_major_escalation, alert_sent
             FROM statements
-            WHERE (id = ? OR related_topic_id = ? OR duplicate_of_id = ?)
-                AND ingested_at >= ?
+            WHERE id IN (SELECT id FROM thread_ids)
+                AND (id = ? OR ingested_at >= ?)
             ORDER BY ingested_at ASC
             LIMIT ?
             """,
-            (topic_id, topic_id, topic_id, cutoff, limit),
+            (root_id, root_id, cutoff, limit),
         ).fetchall()
     return [dict(row) for row in rows]
 
@@ -467,7 +511,13 @@ def get_calibration_stats() -> dict:
         ).fetchone()
         by_bucket = conn.execute(
             """
-            SELECT CAST(confidence * 10 AS INT) AS bucket,
+            -- MIN(..., 9) klemmt eine Konfidenz von genau 1.0 in den 90-100%-Bucket
+            -- (bucket=9) statt einen eigenen, unsinnigen "100-110%"-Bucket (bucket=10)
+            -- zu erzeugen - CAST(1.0*10 AS INT)=10 waere sonst ein eigener Eintrag,
+            -- der den 90-100%-Bucket kuenstlich aufspaltet (Konfidenz ist auf [0,1]
+            -- geklemmt, siehe classifier.py: _clamped_confidence, 1.0 ist also ein
+            -- ganz normaler, haeufiger Wert).
+            SELECT MIN(CAST(confidence * 10 AS INT), 9) AS bucket,
                    COUNT(*) AS n,
                    SUM(CASE WHEN correct = 1 THEN 1 ELSE 0 END) AS hits
             FROM alert_outcomes

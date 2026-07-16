@@ -6,7 +6,7 @@ import time
 
 from anthropic import AuthenticationError, NotFoundError, PermissionDeniedError
 
-from app.classifier import CONTEXT_SNIPPET_MAX_CHARS, DailyCapExceeded, classify
+from app.classifier import CONTEXT_SNIPPET_MAX_CHARS, DailyCapExceeded, FALLBACK_CLASSIFICATION, classify
 from app.config import (
     ALERT_CONFIDENCE_THRESHOLD,
     ALERT_DIGEST_THRESHOLD,
@@ -293,22 +293,58 @@ async def _maybe_escalate(text, recent_context, priority, classification):
     Konfigurationsfehler (falsches Eskalations-Modell = 404) schlagen wie ueberall durch."""
     if not ENABLE_BORDERLINE_ESCALATION or not CLAUDE_ESCALATION_MODEL:
         return classification
+    if ALERT_MIN_TICKER_CONFIDENCE <= 0:
+        # Bei deaktiviertem Praezisions-Filter ist "Grenzfall um die Schwelle" ein
+        # sinnloser Begriff (die Schwelle ist 0) - ohne diesen Guard wuerde die
+        # Bandpruefung unten zu "0 <= staerkste Konfidenz <= ESCALATION_BAND"
+        # entarten, was auf JEDE Meldung OHNE handelbaren Ticker zutrifft (staerkste
+        # Konfidenz ist dann 0.0) und faelschlich fast immer eine (kostenpflichtige)
+        # Zweitmeinung ausloesen wuerde.
+        return classification
     strongest = _strongest_ticker_confidence(classification)
     if not (ALERT_MIN_TICKER_CONFIDENCE - ESCALATION_BAND <= strongest
             <= ALERT_MIN_TICKER_CONFIDENCE + ESCALATION_BAND):
         return classification
     try:
         second = await classify(
-            text, recent_context=recent_context, priority=priority,
+            text, recent_context=recent_context,
+            # Bewusst IMMER priority=False fuer den Eskalations-Call, unabhaengig vom
+            # priority-Flag der urspruenglichen Meldung: die Zweitmeinung ist eine
+            # Qualitaetsverbesserung fuer Grenzfaelle, kein Ersatz fuer die knappe
+            # Prioritaets-Reserve. Sonst koennte EINE einzelne wichtige Grenzfall-
+            # Meldung durch ihre eigene Eskalation zwei Reserve-Slots verbrauchen
+            # (Primaer-Call + Eskalations-Call) statt nur einen - und die Reserve
+            # damit fuer tatsaechlich NEUE wichtige Meldungen leerraeumen. Ist das
+            # normale Tages-Limit bereits ausgeschoepft, faellt die Zweitmeinung
+            # einfach aus (DailyCapExceeded unten); die bereits erfolgreich
+            # klassifizierte Primaer-Bewertung bleibt in jedem Fall erhalten.
+            priority=False,
             model=CLAUDE_ESCALATION_MODEL,
         )
     except DailyCapExceeded:
         logger.info("[borderline] Zweitmeinung wegen Tages-Limit uebersprungen.")
         return classification
     except PERMANENT_CLAUDE_ERRORS:
+        logger.critical(
+            "[borderline] Permanenter Fehler beim Eskalations-Modell "
+            "(CLAUDE_ESCALATION_MODEL=%s) - nicht ANTHROPIC_API_KEY/CLAUDE_MODEL, "
+            "sondern diese Eskalations-Konfiguration pruefen.",
+            CLAUDE_ESCALATION_MODEL,
+        )
         raise
     except Exception:
         logger.warning("[borderline] Zweitmeinung fehlgeschlagen, behalte Erstbewertung.", exc_info=True)
+        return classification
+    if second is FALLBACK_CLASSIFICATION:
+        # classify() kann OHNE Exception einen Fallback liefern, wenn die Antwort des
+        # Eskalations-Modells nicht sauber geparst werden konnte (siehe classifier.py:
+        # _parse_response) - das ist KEINE bessere Zweitmeinung, sondern ein
+        # Nicht-Ergebnis. Ohne diese Pruefung wuerde eine bereits erfolgreich
+        # klassifizierte, tatsaechlich alarmwuerdige Meldung stillschweigend zu
+        # "nicht marktrelevant" herabgestuft.
+        logger.warning(
+            "[borderline] Zweitmeinung lieferte keine gueltige Antwort, behalte Erstbewertung."
+        )
         return classification
     logger.info(
         "[borderline] Zweitmeinung mit %s: staerkste Ticker-Konfidenz %.2f -> %.2f",
@@ -482,8 +518,13 @@ async def _send_alerts(alert_worthy: list[tuple]):
         # Sammel-Nachricht: die Baselines fuers Backtesting trotzdem erfassen (damit ein
         # Nachrichtenschub keine Luecke in der Erfolgsmessung reisst), aber ohne die
         # reichhaltigen Einzel-Extras (Thread/Buttons) - der Digest bleibt kompakt.
-        for _, classification, statement_id in alert_worthy:
-            await _fetch_ticker_context(classification, statement_id)
+        # Gleichzeitig statt nacheinander abgefragt: ein sequenzieller Kurs-Abruf pro
+        # Alert wuerde ausgerechnet in dem Nachrichtenschub-Fall, fuer den der Digest
+        # ueberhaupt existiert, den Poll-Zyklus spuerbar verzoegern koennen.
+        await asyncio.gather(*(
+            _fetch_ticker_context(classification, statement_id)
+            for _, classification, statement_id in alert_worthy
+        ))
         sent = await send_digest_alert(alert_worthy)
         if sent:
             for _, _, statement_id in alert_worthy:
@@ -546,8 +587,13 @@ async def _evaluate_alert_outcomes():
     if not pending:
         return
     now = time.time()
-    for o in pending:
-        quote = await prices.get_quote(o["ticker"])
+    # Alle Kursabfragen gleichzeitig statt nacheinander (bis zu 50 Ticker, siehe
+    # get_outcomes_awaiting_followup-Limit): sequenziell koennte das bei einem
+    # traegen Kursdienst mehrere Minuten dauern und den gesamten Poll-Zyklus unnoetig
+    # verzoegern. Die eigentlichen DB-Schreibzugriffe bleiben synchron/sequenziell
+    # danach (kein Nebenlaeufigkeits-Risiko fuer SQLite).
+    quotes = await asyncio.gather(*(prices.get_quote(o["ticker"]) for o in pending))
+    for o, quote in zip(pending, quotes):
         if not quote or not quote.get("price"):
             continue
         alert_price = o["alert_price"]

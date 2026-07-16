@@ -8,6 +8,7 @@ still - der Poll-Zyklus darf daran NIE scheitern. Deshalb ist das gesamte Preis-
 per ENABLE_PRICE_TRACKING standardmaessig aus.
 """
 import logging
+import math
 from typing import Optional
 
 import httpx
@@ -46,9 +47,13 @@ def parse_stooq_csv(text: str) -> Optional[dict]:
         if not v or v.upper() == "N/D":
             return None
         try:
-            return float(v)
+            parsed = float(v)
         except ValueError:
             return None
+        # float() akzeptiert auch "inf"/"-inf"/"nan"/"Infinity" - eine korrupte/
+        # unerwartete Kursdienst-Antwort mit so einem Wert soll nicht als gueltiger
+        # Kurs durchgehen (sonst koennte im Alert z.B. "heute +inf%" erscheinen).
+        return parsed if math.isfinite(parsed) else None
 
     price = _num("close")
     open_ = _num("open")
