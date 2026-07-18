@@ -3,9 +3,10 @@
 dieselbe Klassifikations-Pipeline ein.
 
 Einschraenkungen (bewusst, siehe Plan):
-- Es gibt keine automatische Erkennung "Trump spricht gerade" - die Stream-URLs
-  muessen manuell in LIVE_AUDIO_STREAM_URLS gepflegt werden (z.B. ein 24/7
-  News-Kanal oder der Link zu einem konkret angekuendigten Event).
+- Es gibt keine automatische Erkennung "eine relevante Person spricht gerade" - die
+  Stream-URLs muessen manuell in LIVE_AUDIO_STREAM_URLS gepflegt werden (z.B. ein
+  24/7 News-Kanal oder der Link zu einem konkret angekuendigten Event/einer
+  Pressekonferenz).
 - Braucht zusaetzliche Dependencies (yt-dlp, faster-whisper) und ffmpeg im System
   ("pip install yt-dlp faster-whisper" + ffmpeg-Binary). Diese sind bewusst nicht
   in requirements.txt Pflicht, damit der Rest des Systems ohne sie laeuft.

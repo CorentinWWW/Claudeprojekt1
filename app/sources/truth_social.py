@@ -1,4 +1,7 @@
-"""Best-Effort Zugriff auf Truth-Social-Posts.
+"""Best-Effort Zugriff auf Truth-Social-Posts (konfigurierbarer Account, Standard
+Donald Trump - siehe TRUTH_SOCIAL_HANDLE). Eine von mehreren optionalen Quellen
+(ENABLE_TRUTH_SOCIAL) - der Monitor deckt daneben allgemein marktrelevante
+Nachrichten aus News-Feeds (GDELT/RSS) ab, unabhaengig von dieser einen Person.
 
 WICHTIG - Einschraenkungen:
 - Es gibt keine offizielle, unterstuetzte Public-API von Truth Social.

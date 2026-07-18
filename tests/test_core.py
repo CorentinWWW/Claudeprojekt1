@@ -3,7 +3,7 @@
 Deckt ab: Schema-Migration, insert_statement-Kollision, get_known_source_ids/
 get_dedup_candidates, related_topic_id-Validierung (orchestrator), max_tokens-
 Truncation-Erkennung (classifier), Dashboard-Auth/MAX_TEST_TEXT_LENGTH,
-BoundedSeenSet, TRUMP_WORD_PATTERN, Truth-Social Account-Scope,
+BoundedSeenSet, RSS-Quelle ohne Themen-/Personenfilter, Truth-Social Account-Scope,
 Telegram-Digest Zeilen-Budget.
 
 Kein echter Netzwerk-Call (Anthropic/Telegram werden gemockt).
@@ -137,16 +137,42 @@ def test_bounded_seen_set():
 
 
 # ---------------------------------------------------------------------------
-# 4. TRUMP_WORD_PATTERN
+# 4. news_rss akzeptiert ALLE Feed-Eintraege (kein Themen-/Personenfilter mehr -
+#    der Monitor deckt allgemein marktrelevante Nachrichten ab, nicht nur einen
+#    bestimmten Namen/ein bestimmtes Thema). Praezision entsteht nachgelagert durch
+#    die Claude-Klassifikation + den Tages-Kostendeckel, nicht durch einen
+#    Ingestion-seitigen Text-Filter.
 # ---------------------------------------------------------------------------
-def test_trump_word_pattern():
-    from app.sources.news_rss import TRUMP_WORD_PATTERN
-    should_match = ["Trump spricht", "Trumpism ist zurueck", "Trumpcare Debatte", "Trumpian Ansatz", "TRUMP"]
-    should_not = ["trumpet spielt", "trumped-up Anklage", "getrumpelt"]
-    for s in should_match:
-        check(f"TRUMP_WORD_PATTERN matcht: {s!r}", bool(TRUMP_WORD_PATTERN.search(s)))
-    for s in should_not:
-        check(f"TRUMP_WORD_PATTERN matcht NICHT: {s!r}", not TRUMP_WORD_PATTERN.search(s))
+def test_news_rss_no_topic_filter():
+    import asyncio
+    from app.sources.news_rss import RssNewsSource
+
+    src = RssNewsSource()
+
+    class FakeEntry(dict):
+        def get(self, key, default=None):
+            return dict.get(self, key, default)
+
+    entries = [
+        FakeEntry({"link": "https://example.com/a", "title": "Trump kuendigt Zoelle an", "summary": ""}),
+        FakeEntry({"link": "https://example.com/b", "title": "Fed hebt Leitzins an", "summary": ""}),
+        FakeEntry({"link": "https://example.com/c", "title": "Unternehmen X meldet Rekordgewinn", "summary": ""}),
+        FakeEntry({"link": "https://example.com/d", "title": "Lokales Sportergebnis ohne Marktbezug", "summary": ""}),
+    ]
+
+    class FakeClient:
+        async def get(self, url):
+            raise AssertionError("sollte in diesem Test nicht aufgerufen werden")
+
+    async def fake_fetch_feed(feed_url, client):
+        return entries
+
+    src._fetch_feed = fake_fetch_feed
+    results = asyncio.run(src.poll())
+    links = {r.source_id for r in results}
+    check("alle 4 Eintraege werden durchgereicht, kein Themen-/Personenfilter mehr",
+          links == {"https://example.com/a", "https://example.com/b",
+                     "https://example.com/c", "https://example.com/d"})
 
 
 # ---------------------------------------------------------------------------
@@ -437,7 +463,7 @@ def main():
     db, config = test_schema_migration()
     test_insert_and_batch_queries(db)
     test_bounded_seen_set()
-    test_trump_word_pattern()
+    test_news_rss_no_topic_filter()
     test_truth_social_account_scope()
     test_telegram_digest_budget()
     test_related_topic_id_validation()

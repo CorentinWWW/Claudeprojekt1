@@ -25,7 +25,7 @@ from app.telegram_alert import send_alert
 
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="Trump Market Impact Monitor")
+app = FastAPI(title="Market Impact Predictor")
 
 _startup_errors: list[str] = []
 _startup_warnings: list[str] = []

@@ -1,9 +1,9 @@
-name: Trump Market Monitor
+name: Market Impact Predictor
 
 on:
   schedule:
-    # Alle 15 Minuten (vorher 30) - Latenz senken (#1): Trump-Schlagzeilen werden
-    # schnell eingepreist, jede Minute frueher zaehlt. Kuerzer als */15 ist bei
+    # Alle 15 Minuten (vorher 30) - Latenz senken (#1): marktrelevante Schlagzeilen
+    # werden schnell eingepreist, jede Minute frueher zaehlt. Kuerzer als */15 ist bei
     # GitHub-Actions-Cron unzuverlaessig (geplante Laeufe werden bei Last teils
     # verzoegert oder zusammengefasst) - fuer echte Sekunden-Latenz den Always-on-
     # Modus nutzen (siehe README: run_forever/Docker/systemd statt Cron). Bei

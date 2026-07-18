@@ -73,7 +73,8 @@ run_health: dict = {"started_at": None, "loop_restarts": 0, "last_cycle_at": Non
 # Wortgrenzen-Muster fuer die "besonders wichtig"-Einstufung (siehe is_high_priority).
 # Bewusst STRENGER als der GDELT-Ingestion-Filter (der schon 'market'/'stock'/'trade'
 # etc. abdeckt) - hier zaehlen nur die haertesten, unmittelbar marktbewegenden Themen,
-# damit die knappe Prioritaets-Reserve nicht sofort von jeder markt-nahen Meldung
+# unabhaengig davon wer/was sie ausloest (Politik, Zentralbanken, Unternehmen), damit
+# die knappe Prioritaets-Reserve nicht sofort von jeder markt-nahen Meldung
 # aufgebraucht wird. Rein aus billigen Textsignalen bestimmt (KEIN Claude-Call), da die
 # Wichtigkeit ueber das Tages-Limit entscheiden muss, BEVOR ein Call ausgegeben wird.
 _HIGH_PRIORITY_PATTERN = re.compile(
@@ -81,7 +82,9 @@ _HIGH_PRIORITY_PATTERN = re.compile(
     r"tariff|tariffs|zoll|zoelle|zölle|sanction|sanctions|sanktion|"
     r"federal reserve|interest rate|rate cut|rate hike|zinsen|leitzins|"
     r"executive order|shutdown|default|embargo|nationaliz|verstaatlich|"
-    r"bailout|stimulus|export ban|import ban|price cap"
+    r"bailout|stimulus|export ban|import ban|price cap|"
+    r"bankruptcy|insolvenz|recall|rückruf|cyberattack|cyber attack|"
+    r"war|krieg|invasion|merger|acquisition|takeover|übernahme|fusion|downgrade"
     r")\b",
     re.IGNORECASE,
 )
@@ -90,9 +93,10 @@ _HIGH_PRIORITY_PATTERN = re.compile(
 def is_high_priority(raw) -> bool:
     """Billige, Claude-freie Einschaetzung, ob eine Meldung wichtig genug ist, um die
     Prioritaets-Reserve oberhalb des normalen Tages-Limits nutzen zu duerfen. True bei
-    (a) direkten Trump-Posts von Truth Social (seine eigenen Worte, am unmittelbarsten
-    handlungsrelevant und ohnehin selten) ODER (b) einem der haertesten Wirtschafts-
-    Signalwoerter im Text. Bewusst konservativ - lieber ein paar wichtige Meldungen
+    (a) direkten Posts von ueberwachten Original-Quellen (z.B. Truth Social - deren
+    unmittelbare eigene Worte statt einer medial paraphrasierten Meldung, ohnehin selten)
+    ODER (b) einem der haertesten Wirtschafts-Signalwoerter im Text - unabhaengig davon,
+    von wem die Meldung stammt. Bewusst konservativ - lieber ein paar wichtige Meldungen
     verpassen als die Reserve verwaessern."""
     if getattr(raw, "source", "") == "truth_social":
         return True
@@ -267,7 +271,7 @@ async def _notify_daily_cap_once():
             body = (
                 f"⏸️ Normales Tages-Limit von {MAX_CLASSIFICATIONS_PER_DAY} Claude-Analysen "
                 "erreicht. Bis Mitternacht (UTC) werden nur noch als besonders wichtig "
-                "eingestufte Meldungen analysiert (direkte Trump-Posts sowie harte "
+                "eingestufte Meldungen analysiert (direkte Original-Quellen-Posts sowie harte "
                 "Wirtschaftsthemen wie Zoelle, Sanktionen, Zinsen) - bis zu einer Reserve "
                 f"von insgesamt {MAX_CLASSIFICATIONS_PER_DAY + PRIORITY_CLASSIFICATIONS_PER_DAY} "
                 "Analysen/Tag. So bleiben die Kosten gedeckelt. Limits anpassbar ueber "

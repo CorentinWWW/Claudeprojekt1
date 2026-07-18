@@ -1,11 +1,15 @@
-# Trump Market Impact Monitor
+# Market Impact Predictor
 
-Überwacht Aussagen von Donald Trump (Nachrichtenzitate, Truth-Social-Posts, optional
-Live-Reden), lässt Claude einschätzen ob eine Aussage marktrelevant ist (positiv/
-negativ/neutral, betroffene Ticker mit Long/Short-Einschätzung) und schickt bei
-Relevanz einen Telegram-Alert - aber nur einmal pro Thema pro Tag, außer die Lage
-eskaliert wirklich. Ein Web-Dashboard zeigt den Live-Feed inkl. Status- und
-Statistik-Übersicht.
+Überwacht allgemein marktrelevante Nachrichten und Aussagen - Wirtschaftsdaten,
+Zentralbank-/Fed-Entscheidungen, Politiker- und CEO-Statements, Quartalszahlen,
+Fusionen/Übernahmen, geopolitische Ereignisse und mehr, aus Nachrichtenfeeds
+(GDELT/RSS), optional ergänzt um Original-Quellen-Posts (z.B. ein bestimmter
+Truth-Social-Account) und Live-Reden. Lässt Claude für jede Meldung einschätzen,
+ob sie marktrelevant ist (positiv/negativ/neutral, betroffene Ticker mit
+Long/Short-Einschätzung je Aktie) und schickt bei Relevanz einen Telegram-Alert -
+aber nur einmal pro Thema pro Tag, außer die Lage eskaliert wirklich. Ein
+Web-Dashboard zeigt den Live-Feed inkl. Status-, Statistik- und
+Trefferquoten-Übersicht.
 
 **Kein Trading-Signal / keine Finanzberatung.** Die Einschätzungen (inkl. Long/Short)
 sind LLM-generiert und können falsch liegen - eigene Anlageentscheidung auf eigenes Risiko.
@@ -75,7 +79,7 @@ Direkt nach dem Start:
    eigenen Beispieltext eingeben, auf "Durch Claude jagen" klicken, Ergebnis (Sentiment,
    Ticker, Begründung) erscheint sofort, optional inkl. echtem Telegram-Alert. Damit
    lässt sich die komplette Kette (Claude + Telegram) verifizieren, ohne auf eine echte
-   Trump-Aussage zu warten. Programmatisch äquivalent:
+   marktrelevante Meldung zu warten. Programmatisch äquivalent:
    ```bash
    curl -X POST http://localhost:8000/api/test \
      -H "Content-Type: application/json" \
@@ -95,6 +99,15 @@ Direkt nach dem Start:
 
 Quellen einzeln an/aus schalten über `.env` (`ENABLE_NEWS`, `ENABLE_TRUTH_SOCIAL`,
 `ENABLE_LIVE_AUDIO`).
+
+**Allgemeine Abdeckung, nicht auf eine Person eingeschränkt:** GDELT und RSS filtern
+bewusst NICHT auf ein bestimmtes Thema/eine bestimmte Person, sondern decken alle
+Nachrichten ab, die zu marktrelevanten Stichworten passen (Zölle, Zinsen/Fed,
+Sanktionen, Quartalszahlen, Fusionen/Übernahmen, Ratingänderungen, Wirtschaftsdaten
+u.v.m. - siehe `MARKET_KEYWORDS` in `app/sources/news_gdelt.py`). Truth Social bleibt
+eine optionale, auf einen konfigurierbaren Account eingeschränkte Zusatzquelle
+(`TRUTH_SOCIAL_HANDLE`, Standard der Account von Donald Trump) für dessen unmittelbare
+eigene Worte - die eigentliche Marktabdeckung hängt nicht an dieser einen Quelle.
 
 ### Truth Social im Detail
 
@@ -123,9 +136,10 @@ Server mit echtem Internetzugang lässt sich erst nach dem Deployment verifizier
 ### Live-Audio im Detail
 
 Braucht zusätzlich `pip install yt-dlp faster-whisper` sowie `ffmpeg` im System.
-Es gibt **keine automatische Erkennung**, wann Trump live spricht — Stream-URLs
-müssen manuell in `LIVE_AUDIO_STREAM_URLS` gepflegt werden (z.B. Link zu einem
-angekündigten Event oder einem 24/7-Nachrichtensender). Transkription läuft in
+Es gibt **keine automatische Erkennung**, wann eine relevante Person live spricht —
+Stream-URLs müssen manuell in `LIVE_AUDIO_STREAM_URLS` gepflegt werden (z.B. Link zu
+einem angekündigten Event, einer Pressekonferenz oder einem 24/7-Nachrichtensender).
+Transkription läuft in
 Chunks (Standard 30s), keine Wort-für-Wort-Live-Transkription.
 
 ### Sonstige Einschränkungen
@@ -287,8 +301,9 @@ Chunks (Standard 30s), keine Wort-für-Wort-Live-Transkription.
   Nachrichtentag eine echt marktbewegende Meldung stumm untergeht, nur weil das normale
   Limit schon von unwichtigeren Meldungen aufgebraucht wurde. Deshalb gibt es ein
   **zweites Kontingent oberhalb** von `MAX_CLASSIFICATIONS_PER_DAY`, das ausschließlich
-  als *wichtig* eingestufte Meldungen nutzen dürfen: direkte Trump-Posts von Truth Social
-  (seine eigenen Worte) sowie harte Wirtschaftsthemen (Zölle, Sanktionen, Zinsen/Fed,
+  als *wichtig* eingestufte Meldungen nutzen dürfen: direkte Original-Quellen-Posts
+  (z.B. von Truth Social, falls aktiviert - deren unmittelbare eigene Worte) sowie
+  harte Wirtschaftsthemen (Zölle, Sanktionen, Zinsen/Fed,
   Executive Orders, Shutdown, Embargo …). Die Wichtigkeit wird **billig und ohne
   zusätzlichen Claude-Call** aus Quelle + Signalwörtern bestimmt (`orchestrator.py`:
   `is_high_priority`) - sie muss ja *vor* dem Ausgeben eines Calls feststehen. Normale
@@ -380,7 +395,7 @@ zwischen Läufen wird über den GitHub-Actions-Cache mitgeschleppt.
    - `ANTHROPIC_API_KEY` (Pflicht)
    - `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` (optional, aber empfohlen für Alerts)
 3. Fertig - der Workflow läuft automatisch alle 30 Min. Zum sofortigen Testen:
-   Tab **Actions** → *Trump Market Monitor* → **Run workflow** (manueller Trigger).
+   Tab **Actions** → *Market Impact Predictor* → **Run workflow** (manueller Trigger).
 4. Ergebnis im Actions-Log einsehbar (welche Statements klassifiziert wurden), Alerts
    kommen per Telegram.
 
@@ -503,7 +518,7 @@ Siehe `.env.example` für alle Variablen. Wichtige zusätzliche Stellschrauben:
 | `ALERT_DIGEST_THRESHOLD` | Ab wie vielen gleichzeitigen Alerts zu einer Sammel-Nachricht gebündelt wird (Standard 3) |
 | `CLAUDE_MODEL` | Modell fuer die Klassifikation (Standard `claude-haiku-4-5`, guenstig; `claude-sonnet-5` fuer potenziell bessere Qualitaet zu mehrfachen Kosten) |
 | `MAX_CLASSIFICATIONS_PER_DAY` | Harter Kostendeckel: mehr Claude-Calls finden an einem Tag (UTC) nicht mehr statt (Standard 100 ≈ max. 0.15-0.25 €/Tag bei Haiku) - siehe Abschnitt oben |
-| `PRIORITY_CLASSIFICATIONS_PER_DAY` | Extra-Reserve oberhalb von `MAX`, die nur wichtige Meldungen (direkte Trump-Posts, harte Wirtschaftsthemen) nutzen dürfen - absolutes Tages-Maximum = `MAX + PRIORITY` (Standard 30, also 130 gesamt; `0` deaktiviert die Reserve) - siehe Abschnitt oben |
+| `PRIORITY_CLASSIFICATIONS_PER_DAY` | Extra-Reserve oberhalb von `MAX`, die nur wichtige Meldungen (direkte Original-Quellen-Posts, harte Wirtschaftsthemen) nutzen dürfen - absolutes Tages-Maximum = `MAX + PRIORITY` (Standard 30, also 130 gesamt; `0` deaktiviert die Reserve) - siehe Abschnitt oben |
 | `TELEGRAM_STARTUP_NOTICE` | Heartbeat-Nachricht beim Start senden (Standard an) |
 | `TRUTH_SOCIAL_BROWSER_FALLBACK` | Playwright-Fallback für Truth Social an/aus (Standard an) |
 | `CLAUDE_MAX_RETRIES` / `CLAUDE_TIMEOUT_SECONDS` | Robustheit der Claude-API-Calls |

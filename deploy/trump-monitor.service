@@ -3,7 +3,7 @@
 # docker-compose statt systemd) - Pfade/User hier sind fuer eine eigene
 # venv-Installation gedacht, siehe README fuer die vollstaendigen Schritte.
 [Unit]
-Description=Trump Market Impact Monitor
+Description=Market Impact Predictor
 After=network-online.target
 Wants=network-online.target
 

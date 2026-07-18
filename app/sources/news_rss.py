@@ -1,12 +1,15 @@
-"""Pollt mehrere kostenlose Finanz-/Markt-RSS-Feeds und filtert auf Trump-Erwaehnungen.
+"""Pollt mehrere kostenlose Finanz-/Markt-RSS-Feeds.
 
 RSS-Feeds aktualisieren oft schneller als GDELT (Minuten statt ~15 Min), sind aber
-pro Feed nur so vollstaendig wie der jeweilige Anbieter.
+pro Feed nur so vollstaendig wie der jeweilige Anbieter. Bewusst KEIN Themen-/
+Personenfilter (z.B. "nur Trump-Erwaehnungen") - die Feeds selbst sind bereits
+finanz-/marktfokussiert (MarketWatch, CNBC, Yahoo Finance, Investing.com), jeder
+Eintrag wird durchgereicht und die eigentliche Praezision entsteht nachgelagert
+durch die strenge Claude-Klassifikation + den Tages-Kostendeckel.
 """
 import asyncio
 import calendar
 import logging
-import re
 import time
 
 import feedparser
@@ -43,10 +46,6 @@ FEEDS = [
     "https://www.investing.com/rss/news_25.rss",  # Investing.com Economy
 ]
 
-# Wortgrenze, damit "trumpet"/"trumped-up" etc. nicht faelschlich matchen, aber
-# gaengige Ableitungen wie "Trumpism"/"Trumpcare"/"Trumpian" trotzdem erfassen.
-TRUMP_WORD_PATTERN = re.compile(r"\btrump(?:ism|care|ian)?\b", re.IGNORECASE)
-
 
 class RssNewsSource(Source):
     name = "news_rss"
@@ -69,7 +68,7 @@ class RssNewsSource(Source):
                 # HTTP 200 mit nicht-RSS-Inhalt (Bot-Challenge, Paywall-Zwischenseite,
                 # Umleitungsziel) faellt durch raise_for_status() nicht auf (Status ist
                 # ja 200) - ohne dieses Signal saehe ein so dauerhaft degradierter Feed
-                # fuer immer genauso aus wie "gerade keine Trump-Meldungen". bozo_exception
+                # fuer immer genauso aus wie "gerade keine Meldungen". bozo_exception
                 # ist bei aelteren feedparser-Versionen ein Objekt, kein reiner String -
                 # str() macht das robust fuers Logging.
                 logger.warning(
@@ -110,9 +109,6 @@ class RssNewsSource(Source):
 
                     title = entry.get("title", "") or ""
                     summary = entry.get("summary", "") or ""
-                    haystack = f"{title} {summary}"
-                    if not TRUMP_WORD_PATTERN.search(haystack):
-                        continue
 
                     self._seen.add(link)
                     text = title if not summary else f"{title} — {summary}"

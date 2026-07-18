@@ -143,7 +143,7 @@ MAX_CLASSIFICATIONS_PER_DAY = _int("MAX_CLASSIFICATIONS_PER_DAY", 100)
 
 # ZUSAETZLICHE Reserve oberhalb von MAX_CLASSIFICATIONS_PER_DAY, die AUSSCHLIESSLICH
 # fuer als besonders wichtig eingestufte Meldungen (siehe orchestrator.py:
-# is_high_priority - direkte Trump-Posts, harte Wirtschaftsthemen wie Zoelle/Sanktionen/
+# is_high_priority - direkte Original-Quellen-Posts, harte Wirtschaftsthemen wie Zoelle/Sanktionen/
 # Zinsen) verwendet werden darf. Zweck: an einem Tag mit einem Nachrichtenschub soll das
 # normale Limit nicht dazu fuehren, dass eine WIRKLICH wichtige Meldung stillschweigend
 # uebersprungen wird, nur weil vorher viel Unwichtiges den Zaehler gefuellt hat. Das
@@ -170,6 +170,10 @@ ENABLE_NEWS = _bool("ENABLE_NEWS", True)
 ENABLE_TRUTH_SOCIAL = _bool("ENABLE_TRUTH_SOCIAL", True)
 ENABLE_LIVE_AUDIO = _bool("ENABLE_LIVE_AUDIO", False)
 
+# Welcher Truth-Social-Account beobachtet wird, falls ENABLE_TRUTH_SOCIAL aktiv ist -
+# frei konfigurierbar, nicht hart auf eine Person festgelegt. Diese Quelle ist eine von
+# mehreren (News-Feeds via ENABLE_NEWS decken allgemein marktrelevante Nachrichten ab,
+# unabhaengig von einem einzelnen Account).
 TRUTH_SOCIAL_HANDLE = _str("TRUTH_SOCIAL_HANDLE", "realDonaldTrump")
 # Optional: eigenes Bearer-Token (z.B. aus einer eingeloggten Browser-Session),
 # falls die oeffentlichen Endpunkte ohne Auth nicht mehr funktionieren.

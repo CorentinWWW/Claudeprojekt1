@@ -473,7 +473,7 @@ async def send_text(text: str) -> bool:
 async def send_startup_notice(active_sources: list[str]) -> None:
     sources_str = ", ".join(active_sources) if active_sources else "keine"
     text = (
-        "🟢 <b>Trump Market Impact Monitor gestartet</b>\n"
+        "🟢 <b>Market Impact Predictor gestartet</b>\n"
         f"Aktive Quellen: {html.escape(sources_str)}\n"
         "Du bekommst hier ab jetzt Alerts bei marktrelevanten Aussagen."
     )

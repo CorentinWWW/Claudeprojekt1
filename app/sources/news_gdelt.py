@@ -1,8 +1,8 @@
 """GDELT DOC 2.0 API: kostenlos, kein API-Key, aktualisiert im ~15-Minuten-Takt.
 
 Limitation: GDELT liefert Artikel-Titel, nicht das woertliche Zitat. Das reicht als
-Signal ("worueber berichten Medien im Zusammenhang mit Trump+Markt gerade"), ersetzt
-aber keine woertliche Aussage. Fuer woertliche Zitate siehe truth_social.py.
+Signal ("worueber berichten Medien gerade im Marktkontext"), ersetzt aber keine
+woertliche Aussage. Fuer woertliche Trump-Zitate siehe truth_social.py.
 """
 import logging
 import time
@@ -18,10 +18,19 @@ logger = logging.getLogger(__name__)
 
 GDELT_ENDPOINT = "https://api.gdeltproject.org/api/v2/doc/doc"
 
+# Bewusst KEIN Personen-/Themenfilter (z.B. "Trump") mehr - deckt allgemein alle
+# marktrelevanten Nachrichten ab, unabhaengig davon wer/was sie ausloest (Politiker,
+# Zentralbanken, Unternehmen, Wirtschaftsdaten, Geopolitik). Die eigentliche
+# Praezision entsteht nicht hier, sondern nachgelagert durch die strenge
+# Claude-Klassifikation + den Tages-Kostendeckel (siehe app/config.py:
+# MAX_CLASSIFICATIONS_PER_DAY) - der begrenzt die Kosten unabhaengig davon, wie viel
+# Rohmaterial hier hereinkommt.
 MARKET_KEYWORDS = (
     "tariff OR tariffs OR stock OR stocks OR market OR markets OR \"Federal Reserve\" "
-    "OR \"interest rate\" OR economy OR trade OR sanctions OR shares OR earnings "
-    "OR \"Wall Street\""
+    "OR \"interest rate\" OR economy OR trade OR sanctions OR shares OR earnings OR "
+    "\"Wall Street\" OR acquisition OR merger OR takeover OR bankruptcy OR layoffs OR "
+    "downgrade OR upgrade OR \"guidance\" OR recall OR \"central bank\" OR inflation OR "
+    "recession OR IPO"
 )
 
 
@@ -41,7 +50,7 @@ class GdeltNewsSource(Source):
             # _partition_duplicates) vergleichen nur auf Zeichenebene und koennen
             # ueber Sprachgrenzen hinweg keine Duplikate erkennen - ohne dieses Filter
             # kam dieselbe Meldung dadurch wiederholt als "neues" Statement durch.
-            "query": f'Trump ({MARKET_KEYWORDS}) sourcelang:english',
+            "query": f'({MARKET_KEYWORDS}) sourcelang:english',
             "mode": "ArtList",
             "format": "json",
             "maxrecords": "75",
