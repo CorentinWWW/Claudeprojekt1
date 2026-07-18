@@ -281,6 +281,24 @@ Chunks (Standard 30s), keine Wort-für-Wort-Live-Transkription.
   (`CONTEXT_SNIPPET_MAX_CHARS`, 100 statt 150 Zeichen) - dieselbe Zahl sichtbarer
   Themen, nur knappere Beschreibungen, sodass die Kosten pro Call praktisch gleich
   bleiben.
+- **Billiger, Claude-freier Vorfilter (`ENABLE_PREFILTER`, Standard an)**: erste Stufe
+  des Trichters, *bevor* ein Claude-Call ausgegeben wird. Seit der Verallgemeinerung
+  (kein Personen-/Themenfilter mehr an den Quellen) kommt deutlich mehr Rohmaterial
+  herein - jede Meldung würde sonst einen echten Call und einen Slot des
+  Tages-Kostendeckels kosten, der Deckel wäre oft schon vormittags erschöpft. Der
+  Vorfilter (`app/prefilter.py`) verwirft **offensichtliche Nicht-Ereignisse** per
+  einfacher Muster-Denylist: Listicles (`"5 stocks to watch"`, `"7 charts …"`),
+  Ratgeber/How-to/Erklärstücke, Kauf-Empfehlungs-Clickbait der Finanzportale (Motley
+  Fool, Zacks, `"stocks to buy"`), reine Personal-Finance-/Werbe-Themen (401k, Roth
+  IRA, Kreditkarten, Prime Day …). So bleibt die Abdeckung breit, aber die Kosten
+  sinken, ohne dafür den Deckel anzuheben. Bewusst **konservativ (hohe Präzision statt
+  hoher Trefferzahl)**: im Zweifel wird durchgelassen - ein fälschlich durchgelassener
+  Grenzfall kostet nur einen Call und wird danach sauber von Claude als nicht relevant
+  verworfen, ein fälschlich *verworfenes* echtes Ereignis wäre dagegen für immer
+  verloren. Deshalb ausschließlich eine Denylist eindeutiger Nicht-Ereignis-Muster,
+  keine „muss ein Signalwort enthalten"-Positivpflicht, die schlicht formulierte echte
+  Meldungen verwerfen könnte. Der Zähler `prefiltered` pro Quelle steht in
+  `/api/health`. Auf `false` setzen gibt jede Rohmeldung direkt an Claude (mehr Kosten).
 - **Harter Kostendeckel (`MAX_CLASSIFICATIONS_PER_DAY`, Standard 100/Tag)**: jede
   neue, noch nicht bekannte Meldung kostet einen echten Claude-Call - auch wenn sie
   sich danach als Themen-Duplikat herausstellt (die Duplikaterkennung erspart den
@@ -517,6 +535,7 @@ Siehe `.env.example` für alle Variablen. Wichtige zusätzliche Stellschrauben:
 | `TOPIC_CONTEXT_WINDOW_HOURS` / `TOPIC_CONTEXT_MAX_ITEMS` | Wie viele Stunden zurück / wie viele Meldungen als Themen-Kontext an Claude mitgegeben werden, Tier 2 (Standard 24h / 20) |
 | `ALERT_DIGEST_THRESHOLD` | Ab wie vielen gleichzeitigen Alerts zu einer Sammel-Nachricht gebündelt wird (Standard 3) |
 | `CLAUDE_MODEL` | Modell fuer die Klassifikation (Standard `claude-haiku-4-5`, guenstig; `claude-sonnet-5` fuer potenziell bessere Qualitaet zu mehrfachen Kosten) |
+| `ENABLE_PREFILTER` | Billiger Claude-freier Vorfilter: verwirft offensichtliche Nicht-Ereignisse (Listicles/Ratgeber/Personal-Finance-Clickbait) per Muster-Denylist, **bevor** ein Claude-Call ausgegeben wird - erste Trichterstufe, spart Calls ohne den Deckel anzuheben (Standard an, konservativ) - siehe Abschnitt oben |
 | `MAX_CLASSIFICATIONS_PER_DAY` | Harter Kostendeckel: mehr Claude-Calls finden an einem Tag (UTC) nicht mehr statt (Standard 100 ≈ max. 0.15-0.25 €/Tag bei Haiku) - siehe Abschnitt oben |
 | `PRIORITY_CLASSIFICATIONS_PER_DAY` | Extra-Reserve oberhalb von `MAX`, die nur wichtige Meldungen (direkte Original-Quellen-Posts, harte Wirtschaftsthemen) nutzen dürfen - absolutes Tages-Maximum = `MAX + PRIORITY` (Standard 30, also 130 gesamt; `0` deaktiviert die Reserve) - siehe Abschnitt oben |
 | `TELEGRAM_STARTUP_NOTICE` | Heartbeat-Nachricht beim Start senden (Standard an) |

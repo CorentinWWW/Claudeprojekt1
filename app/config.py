@@ -63,6 +63,17 @@ TELEGRAM_STARTUP_NOTICE = _bool("TELEGRAM_STARTUP_NOTICE", True)
 
 POLL_INTERVAL_SECONDS = _int("POLL_INTERVAL_SECONDS", 60)
 
+# Billiger, Claude-FREIER Relevanz-Vorfilter (erste Trichter-Stufe, siehe
+# app/prefilter.py): verwirft offensichtlich nicht marktbewegende Schlagzeilen
+# (Listicles, Ratgeber, Personal-Finance-/Werbe-Clickbait), BEVOR ein teurer
+# Claude-Call ausgegeben wird und einen Slot des Tages-Kostendeckels belegt. Seit der
+# Verallgemeinerung (kein Personen-/Themenfilter mehr an den Quellen) kommt viel mehr
+# Rohmaterial herein - der Vorfilter haelt die Kosten niedrig, ohne die Alarmqualitaet
+# zu beruehren (er entscheidet nichts ueber Alerts, sondern nur, was ueberhaupt eine
+# Claude-Analyse wert ist). Bewusst konservativ; auf false setzen, um jede Meldung
+# direkt von Claude bewerten zu lassen (mehr Abdeckung, hoehere Kosten).
+ENABLE_PREFILTER = _bool("ENABLE_PREFILTER", True)
+
 ALERT_CONFIDENCE_THRESHOLD = _float("ALERT_CONFIDENCE_THRESHOLD", 0.5)
 # Praezisions-Filter fuer die Telegram-Alerts: es wird NUR noch alarmiert, wenn die
 # Meldung mindestens EINEN konkreten Boersenticker mit klarer Long/Short-Richtung UND

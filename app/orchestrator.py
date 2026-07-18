@@ -17,6 +17,7 @@ from app.config import (
     ENABLE_BORDERLINE_ESCALATION,
     ENABLE_LIVE_AUDIO,
     ENABLE_NEWS,
+    ENABLE_PREFILTER,
     ENABLE_PRICE_TRACKING,
     ENABLE_TRUTH_SOCIAL,
     ESCALATION_BAND,
@@ -50,6 +51,7 @@ from app.db import (
     try_claim_meta_key,
 )
 from app import prices
+from app.prefilter import looks_market_relevant
 from app.sources.live_audio import LiveAudioSource
 from app.sources.news_gdelt import GdeltNewsSource
 from app.sources.news_rss import RssNewsSource
@@ -199,6 +201,10 @@ def build_sources():
                 "last_error": None,
                 "last_error_at": None,
                 "total_fetched": 0,
+                # Wie viele Roh-Meldungen dieser Quelle der billige Vorfilter (#Kosten,
+                # siehe app/prefilter.py) verworfen hat, bevor ein Claude-Call anfiel -
+                # macht die Kostenersparnis in /api/health sichtbar.
+                "prefiltered": 0,
             },
         )
     return sources
@@ -638,6 +644,27 @@ async def poll_once(sources, semaphore: asyncio.Semaphore):
 
         if not raw_statements:
             continue
+
+        # Erste Trichter-Stufe: billiger, Claude-FREIER Vorfilter VOR der Dedup/
+        # Klassifikation. Verwirft offensichtlich nicht marktbewegende Schlagzeilen
+        # (Listicles, Ratgeber, Personal-Finance-Clickbait), damit fuer sie kein
+        # Claude-Call anfaellt und kein Slot des Tages-Kostendeckels verbraucht wird -
+        # relevant, seit die Quellen (nach dem Wegfall des Personen-/Themenfilters)
+        # deutlich mehr Rohmaterial liefern. Konservativ (siehe app/prefilter.py):
+        # entscheidet NICHT ueber Alerts, sondern nur ueber "eine Claude-Analyse wert".
+        if ENABLE_PREFILTER:
+            kept = [r for r in raw_statements if looks_market_relevant(r.text)]
+            dropped = len(raw_statements) - len(kept)
+            if dropped:
+                health["prefiltered"] = health.get("prefiltered", 0) + dropped
+                logger.info(
+                    "[%s] Vorfilter: %d/%d Meldung(en) als offensichtlich nicht "
+                    "marktbewegend verworfen (kein Claude-Call).",
+                    source.name, dropped, len(raw_statements),
+                )
+            raw_statements = kept
+            if not raw_statements:
+                continue
 
         to_classify, duplicate_pairs = _partition_duplicates(raw_statements)
 
