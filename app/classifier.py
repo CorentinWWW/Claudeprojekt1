@@ -4,6 +4,7 @@ gemeldete Meldung, und falls ja, eskaliert es genug fuer einen erneuten Alert?
 """
 import datetime
 import logging
+import math
 import re
 from typing import Optional
 
@@ -131,6 +132,23 @@ CLASSIFY_TOOL = {
                     "Eskalation eines Konflikts, neue harte Zahlen), dass eine erneute "
                     "Nachricht an den Nutzer trotzdem gerechtfertigt ist. Bei blosser "
                     "Wiederholung/Umformulierung derselben Fakten: false."
+                ),
+            },
+            "expected_move_pct": {
+                "type": ["number", "null"],
+                "description": (
+                    "Grobe Schaetzung der ERWARTETEN Kursbewegung des am staerksten "
+                    "betroffenen Tickers in Prozent, als BETRAG ohne Vorzeichen (die "
+                    "Richtung steckt bereits in ticker_calls.direction) - also z.B. 3 fuer "
+                    "'ca. 3% Bewegung erwartet'. Nur eine ungefaehre Groessenordnung, kein "
+                    "Kursziel. null, wenn keine sinnvolle Schaetzung moeglich ist."
+                ),
+            },
+            "expected_horizon": {
+                "type": ["string", "null"],
+                "description": (
+                    "Ueber welchen Zeitraum sich die erwartete Bewegung voraussichtlich "
+                    "entfaltet: 'Stunden', 'Tage' oder 'Wochen'. null, wenn unklar."
                 ),
             },
         },
@@ -310,9 +328,26 @@ def _clean_ticker_calls(raw_ticker_calls) -> list[dict]:
     return list(by_ticker.values())
 
 
+def _parse_expected_move(value) -> Optional[float]:
+    """Parst die geschaetzte erwartete Bewegung zu einem nicht-negativen Prozent-Betrag
+    oder None. Robust gegen null, Strings, Vorzeichen und absurde/nicht-endliche Werte
+    (die Richtung steckt in direction, daher wird der Betrag genommen und bei >100%
+    gedeckelt - ein Modell koennte sonst z.B. 9999 liefern)."""
+    if value is None:
+        return None
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(parsed):
+        return None
+    return min(100.0, abs(parsed))
+
+
 def _classification_from_tool_input(data: dict) -> Classification:
     ticker_calls = _clean_ticker_calls(data.get("ticker_calls") or [])
     confidence = _clamped_confidence(data.get("confidence"))
+    horizon = data.get("expected_horizon")
     return Classification(
         is_market_relevant=bool(data.get("is_market_relevant", False)),
         sentiment=data.get("sentiment") or "neutral",
@@ -322,6 +357,8 @@ def _classification_from_tool_input(data: dict) -> Classification:
         reasoning=data.get("reasoning") or "",
         related_topic_id=data.get("related_topic_id"),
         is_major_escalation=bool(data.get("is_major_escalation", False)),
+        expected_move_pct=_parse_expected_move(data.get("expected_move_pct")),
+        expected_horizon=horizon.strip() if isinstance(horizon, str) and horizon.strip() else None,
     )
 
 

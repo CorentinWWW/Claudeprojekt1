@@ -12,8 +12,10 @@ from app import config
 from app.classifier import DailyCapExceeded, classify, selftest
 from app.db import (
     RawStatement,
+    get_alerts_sent_today,
     get_calibration_stats,
     get_classification_calls_today,
+    get_performance_stats,
     get_recent,
     get_stats,
     init_db,
@@ -106,6 +108,15 @@ def api_calibration():
     return get_calibration_stats()
 
 
+@app.get("/api/performance", dependencies=[Depends(require_api_key)])
+def api_performance():
+    """Aggregierte Performance der ausgewerteten Alerts (#11, nur mit
+    ENABLE_PRICE_TRACKING befuellt): Gesamt-Trefferquote/-Durchschnittsrendite sowie die
+    besten/schlechtesten Ticker nach mittlerer Rendite. Grundlage fuer den woechentlichen
+    Telegram-Digest und die Beurteilung, auf welchen Werten die Signale wirklich tragen."""
+    return get_performance_stats()
+
+
 @app.get("/api/health")
 def api_health():
     # Bewusst OHNE Auth: soll auch von einem externen Uptime-Check ohne Secret
@@ -122,6 +133,13 @@ def api_health():
     except Exception:
         calls_today = None
 
+    # Zusaetzliche Kennzahl (#12): heute tatsaechlich verschickte Alerts. Defensiv, damit
+    # /api/health auch bei nicht initialisierbarer DB weiter antwortet.
+    try:
+        alerts_today = get_alerts_sent_today()
+    except Exception:
+        alerts_today = None
+
     return {
         "ok": not _startup_errors,
         "errors": _startup_errors,
@@ -130,6 +148,7 @@ def api_health():
         "loop_restarts": run_health.get("loop_restarts", 0),
         "last_cycle_at": run_health.get("last_cycle_at"),
         "classification_calls_today": calls_today,
+        "alerts_sent_today": alerts_today,
         "classification_calls_limit": config.MAX_CLASSIFICATIONS_PER_DAY,
         # Absolutes Tages-Maximum inkl. der Reserve fuer wichtige Meldungen - oberhalb
         # von classification_calls_limit werden nur noch als wichtig eingestufte

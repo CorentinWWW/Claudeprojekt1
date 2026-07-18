@@ -20,6 +20,7 @@ from app.config import (
 )
 from app.db import Classification, RawStatement
 from app.market_hours import session_label, us_market_session
+from app.scoring import format_expected_move, high_volatility_text
 
 logger = logging.getLogger(__name__)
 
@@ -30,20 +31,6 @@ DIGEST_MAX_DETAIL_LINES = 15
 # tatsaechlich erreichen - also die eigentlich handelbaren, hochsicheren Signale, im
 # Gegensatz zu evtl. mitgelisteten Kontext-Tickern mit geringerer Konfidenz.
 _ACTIONABLE_MARKER = "⭐"
-
-# High-Volatility-Signalwoerter (#6): Themen, bei denen die Schwankung oft groesser ist
-# als die klare Richtung - dann ist ein direktionaler Trade riskanter als z.B. ein
-# Straddle. Bewusst breiter als der Prioritaets-Filter (harte geopolitische/geldpolitische
-# Ereignisse zusaetzlich).
-_VOLATILITY_PATTERN = re.compile(
-    r"\b("
-    r"tariffs?|zoll|zoelle|zölle|sanctions?|sanktion|embargo|shutdown|default|"
-    r"war|krieg|invasion|nuclear|militar\w*|airstrike|"
-    r"nationaliz\w*|verstaatlich\w*|export ban|import ban|price cap|"
-    r"bailout|stimulus|federal reserve|interest rate|rate cut|rate hike|zinsen|leitzins"
-    r")\b",
-    re.IGNORECASE,
-)
 
 
 def _direction_arrow(direction: Optional[str]) -> str:
@@ -67,7 +54,7 @@ def _volatility_flag(text: Optional[str]) -> str:
     """High-Vol-Hinweiszeile (#6) oder leerer String."""
     if not ENABLE_VOLATILITY_FLAG or not text:
         return ""
-    if _VOLATILITY_PATTERN.search(text):
+    if high_volatility_text(text):
         return "⚡ Hohe Volatilität – Richtung evtl. unsicher (ggf. Straddle)"
     return ""
 
@@ -231,30 +218,45 @@ def _format_ticker_calls_compact(ticker_calls: list[dict]) -> str:
     return ", ".join(parts)
 
 
-def _format_ticker_lines(ticker_calls: list[dict], ticker_change: Optional[dict] = None) -> str:
+def _format_ticker_lines(
+    ticker_calls: list[dict],
+    ticker_change: Optional[dict] = None,
+    ticker_risk: Optional[dict] = None,
+    ticker_hitrate: Optional[dict] = None,
+) -> str:
     """Eine Zeile pro Ticker mit ausgeschriebenem Long/Short und eigener Konfidenz,
     sortiert nach Konfidenz absteigend (sicherste Einschaetzung zuerst). Ticker, die die
     Praezisions-Schwelle erreichen, werden mit einem Stern markiert - so ist auf einen
     Blick klar, welcher Ticker der eigentliche (handelbare) Ausloeser ist und welche nur
-    Kontext mit geringerer Sicherheit sind. ticker_change (optional, {TICKER: prozent})
-    ergaenzt die heutige Kursbewegung (#8). Zeigt hoechstens _MAX_TICKER_LINES Zeilen."""
+    Kontext mit geringerer Sicherheit sind. ticker_change (#8), ticker_risk (Stop/Ziel,
+    #5) und ticker_hitrate (historische Trefferquote, #9) sind optionale {TICKER: ...}-
+    Dicts, die die jeweilige Zeile ergaenzen. Zeigt hoechstens _MAX_TICKER_LINES Zeilen."""
     if not ticker_calls:
         return "📈 –"
     ticker_change = ticker_change or {}
+    ticker_risk = ticker_risk or {}
+    ticker_hitrate = ticker_hitrate or {}
     sorted_calls = _sorted_by_confidence(ticker_calls)
     overflow = max(0, len(sorted_calls) - _MAX_TICKER_LINES)
     lines = []
     for tc in sorted_calls[:_MAX_TICKER_LINES]:
         ticker = _safe_ticker(tc)
+        key = ticker.upper()
         line = (
             f"{_direction_arrow(tc.get('direction'))} {html.escape(ticker)} "
             f"({html.escape(tc.get('direction') or '?')}) – {(tc.get('confidence') or 0.0):.0%}"
         )
         if _is_actionable(tc):
             line += f" {_ACTIONABLE_MARKER}"
-        change = ticker_change.get(ticker.upper())
+        change = ticker_change.get(key)
         if isinstance(change, (int, float)):
             line += f" · heute {change:+.1f}%"
+        risk = ticker_risk.get(key)
+        if isinstance(risk, dict) and risk.get("stop") is not None and risk.get("target") is not None:
+            line += f"\n   🛡 SL {risk['stop']:g} / 🎯 TP {risk['target']:g}"
+        hr = ticker_hitrate.get(key)
+        if isinstance(hr, dict) and hr.get("n"):
+            line += f"\n   📊 bisher {hr['hits']}/{hr['n']} richtig ({(hr['hit_rate']):.0%})"
         lines.append(line)
     if overflow:
         lines.append(f"… +{overflow} weitere Ticker")
@@ -293,15 +295,42 @@ def _format_message(
         if classification.related_topic_id is not None and classification.is_major_escalation
         else ""
     )
-    ticker_lines = _format_ticker_lines(_visible_ticker_calls(classification.ticker_calls), extras.get("ticker_change"))
+    ticker_lines = _format_ticker_lines(
+        _visible_ticker_calls(classification.ticker_calls),
+        extras.get("ticker_change"),
+        extras.get("ticker_risk"),
+        extras.get("ticker_hitrate"),
+    )
     url = _linkable_url(raw.url)
     age = _format_age(raw.published_at)
     age_str = f" · 🕒 {age}" if age else ""
     session_str = _session_segment()
 
-    # Feste, quellenunabhaengige Zusatzzeilen (Volatilitaets-Hinweis, Themen-Zeitleiste).
-    # _thread_segment escaped den DB-Text selbst; _volatility_flag ist fester Text.
+    # Feste, quellenunabhaengige Zusatzzeilen. _thread_segment escaped den DB-Text
+    # selbst; alle uebrigen sind fester Text bzw. Zahlen (keine Nutzereingabe).
     trailing = ticker_lines
+
+    # Ueberzeugungs-Score + grobe Positionsgroessen-Einordnung (#1/#4).
+    conviction = extras.get("conviction")
+    if isinstance(conviction, int):
+        tier = extras.get("position_tier") or ""
+        tier_str = f" · {tier}" if tier else ""
+        trailing += f"\n🎯 Überzeugung {conviction}/100{tier_str}"
+
+    # Erwartete Bewegung + Horizont (#3) - direkt aus der Classification.
+    move_str = format_expected_move(
+        classification.expected_move_pct, classification.expected_horizon
+    )
+    if move_str:
+        trailing += f"\n📐 erwartete Bewegung {move_str}"
+
+    corroboration = extras.get("corroboration")
+    if isinstance(corroboration, int) and corroboration > 1:
+        trailing += f"\n✅ bestätigt durch {corroboration} Quellen"
+
+    if extras.get("hedged"):
+        trailing += "\n🗣 unbestätigt/Gerücht – mit Vorsicht behandeln"
+
     vol_line = _volatility_flag(raw.text)
     if vol_line:
         trailing += f"\n{vol_line}"
@@ -464,6 +493,52 @@ async def send_digest_alert(items: list[tuple[RawStatement, Classification, int]
     if not items:
         return False
     return await _send(_format_digest(items))
+
+
+def format_weekly_digest(stats: dict) -> str:
+    """Baut die woechentliche Performance-Zusammenfassung (#10) als Telegram-Text:
+    Gesamt-Trefferquote/Durchschnittsrendite plus die besten/schlechtesten Ticker nach
+    mittlerer Rendite. Alle Werte stammen aus der DB (Ticker sind Kuerzel, trotzdem
+    defensiv escaped)."""
+    evaluated = stats.get("evaluated") or 0
+    hits = stats.get("hits") or 0
+    hit_rate = stats.get("hit_rate")
+    avg_return = stats.get("avg_return_pct")
+    hr_str = f"{hit_rate:.0%}" if isinstance(hit_rate, (int, float)) else "–"
+    avg_str = f"{avg_return:+.2f}%" if isinstance(avg_return, (int, float)) else "–"
+    lines = [
+        "📅 <b>Wochen-Performance</b>",
+        f"Ausgewertete Signale: {evaluated} · Treffer: {hits}/{evaluated} ({hr_str})",
+        f"Ø Rendite pro Signal: {avg_str}",
+    ]
+
+    def _ticker_line(t: dict) -> str:
+        ticker = html.escape(str(t.get("ticker", "?")))
+        n = t.get("n") or 0
+        tr = t.get("hit_rate")
+        ar = t.get("avg_return_pct")
+        tr_str = f"{tr:.0%}" if isinstance(tr, (int, float)) else "–"
+        ar_str = f"{ar:+.2f}%" if isinstance(ar, (int, float)) else "–"
+        return f"  {ticker}: {ar_str} Ø · {tr_str} Treffer (n={n})"
+
+    best = stats.get("best_tickers") or []
+    worst = stats.get("worst_tickers") or []
+    if best:
+        lines.append("🟢 <b>Beste</b>")
+        lines.extend(_ticker_line(t) for t in best)
+    if worst:
+        lines.append("🔴 <b>Schwächste</b>")
+        lines.extend(_ticker_line(t) for t in worst)
+
+    text = "\n".join(lines)
+    if len(text) > TELEGRAM_MAX_LENGTH:
+        text = text[:TELEGRAM_MAX_LENGTH]
+    return text
+
+
+async def send_weekly_digest(stats: dict) -> bool:
+    """Verschickt die woechentliche Performance-Zusammenfassung (#10)."""
+    return await _send(format_weekly_digest(stats))
 
 
 async def send_text(text: str) -> bool:

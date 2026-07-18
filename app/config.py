@@ -96,6 +96,64 @@ WATCHLIST_TICKERS = _strlist("WATCHLIST_TICKERS", upper=True)
 WATCHLIST_SECTORS = [s.lower() for s in _strlist("WATCHLIST_SECTORS")]
 BLOCKLIST_TICKERS = _strlist("BLOCKLIST_TICKERS", upper=True)
 
+# --- Handelbares Universum / Liquiditaets-Gate (#8) ---
+# Optionale Positivliste tatsaechlich handelbarer, liquider Ticker (z.B. deine
+# Broker-Watchlist oder die S&P-100). Ist sie gesetzt, loesen NUR Ticker aus dieser
+# Liste einen Alert aus - obskure/illiquide Kuerzel (die Claude vereinzelt nennt) und
+# Werte, die du ohnehin nicht handeln kannst, fallen so vor dem Alert heraus. Leer =
+# kein Universum-Filter (jeder handelbare Ticker zaehlt, altes Verhalten).
+TICKER_UNIVERSE = _strlist("TICKER_UNIVERSE", upper=True)
+
+# --- Zustellungs-Gates (alle default AUS, damit sie das Verhalten nur auf Wunsch aendern) ---
+# Stale-News-Filter (#14): Meldungen, deren Veroeffentlichung laenger als so viele
+# Minuten zurueckliegt, werden gar nicht erst klassifiziert (alte Nachrichten sind meist
+# eingepreist und kosten sonst nur einen Claude-Call). 0 = aus (jede Meldung, auch ohne
+# verlaesslichen Zeitstempel, wird analysiert).
+MAX_NEWS_AGE_MINUTES = _int("MAX_NEWS_AGE_MINUTES", 0)
+
+# Ticker-Cooldown (#6): nach einem Alert fuer einen Ticker in eine Richtung wird derselbe
+# Ticker+Richtung fuer so viele Minuten nicht erneut alarmiert - verhindert
+# Mehrfach-Einstiege in dieselbe laufende Story. 0 = aus.
+TICKER_ALERT_COOLDOWN_MINUTES = _int("TICKER_ALERT_COOLDOWN_MINUTES", 0)
+
+# Ruhezeiten (#7): in diesem Stundenfenster (lokale Zeit QUIET_HOURS_TZ, Format
+# 'START-ENDE', z.B. '23-7') werden nur noch Alerts mit sehr hoher Ueberzeugung
+# (>= QUIET_HOURS_MIN_CONVICTION, 0-100) sofort zugestellt; schwaechere warten bis zum
+# Fensterende (der Resend-Pfad schickt sie dann automatisch nach). Leer = aus.
+QUIET_HOURS = _str("QUIET_HOURS")
+QUIET_HOURS_TZ = _str("QUIET_HOURS_TZ", "Europe/Berlin")
+QUIET_HOURS_MIN_CONVICTION = _int("QUIET_HOURS_MIN_CONVICTION", 90)
+
+# --- Ueberzeugungs-Score / Anreicherung ---
+# Verdichtete Ueberzeugungs-Zahl (0-100) aus Konfidenzen + Frische + Quellen-
+# Korroboration + Hedge-/Volatilitaets-Abschlag im Alert anzeigen (#1), samt grober,
+# unverbindlicher Positionsgroessen-Einordnung (#4). Reine Verdichtung vorhandener
+# Signale, kein zusaetzlicher Claude-Call.
+ENABLE_CONVICTION_SCORE = _bool("ENABLE_CONVICTION_SCORE", True)
+# Erwartete Bewegung (#3): Claude im Schema um eine grobe Prozent-/Horizont-Schaetzung
+# bitten und sie im Alert anzeigen. Optionaler Mindest-Erwartungswert als Alarm-Gate:
+# nur alarmieren, wenn die geschaetzte Bewegung >= diesem Prozentwert ist (0 = aus).
+ALERT_MIN_EXPECTED_MOVE_PCT = _float("ALERT_MIN_EXPECTED_MOVE_PCT", 0.0)
+# Historische Pro-Ticker-Trefferquote im Alert anzeigen (#9), sofern schon ausgewertete
+# Ergebnisse vorliegen (braucht ENABLE_PRICE_TRACKING, um befuellt zu werden).
+ENABLE_HISTORICAL_HITRATE = _bool("ENABLE_HISTORICAL_HITRATE", True)
+# Vorgeschlagene Stop-Loss-/Take-Profit-Marken aus der heutigen Tagesspanne (#5) -
+# nur wirksam mit ENABLE_PRICE_TRACKING (braucht einen Live-Kurs).
+ENABLE_RISK_LEVELS = _bool("ENABLE_RISK_LEVELS", True)
+
+# Woechentlicher Performance-Digest per Telegram (#10): einmal pro Woche (am
+# WEEKLY_DIGEST_WEEKDAY, 0=Montag .. 6=Sonntag, ab WEEKLY_DIGEST_MIN_HOUR UTC) eine
+# Zusammenfassung der Trefferquote/besten/schlechtesten Calls. Braucht ausgewertete
+# Ergebnisse (ENABLE_PRICE_TRACKING), sonst wird nichts verschickt.
+ENABLE_WEEKLY_DIGEST = _bool("ENABLE_WEEKLY_DIGEST", True)
+WEEKLY_DIGEST_WEEKDAY = _int("WEEKLY_DIGEST_WEEKDAY", 0)
+WEEKLY_DIGEST_MIN_HOUR = _int("WEEKLY_DIGEST_MIN_HOUR", 8)
+
+# Kurz-Cache fuer Live-Kursabfragen (#13): dieselbe Ticker-Quote wird innerhalb dieses
+# Fensters nicht erneut vom Kursdienst geholt (spart HTTP-Calls, wenn derselbe Ticker in
+# einem Zyklus mehrfach vorkommt). 0 = aus.
+PRICE_CACHE_TTL_SECONDS = _int("PRICE_CACHE_TTL_SECONDS", 60)
+
 # --- Alert-Anreicherung ---
 # US-Boersen-Session (offen/vor-/nachboerslich/zu) im Alert anzeigen - hilft
 # einzuschaetzen, ob ein Signal gerade ueberhaupt handelbar ist.

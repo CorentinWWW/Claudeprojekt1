@@ -84,18 +84,22 @@ def main():
     from app.db import Classification
 
     async def fake_quote2(ticker):
-        return {"price": 50.0, "open": 40.0, "change_pct": 25.0} if ticker == "AMD" else None
+        return (
+            {"price": 50.0, "open": 40.0, "high": 52.0, "low": 39.0, "change_pct": 25.0}
+            if ticker == "AMD" else None
+        )
 
     orig2 = orch2.prices.get_quote
     orch2.prices.get_quote = fake_quote2
     try:
         cls = Classification(is_market_relevant=True, sentiment="positive", confidence=0.9,
                              ticker_calls=[{"ticker": "AMD", "direction": "long", "confidence": 0.95}])
-        change = asyncio.run(orch2._fetch_ticker_context(cls, statement_id=500))
+        ctx = asyncio.run(orch2._fetch_ticker_context(cls, statement_id=500))
     finally:
         orch2.prices.get_quote = orig2
 
-    check("_fetch_ticker_context liefert heutige Bewegung", change.get("AMD") == 25.0)
+    # _fetch_ticker_context liefert jetzt {'change': {...}, 'risk': {...}}.
+    check("_fetch_ticker_context liefert heutige Bewegung", ctx["change"].get("AMD") == 25.0)
     check("_fetch_ticker_context hat Baseline gespeichert",
           any(o["ticker"] == "AMD" and o["alert_price"] == 50.0
               for o in db2.get_outcomes_awaiting_followup(0)))
@@ -114,8 +118,9 @@ def main():
     orch2.prices.get_quote = should_not_call
     cls2 = Classification(is_market_relevant=True, sentiment="positive", confidence=0.9,
                           ticker_calls=[{"ticker": "AMD", "direction": "long", "confidence": 0.95}])
-    change2 = asyncio.run(orch2._fetch_ticker_context(cls2, statement_id=600))
-    check("deaktiviert: kein Kurs-Call", called["n"] == 0 and change2 == {})
+    ctx2 = asyncio.run(orch2._fetch_ticker_context(cls2, statement_id=600))
+    check("deaktiviert: kein Kurs-Call",
+          called["n"] == 0 and ctx2["change"] == {} and ctx2["risk"] == {})
 
     os.unlink(tmp_name)
     os.unlink(tmp2)

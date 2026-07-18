@@ -10,54 +10,91 @@ from app.classifier import CONTEXT_SNIPPET_MAX_CHARS, DailyCapExceeded, FALLBACK
 from app.config import (
     ALERT_CONFIDENCE_THRESHOLD,
     ALERT_DIGEST_THRESHOLD,
+    ALERT_MIN_EXPECTED_MOVE_PCT,
     ALERT_MIN_TICKER_CONFIDENCE,
     BLOCKLIST_TICKERS,
     CLAUDE_ESCALATION_MODEL,
     DEDUP_SIMILARITY_THRESHOLD,
     ENABLE_BORDERLINE_ESCALATION,
+    ENABLE_CONVICTION_SCORE,
+    ENABLE_HISTORICAL_HITRATE,
     ENABLE_LIVE_AUDIO,
     ENABLE_NEWS,
     ENABLE_PREFILTER,
     ENABLE_PRICE_TRACKING,
+    ENABLE_RISK_LEVELS,
     ENABLE_TRUTH_SOCIAL,
+    ENABLE_WEEKLY_DIGEST,
     ESCALATION_BAND,
     LIVE_AUDIO_STREAM_URLS,
     MAX_CLASSIFICATIONS_PER_DAY,
     MAX_CONCURRENT_CLASSIFICATIONS,
+    MAX_NEWS_AGE_MINUTES,
     POLL_INTERVAL_SECONDS,
     PRICE_OUTCOME_HORIZON_MINUTES,
     PRIORITY_CLASSIFICATIONS_PER_DAY,
+    QUIET_HOURS,
+    QUIET_HOURS_MIN_CONVICTION,
+    QUIET_HOURS_TZ,
     TELEGRAM_STARTUP_NOTICE,
+    TICKER_ALERT_COOLDOWN_MINUTES,
+    TICKER_UNIVERSE,
     TOPIC_CONTEXT_MAX_ITEMS,
     TOPIC_CONTEXT_WINDOW_HOURS,
     WATCHLIST_SECTORS,
     WATCHLIST_TICKERS,
+    WEEKLY_DIGEST_MIN_HOUR,
+    WEEKLY_DIGEST_WEEKDAY,
     WHISPER_MODEL_SIZE,
 )
 from app.db import (
     Classification,
     RawStatement,
+    get_corroboration_count,
     get_dedup_candidates,
     get_known_source_ids,
     get_outcomes_awaiting_followup,
     get_pending_alerts,
+    get_performance_stats,
     get_recent_alerted,
+    get_ticker_hitrate,
     get_topic_thread,
     init_db,
     insert_statement,
     mark_alert_sent,
     record_alert_baseline,
+    record_ticker_alert,
     set_outcome_followup,
+    ticker_in_cooldown,
     try_claim_meta_key,
 )
 from app import prices
 from app.prefilter import looks_market_relevant
+from app.scoring import (
+    conviction_score,
+    has_hedge_language,
+    high_volatility_text,
+    hour_in_window,
+    parse_hour_window,
+    position_tier,
+)
 from app.sources.live_audio import LiveAudioSource
 from app.sources.news_gdelt import GdeltNewsSource
 from app.sources.news_rss import RssNewsSource
 from app.sources.truth_social import TruthSocialSource
-from app.telegram_alert import send_alert, send_digest_alert, send_startup_notice, send_text
+from app.telegram_alert import (
+    send_alert,
+    send_digest_alert,
+    send_startup_notice,
+    send_text,
+    send_weekly_digest,
+)
 from app.util import text_similarity
+
+try:
+    from zoneinfo import ZoneInfo
+except Exception:  # pragma: no cover - nur falls die Zeitzonendaten fehlen
+    ZoneInfo = None
 
 # Permanente Konfigurationsfehler der Claude-API: ein kaputter/widerrufener API-Key
 # (401), fehlende Berechtigung (403) oder ein nicht (mehr) existierendes Modell (404)
@@ -136,6 +173,11 @@ def actionable_tickers(classification) -> list[dict]:
         ticker = (tc.get("ticker") or "").upper()
         if not ticker or ticker in BLOCKLIST_TICKERS:
             continue
+        # Liquiditaets-/Universum-Gate (#8): ist ein handelbares Universum konfiguriert,
+        # zaehlen nur Ticker daraus - obskure/illiquide Kuerzel loesen keinen Alert aus.
+        # Leeres Universum = kein Filter (altes Verhalten).
+        if TICKER_UNIVERSE and ticker not in TICKER_UNIVERSE:
+            continue
         conf = tc.get("confidence")
         conf = float(conf) if isinstance(conf, (int, float)) else 0.0
         if ALERT_MIN_TICKER_CONFIDENCE > 0 and conf < ALERT_MIN_TICKER_CONFIDENCE:
@@ -172,6 +214,13 @@ def is_alert_worthy(classification) -> bool:
         return False
     if classification.confidence < ALERT_CONFIDENCE_THRESHOLD:
         return False
+    # Optionales Mindest-Erwartungswert-Gate (#3): nur alarmieren, wenn Claudes grobe
+    # Schaetzung der erwarteten Bewegung >= Schwelle ist. 0 = aus (Default). Eine fehlende
+    # Schaetzung (None) gilt bei aktiver Schwelle als "zu klein" und wird herausgefiltert.
+    if ALERT_MIN_EXPECTED_MOVE_PCT > 0:
+        move = classification.expected_move_pct
+        if not isinstance(move, (int, float)) or move < ALERT_MIN_EXPECTED_MOVE_PCT:
+            return False
     if ALERT_MIN_TICKER_CONFIDENCE <= 0:
         # Praezisions-Filter deaktiviert: altes Verhalten (jede marktrelevante Meldung
         # oberhalb von ALERT_CONFIDENCE_THRESHOLD alarmiert) - aber der Watchlist-Filter
@@ -205,6 +254,9 @@ def build_sources():
                 # siehe app/prefilter.py) verworfen hat, bevor ein Claude-Call anfiel -
                 # macht die Kostenersparnis in /api/health sichtbar.
                 "prefiltered": 0,
+                # Wie viele Meldungen als zu alt (MAX_NEWS_AGE_MINUTES, #14) verworfen
+                # wurden, bevor ein Claude-Call anfiel.
+                "stale": 0,
             },
         )
     return sources
@@ -472,14 +524,16 @@ async def _classify_and_store(raw, semaphore: asyncio.Semaphore, recent_context:
 
 
 async def _fetch_ticker_context(classification, statement_id) -> dict:
-    """Best-effort (#2/#8): fuer die handelbaren Ticker den aktuellen Kurs holen, ihn
-    als Ausgangspunkt fuers Backtesting speichern und die heutige Bewegung (Open->jetzt)
-    zurueckgeben, die im Alert angezeigt wird. Nur wenn ENABLE_PRICE_TRACKING gesetzt
-    ist. Jede Kursabfrage ist best-effort (prices.get_quote gibt bei Problemen None) -
-    ein nicht erreichbarer Kursdienst darf den Alert NIE aufhalten."""
-    change: dict[str, float] = {}
+    """Best-effort (#2/#5/#8): fuer die handelbaren Ticker den aktuellen Kurs holen, ihn
+    als Ausgangspunkt fuers Backtesting speichern und {'change': {...}, 'risk': {...}}
+    zurueckgeben - die heutige Bewegung (Open->jetzt) und, falls ENABLE_RISK_LEVELS,
+    vorgeschlagene Stop-/Ziel-Marken (#5) je Ticker fuer den Alert. Nur wenn
+    ENABLE_PRICE_TRACKING gesetzt ist. Jede Kursabfrage ist best-effort (prices.get_quote
+    gibt bei Problemen None) - ein nicht erreichbarer Kursdienst darf den Alert NIE
+    aufhalten."""
+    result: dict[str, dict] = {"change": {}, "risk": {}}
     if not ENABLE_PRICE_TRACKING or statement_id is None:
-        return change
+        return result
     now = time.time()
     for tc in actionable_tickers(classification):
         ticker = (tc.get("ticker") or "").upper()
@@ -491,18 +545,74 @@ async def _fetch_ticker_context(classification, statement_id) -> dict:
             now, quote.get("price"),
         )
         if quote.get("change_pct") is not None:
-            change[ticker] = quote["change_pct"]
-    return change
+            result["change"][ticker] = quote["change_pct"]
+        if ENABLE_RISK_LEVELS:
+            levels = prices.suggest_risk_levels(
+                quote.get("price"), tc.get("direction"), quote.get("high"), quote.get("low")
+            )
+            if levels:
+                result["risk"][ticker] = levels
+    return result
 
 
-async def _build_alert_extras(raw, classification, statement_id) -> dict:
-    """Sammelt die Zusatzinfos fuer einen Einzel-Alert: heutige Bewegung je Ticker
-    (#8, inkl. Baseline-Erfassung fuers Backtesting #2) und - bei einer Eskalation -
-    die Themen-Zeitleiste (#5)."""
+def _freshness_minutes(published_at) -> float | None:
+    """Alter einer Meldung in Minuten aus der echten Veroeffentlichungszeit (Epoch) -
+    oder None, wenn kein brauchbarer Zeitstempel vorliegt. Negatives (leichte Uhr-
+    Abweichung) wird auf 0 geklemmt."""
+    if not isinstance(published_at, (int, float)) or published_at <= 0:
+        return None
+    return max(0.0, (time.time() - published_at) / 60.0)
+
+
+def _compute_conviction(raw, classification, statement_id) -> tuple[int, int, bool]:
+    """Berechnet (billig, ohne Kurs-/Claude-Call) den Ueberzeugungs-Score (#1) sowie die
+    Korroborations-Quellenzahl (#15) und ob der Text spekulativ formuliert ist (#2).
+    Rueckgabe: (score, corroboration, hedged). Wird sowohl fuer die Zustell-Gates
+    (Ruhezeiten) als auch fuer die Alert-Anreicherung verwendet, damit beide denselben
+    Wert sehen und er nur einmal berechnet wird."""
+    corroboration = get_corroboration_count(statement_id) if statement_id else 1
+    hedged = has_hedge_language(raw.text)
+    high_vol = high_volatility_text(raw.text)
+    strongest = _strongest_ticker_confidence(classification)
+    score = conviction_score(
+        classification.confidence, strongest,
+        freshness_minutes=_freshness_minutes(raw.published_at),
+        corroboration_sources=corroboration, hedged=hedged, high_volatility=high_vol,
+    )
+    return score, corroboration, hedged
+
+
+async def _build_alert_extras(raw, classification, statement_id, score, corroboration, hedged) -> dict:
+    """Sammelt die Zusatzinfos fuer einen Einzel-Alert: Ueberzeugungs-Score + Positions-
+    einordnung (#1/#4), Korroboration (#15), Hedge-Hinweis (#2), heutige Bewegung +
+    Stop/Ziel je Ticker (#8/#5, inkl. Baseline-Erfassung fuers Backtesting #2),
+    historische Trefferquote je Ticker (#9) und - bei einer Eskalation - die Themen-
+    Zeitleiste (#5)."""
     extras: dict = {}
-    change = await _fetch_ticker_context(classification, statement_id)
-    if change:
-        extras["ticker_change"] = change
+    if ENABLE_CONVICTION_SCORE:
+        extras["conviction"] = score
+        extras["position_tier"] = position_tier(score)
+    if corroboration > 1:
+        extras["corroboration"] = corroboration
+    if hedged:
+        extras["hedged"] = True
+
+    price_ctx = await _fetch_ticker_context(classification, statement_id)
+    if price_ctx.get("change"):
+        extras["ticker_change"] = price_ctx["change"]
+    if price_ctx.get("risk"):
+        extras["ticker_risk"] = price_ctx["risk"]
+
+    if ENABLE_HISTORICAL_HITRATE:
+        hitrates = {}
+        for tc in actionable_tickers(classification):
+            ticker = (tc.get("ticker") or "").upper()
+            hr = get_ticker_hitrate(ticker)
+            if hr:
+                hitrates[ticker] = hr
+        if hitrates:
+            extras["ticker_hitrate"] = hitrates
+
     if classification is not None and classification.related_topic_id is not None:
         thread = get_topic_thread(classification.related_topic_id)
         if len(thread) > 1:
@@ -510,20 +620,97 @@ async def _build_alert_extras(raw, classification, statement_id) -> dict:
     return extras
 
 
+def _record_ticker_alerts(classification, statement_id) -> None:
+    """Protokolliert alle handelbaren Ticker+Richtungen eines gerade verschickten Alerts
+    (fuer den Cooldown, #6)."""
+    now = time.time()
+    for tc in actionable_tickers(classification):
+        record_ticker_alert(statement_id, (tc.get("ticker") or "").upper(), tc.get("direction"), now)
+
+
+def _passes_cooldown(classification) -> bool:
+    """Ticker-Cooldown (#6): True, wenn MINDESTENS ein handelbarer Ticker+Richtung NICHT
+    innerhalb des Cooldown-Fensters bereits alarmiert wurde (es gibt also etwas Neues zu
+    melden). Nur wenn alle handelbaren Ticker noch im Cooldown sind, wird unterdrueckt.
+    Cooldown = 0 -> immer True (aus)."""
+    if TICKER_ALERT_COOLDOWN_MINUTES <= 0:
+        return True
+    actionable = actionable_tickers(classification)
+    if not actionable:
+        return True
+    since = time.time() - TICKER_ALERT_COOLDOWN_MINUTES * 60
+    return any(
+        not ticker_in_cooldown((tc.get("ticker") or "").upper(), tc.get("direction"), since)
+        for tc in actionable
+    )
+
+
+def _in_quiet_hours_now() -> bool:
+    """True, wenn gerade Ruhezeit ist (#7) - Stunde im konfigurierten Fenster, in der
+    lokalen Zeit QUIET_HOURS_TZ. Fehlt die Zeitzone (tzdata), wird auf UTC ausgewichen."""
+    window = parse_hour_window(QUIET_HOURS)
+    if window is None:
+        return False
+    tz = None
+    if ZoneInfo is not None:
+        try:
+            tz = ZoneInfo(QUIET_HOURS_TZ)
+        except Exception:
+            tz = None
+    now = datetime.datetime.now(tz) if tz else datetime.datetime.now(datetime.timezone.utc)
+    return hour_in_window(now.hour, window)
+
+
+def _passes_quiet_hours(score: int) -> bool:
+    """Ruhezeiten-Gate (#7): ausserhalb der Ruhezeit immer True. Innerhalb nur, wenn der
+    Ueberzeugungs-Score hoch genug ist (>= QUIET_HOURS_MIN_CONVICTION); schwaechere Alerts
+    warten - der Resend-Pfad stellt sie nach Fensterende automatisch zu."""
+    if not _in_quiet_hours_now():
+        return True
+    return score >= QUIET_HOURS_MIN_CONVICTION
+
+
 async def _send_alerts(alert_worthy: list[tuple]):
     """Schickt einzelne Alerts bei wenigen Treffern, sonst eine gebuendelte
     Sammel-Nachricht - verhindert eine Alert-Flut bei einem Nachrichtenschub
     (z.B. wenn ploetzlich viele echte, unterschiedliche Meldungen gleichzeitig
-    marktrelevant sind)."""
+    marktrelevant sind). Vor dem Versand greifen die Zustell-Gates Cooldown (#6) und
+    Ruhezeiten (#7); unterdrueckte Meldungen bleiben unmarkiert und werden vom
+    Resend-Pfad spaeter erneut versucht (z.B. nach Ende der Ruhezeit)."""
     if not alert_worthy:
         return
 
-    if len(alert_worthy) <= ALERT_DIGEST_THRESHOLD:
-        for raw, classification, statement_id in alert_worthy:
-            extras = await _build_alert_extras(raw, classification, statement_id)
+    # Ueberzeugung + Gate-Pruefung (alles billig, ohne Kurs-/Claude-Call), damit die
+    # teuren Kursabfragen nur fuer tatsaechlich zuzustellende Alerts anfallen.
+    gated: list[tuple] = []
+    for raw, classification, statement_id in alert_worthy:
+        score, corroboration, hedged = _compute_conviction(raw, classification, statement_id)
+        if not _passes_cooldown(classification):
+            logger.info(
+                "[%s] Alert unterdrueckt (Ticker-Cooldown aktiv): %s",
+                raw.source, raw.text[:80],
+            )
+            continue
+        if not _passes_quiet_hours(score):
+            logger.info(
+                "[%s] Alert waehrend Ruhezeit zurueckgestellt (Ueberzeugung %d < %d): %s",
+                raw.source, score, QUIET_HOURS_MIN_CONVICTION, raw.text[:80],
+            )
+            continue
+        gated.append((raw, classification, statement_id, score, corroboration, hedged))
+
+    if not gated:
+        return
+
+    if len(gated) <= ALERT_DIGEST_THRESHOLD:
+        for raw, classification, statement_id, score, corroboration, hedged in gated:
+            extras = await _build_alert_extras(
+                raw, classification, statement_id, score, corroboration, hedged
+            )
             sent = await send_alert(raw, classification, extras=extras)
             if sent:
                 mark_alert_sent(statement_id)
+                _record_ticker_alerts(classification, statement_id)
     else:
         # Sammel-Nachricht: die Baselines fuers Backtesting trotzdem erfassen (damit ein
         # Nachrichtenschub keine Luecke in der Erfolgsmessung reisst), aber ohne die
@@ -533,12 +720,14 @@ async def _send_alerts(alert_worthy: list[tuple]):
         # ueberhaupt existiert, den Poll-Zyklus spuerbar verzoegern koennen.
         await asyncio.gather(*(
             _fetch_ticker_context(classification, statement_id)
-            for _, classification, statement_id in alert_worthy
+            for _, classification, statement_id, _, _, _ in gated
         ))
-        sent = await send_digest_alert(alert_worthy)
+        digest_items = [(raw, c, sid) for raw, c, sid, _, _, _ in gated]
+        sent = await send_digest_alert(digest_items)
         if sent:
-            for _, _, statement_id in alert_worthy:
+            for raw, classification, statement_id, _, _, _ in gated:
                 mark_alert_sent(statement_id)
+                _record_ticker_alerts(classification, statement_id)
 
 
 def _row_to_alert_tuple(row: dict) -> tuple:
@@ -557,6 +746,8 @@ def _row_to_alert_tuple(row: dict) -> tuple:
         reasoning=row["reasoning"] or "",
         related_topic_id=row.get("related_topic_id"),
         is_major_escalation=bool(row.get("is_major_escalation")),
+        expected_move_pct=row.get("expected_move_pct"),
+        expected_horizon=row.get("expected_horizon"),
     )
     return (raw, classification, row["id"])
 
@@ -618,9 +809,34 @@ async def _evaluate_alert_outcomes():
         set_outcome_followup(o["id"], now, followup_price, return_pct, correct)
 
 
+async def _maybe_send_weekly_digest():
+    """Woechentlicher Performance-Digest (#10): einmal pro Kalenderwoche (am
+    WEEKLY_DIGEST_WEEKDAY, ab WEEKLY_DIGEST_MIN_HOUR UTC) eine Telegram-Zusammenfassung
+    der ausgewerteten Alerts. try_claim_meta_key (Jahr+Woche im Key) sorgt fuer genau
+    EINEN Versand pro Woche, auch ueber einzelne GitHub-Actions-Laeufe hinweg. Wird nur
+    verschickt, wenn es ueberhaupt ausgewertete Ergebnisse gibt (sonst waere der Digest
+    leer - relevant nur mit ENABLE_PRICE_TRACKING)."""
+    if not ENABLE_WEEKLY_DIGEST:
+        return
+    now = datetime.datetime.now(datetime.timezone.utc)
+    if now.weekday() != WEEKLY_DIGEST_WEEKDAY or now.hour < WEEKLY_DIGEST_MIN_HOUR:
+        return
+    iso_year, iso_week, _ = now.isocalendar()
+    # Zuerst pruefen, ob es ueberhaupt etwas zu berichten gibt - BEVOR der Wochen-Slot
+    # beansprucht wird, damit ein Versand nicht verpufft, solange noch keine Ergebnisse
+    # vorliegen (z.B. Preis-Tracking gerade erst aktiviert).
+    stats = get_performance_stats()
+    if not stats.get("evaluated"):
+        return
+    if not try_claim_meta_key(f"weekly_digest_{iso_year}_W{iso_week:02d}"):
+        return
+    await send_weekly_digest(stats)
+
+
 async def poll_once(sources, semaphore: asyncio.Semaphore):
     await _resend_pending_alerts()
     await _evaluate_alert_outcomes()
+    await _maybe_send_weekly_digest()
 
     # Wird gesetzt, sobald ein permanenter Claude-Konfigurationsfehler (kaputter Key,
     # geloeschtes Modell) auftaucht - erst NACH Abschluss der kompletten Buchhaltung
@@ -663,6 +879,31 @@ async def poll_once(sources, semaphore: asyncio.Semaphore):
                     source.name, dropped, len(raw_statements),
                 )
             raw_statements = kept
+            if not raw_statements:
+                continue
+
+        # Stale-News-Filter (#14): Meldungen, deren echte Veroeffentlichung laenger als
+        # MAX_NEWS_AGE_MINUTES zurueckliegt, gar nicht erst klassifizieren - alte
+        # Nachrichten sind meist eingepreist und kosten sonst nur einen Claude-Call.
+        # Meldungen OHNE verlaesslichen Zeitstempel werden bewusst NICHT verworfen
+        # (konservativ - lieber ein Call zu viel als ein echtes Ereignis verlieren).
+        if MAX_NEWS_AGE_MINUTES > 0:
+            max_age_seconds = MAX_NEWS_AGE_MINUTES * 60
+            now_ts = time.time()
+            fresh = [
+                r for r in raw_statements
+                if not (isinstance(r.published_at, (int, float)) and r.published_at > 0
+                        and (now_ts - r.published_at) > max_age_seconds)
+            ]
+            dropped = len(raw_statements) - len(fresh)
+            if dropped:
+                health["stale"] = health.get("stale", 0) + dropped
+                logger.info(
+                    "[%s] Stale-Filter: %d/%d Meldung(en) aelter als %d Min - "
+                    "verworfen (kein Claude-Call).",
+                    source.name, dropped, len(raw_statements), MAX_NEWS_AGE_MINUTES,
+                )
+            raw_statements = fresh
             if not raw_statements:
                 continue
 

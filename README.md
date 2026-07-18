@@ -221,6 +221,43 @@ Chunks (Standard 30s), keine Wort-für-Wort-Live-Transkription.
   Alle netzabhängigen Teile (#2/#3/#8) sind **best-effort und standardmäßig aus** – ist
   der Kursdienst nicht erreichbar, entfällt das Feature still, der Poll-Zyklus läuft
   normal weiter. Kurs-/Trefferquoten sind Analyse-Hilfen, **keine Anlageberatung**.
+- **Präzisions- & Feedback-Ausbau (15 weitere Verbesserungen)**: baut auf dem obigen
+  Trading-Ausbau auf und schärft Signalqualität, Risiko-Handling und Nachvollziehbarkeit
+  – alles ohne zusätzlichen Claude-Call (bis auf die zwei neuen Schätzfelder, die im
+  bestehenden Call mitlaufen). Die neuen **Zustell-Gates sind bewusst standardmäßig aus**
+  und ändern das Verhalten nur auf Wunsch:
+  1. **Überzeugungs-Score (0–100)** (`ENABLE_CONVICTION_SCORE`) – verdichtet Gesamt-/
+     Ticker-Konfidenz, Frische, Quellen-Bestätigung sowie Hedge-/Volatilitäts-Abschlag
+     zu einer Zahl im Alert (`app/scoring.py`, rein rechnerisch).
+  2. **Gerücht-/Konjunktiv-Erkennung** – Formulierungen wie „reportedly / könnte / in
+     talks" senken den Score und markieren den Alert mit „unbestätigt/Gerücht".
+  3. **Erwartete Bewegung (%) + Horizont** (`ALERT_MIN_EXPECTED_MOVE_PCT`) – Claude
+     schätzt grob Größenordnung und Zeitraum; optional als Mindest-Gate.
+  4. **Positionsgrößen-Einordnung** – aus dem Score eine grobe, ausdrücklich
+     unverbindliche Kategorie (Sondierung/Standard/hohe Überzeugung).
+  5. **Stop-Loss/Take-Profit-Vorschlag** (`ENABLE_RISK_LEVELS`) – aus der heutigen
+     Tagesspanne als Volatilitätsmaß (Chance-Risiko ~1.5), nur mit Preis-Tracking.
+  6. **Ticker-Cooldown** (`TICKER_ALERT_COOLDOWN_MINUTES`) – derselbe Ticker+Richtung
+     nicht mehrfach innerhalb des Fensters → keine Doppel-Einstiege in dieselbe Story.
+  7. **Ruhezeiten** (`QUIET_HOURS`) – nachts nur sehr überzeugte Alerts sofort; der Rest
+     wird über den bestehenden Resend-Pfad nach Fensterende automatisch nachgeschickt.
+  8. **Handelbares Universum / Liquiditäts-Gate** (`TICKER_UNIVERSE`) – nur Ticker aus
+     einer Positivliste lösen Alerts aus; obskure/illiquide Kürzel fallen heraus.
+  9. **Historische Pro-Ticker-Trefferquote** (`ENABLE_HISTORICAL_HITRATE`) – „bisher
+     7/10 richtig" je Ticker im Alert, aus den Backtesting-Ergebnissen.
+  10. **Wochen-Performance-Digest** (`ENABLE_WEEKLY_DIGEST`) – einmal pro Woche eine
+      Telegram-Zusammenfassung (Trefferquote, beste/schlechteste Ticker).
+  11. **`/api/performance`** – aggregierte Trefferquote/Ø-Rendite + beste/schlechteste
+      Ticker als JSON.
+  12. **Mehr Metriken in `/api/health`** – u.a. `alerts_sent_today` sowie pro Quelle die
+      Zähler `prefiltered`/`stale` (verworfene Meldungen ohne Claude-Call).
+  13. **Kurs-Cache + Circuit-Breaker** (`PRICE_CACHE_TTL_SECONDS`) – gleiche Quote nicht
+      doppelt holen; nach mehreren Fehlern kurz gar nicht anfragen (Kursdienst schonen).
+  14. **Stale-News-Filter** (`MAX_NEWS_AGE_MINUTES`) – zu alte Meldungen gar nicht erst
+      klassifizieren (spart Calls; alte News sind meist eingepreist).
+  15. **Multi-Quellen-Korroboration** – wird dieselbe Meldung von mehreren unabhängigen
+      Quellen gebracht, zeigt der Alert „bestätigt durch N Quellen" und der Score steigt.
+  Sämtliche Marken/Scores sind Analyse-Hilfen, **keine Anlageberatung**.
 - **Echte Nachrichtenzeit + Alter im Alert**: statt eines bloßen „gerade erfasst"-
   Zeitstempels liest jede Quelle jetzt die **tatsächliche Veröffentlichungszeit** aus
   (GDELT `seendate`, RSS `published_parsed`, Truth Social `created_at`; Fallback auf
@@ -524,11 +561,21 @@ Siehe `.env.example` für alle Variablen. Wichtige zusätzliche Stellschrauben:
 | `ALERT_MIN_TICKER_CONFIDENCE` | Präzisions-Filter: Alert nur, wenn eine konkrete Aktie mit klarer Long/Short-Richtung diese Pro-Ticker-Konfidenz erreicht (Standard 0.90 = sehr streng; `0.85`/`0.80` lockern, `0` schaltet den Filter ab) – siehe Abschnitt oben |
 | `WATCHLIST_TICKERS` / `WATCHLIST_SECTORS` | Nur diese Ticker/Sektoren melden (Komma-Listen); leer = alle (#10) |
 | `BLOCKLIST_TICKERS` | Diese Ticker nie melden (Komma-Liste) (#10) |
+| `TICKER_UNIVERSE` | Handelbares Universum / Liquiditäts-Gate: nur Ticker aus dieser Positivliste lösen Alerts aus; leer = kein Filter |
+| `MAX_NEWS_AGE_MINUTES` | Stale-News-Filter: ältere Meldungen gar nicht erst klassifizieren (spart Calls); `0` = aus |
+| `TICKER_ALERT_COOLDOWN_MINUTES` | Ticker-Cooldown: gleicher Ticker+Richtung nicht erneut alarmieren innerhalb des Fensters; `0` = aus |
+| `QUIET_HOURS` / `QUIET_HOURS_TZ` / `QUIET_HOURS_MIN_CONVICTION` | Ruhezeiten (`START-ENDE`, lokale Zeit): nachts nur Alerts ≥ Überzeugungs-Schwelle sofort, der Rest wird nach Fensterende nachgeschickt; leer = aus |
 | `ENABLE_MARKET_SESSION_INFO` | US-Börsen-Session (offen/vor-/nachbörslich/zu) im Alert (Standard an) (#7) |
 | `ENABLE_VOLATILITY_FLAG` | High-Volatility-Hinweis im Alert bei Zöllen/Sanktionen/Fed etc. (Standard an) (#6) |
 | `ENABLE_CHART_BUTTONS` / `CHART_URL_TEMPLATE` | Inline-Chart-Buttons pro handelbarem Ticker (TradingView), `{ticker}` wird ersetzt (Standard an) (#9) |
+| `ENABLE_CONVICTION_SCORE` | Überzeugungs-Score (0–100) + Positionsgrößen-Einordnung im Alert (Standard an, kein Extra-Call) |
+| `ALERT_MIN_EXPECTED_MOVE_PCT` | Nur alarmieren, wenn Claudes grobe erwartete Bewegung ≥ diesem % ist (`0` = aus) |
+| `ENABLE_HISTORICAL_HITRATE` | Historische Pro-Ticker-Trefferquote im Alert (braucht Preis-Tracking zum Befüllen) |
+| `ENABLE_RISK_LEVELS` | Vorgeschlagene Stop-/Take-Profit-Marken aus der Tagesspanne (nur mit Preis-Tracking) |
 | `ENABLE_BORDERLINE_ESCALATION` / `CLAUDE_ESCALATION_MODEL` / `ESCALATION_BAND` | Grenzfälle nahe der Schwelle mit stärkerem Modell zweitprüfen (Standard **aus**, kostet Extra-Calls) (#4) |
 | `ENABLE_PRICE_TRACKING` / `PRICE_OUTCOME_HORIZON_MINUTES` | Kurs-Feedback/Backtesting + heutige Bewegung im Alert, best-effort über Stooq (Standard **aus**) (#2/#3/#8) |
+| `PRICE_CACHE_TTL_SECONDS` | Kurz-Cache für Live-Kursabfragen (gleiche Quote nicht doppelt holen); `0` = aus |
+| `ENABLE_WEEKLY_DIGEST` / `WEEKLY_DIGEST_WEEKDAY` / `WEEKLY_DIGEST_MIN_HOUR` | Wöchentlicher Performance-Digest per Telegram (braucht ausgewertete Ergebnisse) |
 | `MAX_CONCURRENT_CLASSIFICATIONS` | Wie viele Claude-Calls parallel laufen dürfen (Standard **1** = seriell, siehe Duplikat-Hinweis oben; höher = schneller bei Nachrichtenschüben, aber Risiko doppelter Alerts) |
 | `DEDUP_SIMILARITY_THRESHOLD` | Ab welcher Textähnlichkeit (0-1) zwei Statements als Duplikat gelten (Standard 0.82) |
 | `DEDUP_WINDOW_SECONDS` | Zeitfenster für die Text-Duplikatsuche, Tier 1 (Standard 24h) |
@@ -564,7 +611,9 @@ Einschätzung abgleichen).
 | `GET /` | Dashboard | – |
 | `GET /api/statements?limit=&only_relevant=` | Feed als JSON | `X-API-Key`, falls `DASHBOARD_API_KEY` gesetzt |
 | `GET /api/stats` | Aggregierte Statistik | `X-API-Key`, falls `DASHBOARD_API_KEY` gesetzt |
-| `GET /api/health` | Status pro Quelle, Konfigurationsfehler/-warnungen, Uptime, heutiger Verbrauch des Tages-Kostendeckels (`classification_calls_today`/`_limit`) | – (bewusst offen für Uptime-Checks) |
+| `GET /api/calibration` | Trefferquote gesamt / je Konfidenz-Bucket / je Richtung (nur mit Preis-Tracking befüllt) | `X-API-Key`, falls `DASHBOARD_API_KEY` gesetzt |
+| `GET /api/performance` | Aggregierte Performance + beste/schlechteste Ticker nach Ø-Rendite (nur mit Preis-Tracking befüllt) | `X-API-Key`, falls `DASHBOARD_API_KEY` gesetzt |
+| `GET /api/health` | Status pro Quelle (inkl. `prefiltered`/`stale`), Konfigurationsfehler/-warnungen, Uptime, heutiger Verbrauch des Tages-Kostendeckels (`classification_calls_today`/`_limit`) sowie `alerts_sent_today` | – (bewusst offen für Uptime-Checks) |
 | `POST /api/test` | Beliebigen Text durch die volle Pipeline schicken (siehe oben), max. 4000 Zeichen | `X-API-Key`, falls `DASHBOARD_API_KEY` gesetzt |
 
 ## Tests

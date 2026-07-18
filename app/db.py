@@ -27,7 +27,9 @@ CREATE TABLE IF NOT EXISTS statements (
     alert_sent INTEGER NOT NULL DEFAULT 0,
     duplicate_of_id INTEGER,
     related_topic_id INTEGER,
-    is_major_escalation INTEGER NOT NULL DEFAULT 0
+    is_major_escalation INTEGER NOT NULL DEFAULT 0,
+    expected_move_pct REAL,
+    expected_horizon TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_statements_ingested_at ON statements(ingested_at DESC);
 
@@ -71,6 +73,20 @@ CREATE TABLE IF NOT EXISTS alert_outcomes (
 );
 CREATE INDEX IF NOT EXISTS idx_alert_outcomes_pending
     ON alert_outcomes(followup_price, alert_ts);
+
+-- Leichtgewichtiges Protokoll jedes tatsaechlich verschickten Alerts pro handelbarem
+-- Ticker+Richtung - UNABHAENGIG vom Preis-Tracking (alert_outcomes wird nur mit
+-- ENABLE_PRICE_TRACKING befuellt). Basis fuer den Ticker-Cooldown (#6): denselben
+-- Ticker in dieselbe Richtung nicht innerhalb des Cooldown-Fensters erneut alarmieren.
+CREATE TABLE IF NOT EXISTS ticker_alerts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    statement_id INTEGER,
+    ticker TEXT NOT NULL,
+    direction TEXT,
+    alerted_at REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_ticker_alerts_recent
+    ON ticker_alerts(ticker, direction, alerted_at);
 """
 
 # Fuer DBs, die vor der Einfuehrung von related_topic_id/is_major_escalation angelegt
@@ -80,6 +96,10 @@ CREATE INDEX IF NOT EXISTS idx_alert_outcomes_pending
 _MIGRATION_COLUMNS = {
     "related_topic_id": "ALTER TABLE statements ADD COLUMN related_topic_id INTEGER",
     "is_major_escalation": "ALTER TABLE statements ADD COLUMN is_major_escalation INTEGER NOT NULL DEFAULT 0",
+    # Erwartete Bewegung (#3): nullable, damit alte Zeilen ohne diese Werte weiterhin
+    # ladbar bleiben (get_recent/get_pending_alerts nutzen row.get()).
+    "expected_move_pct": "ALTER TABLE statements ADD COLUMN expected_move_pct REAL",
+    "expected_horizon": "ALTER TABLE statements ADD COLUMN expected_horizon TEXT",
 }
 
 
@@ -108,6 +128,11 @@ class Classification:
     # so bedeutsame Verschaerfung/neue Entwicklung, dass ein erneuter Alert
     # gerechtfertigt ist.
     is_major_escalation: bool = False
+    # Grobe, von Claude geschaetzte erwartete Kursbewegung des staerksten Tickers in
+    # Prozent (Betrag, ohne Vorzeichen - die Richtung steckt in direction) und ein
+    # Zeithorizont ("Stunden"/"Tage"/"Wochen"). Optional; None, wenn keine Schaetzung.
+    expected_move_pct: Optional[float] = None
+    expected_horizon: Optional[str] = None
 
 
 @contextmanager
@@ -257,8 +282,9 @@ def insert_statement(
             INSERT OR IGNORE INTO statements
                 (source, source_id, text, url, published_at, ingested_at,
                  is_market_relevant, sentiment, confidence, tickers, sectors, reasoning,
-                 duplicate_of_id, related_topic_id, is_major_escalation)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 duplicate_of_id, related_topic_id, is_major_escalation,
+                 expected_move_pct, expected_horizon)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 raw.source,
@@ -276,6 +302,8 @@ def insert_statement(
                 duplicate_of_id,
                 classification.related_topic_id if classification else None,
                 int(classification.is_major_escalation) if classification else 0,
+                classification.expected_move_pct if classification else None,
+                classification.expected_horizon if classification else None,
             ),
         )
         if cur.rowcount == 0:
@@ -558,6 +586,120 @@ def get_calibration_stats() -> dict:
                                "hit_rate": (row["hits"] / row["n"]) if row["n"] else None}
             for row in by_direction
         },
+    }
+
+
+def record_ticker_alert(
+    statement_id: Optional[int], ticker: str, direction: Optional[str], alerted_at: float
+) -> None:
+    """Protokolliert einen tatsaechlich verschickten Alert fuer einen handelbaren
+    Ticker+Richtung (fuer den Cooldown, #6). Raeumt bei der Gelegenheit Eintraege aelter
+    als 30 Tage weg, damit die Tabelle nicht unbegrenzt waechst."""
+    with get_conn() as conn:
+        conn.execute(
+            "INSERT INTO ticker_alerts (statement_id, ticker, direction, alerted_at) "
+            "VALUES (?, ?, ?, ?)",
+            (statement_id, (ticker or "").upper(), direction, alerted_at),
+        )
+        conn.execute(
+            "DELETE FROM ticker_alerts WHERE alerted_at < ?", (alerted_at - 30 * 86400,)
+        )
+
+
+def ticker_in_cooldown(ticker: str, direction: Optional[str], since_ts: float) -> bool:
+    """True, wenn fuer diesen Ticker+Richtung seit since_ts bereits ein Alert
+    verschickt wurde (Cooldown noch aktiv, #6)."""
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT 1 FROM ticker_alerts WHERE ticker = ? AND direction = ? "
+            "AND alerted_at >= ? LIMIT 1",
+            ((ticker or "").upper(), direction, since_ts),
+        ).fetchone()
+    return row is not None
+
+
+def get_corroboration_count(statement_id: int) -> int:
+    """Wie viele DISTINKTE Quellen dieselbe Meldung gebracht haben (#15): die Meldung
+    selbst plus alle als Text-Duplikat auf sie zeigenden Meldungen. >1 = unabhaengig
+    bestaetigt (staerkeres Signal)."""
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT COUNT(DISTINCT source) AS c FROM statements "
+            "WHERE id = ? OR duplicate_of_id = ?",
+            (statement_id, statement_id),
+        ).fetchone()
+    return row["c"] or 1
+
+
+def get_ticker_hitrate(ticker: str) -> Optional[dict]:
+    """Historische Trefferquote fuer einen Ticker aus den bereits ausgewerteten
+    Ergebnissen (#9): {'n', 'hits', 'hit_rate'} oder None, wenn es noch keine
+    ausgewerteten Alerts fuer diesen Ticker gibt (dann wird im Alert nichts angezeigt)."""
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT COUNT(*) AS n, SUM(CASE WHEN correct = 1 THEN 1 ELSE 0 END) AS hits "
+            "FROM alert_outcomes WHERE ticker = ? AND correct IS NOT NULL",
+            ((ticker or "").upper(),),
+        ).fetchone()
+    n = row["n"] or 0
+    if n == 0:
+        return None
+    hits = row["hits"] or 0
+    return {"n": n, "hits": hits, "hit_rate": hits / n}
+
+
+def get_alerts_sent_today() -> int:
+    """Anzahl heute (seit Mitternacht UTC) verschickter Alerts - Metrik fuer /api/health."""
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT COUNT(*) AS c FROM ticker_alerts WHERE alerted_at >= ?",
+            (_utc_day_start_epoch(),),
+        ).fetchone()
+    return row["c"] or 0
+
+
+def get_performance_stats(limit: int = 5) -> dict:
+    """Aggregierte Performance der ausgewerteten Alerts (#11): Gesamtzahl, Trefferquote,
+    Durchschnittsrendite sowie die besten/schlechtesten Ticker nach mittlerer Rendite.
+    Nur Datensaetze mit vorliegender Nachmessung (return_pct IS NOT NULL)."""
+    with get_conn() as conn:
+        overall = conn.execute(
+            "SELECT COUNT(*) AS n, "
+            "SUM(CASE WHEN correct = 1 THEN 1 ELSE 0 END) AS hits, "
+            "AVG(return_pct) AS avg_return "
+            "FROM alert_outcomes WHERE return_pct IS NOT NULL"
+        ).fetchone()
+        by_ticker_rows = conn.execute(
+            """
+            SELECT ticker, COUNT(*) AS n,
+                   SUM(CASE WHEN correct = 1 THEN 1 ELSE 0 END) AS hits,
+                   AVG(return_pct) AS avg_return
+            FROM alert_outcomes
+            WHERE return_pct IS NOT NULL
+            GROUP BY ticker
+            ORDER BY avg_return DESC
+            """
+        ).fetchall()
+
+    n = overall["n"] or 0
+    hits = overall["hits"] or 0
+    by_ticker = [
+        {
+            "ticker": r["ticker"],
+            "n": r["n"],
+            "hits": r["hits"],
+            "hit_rate": (r["hits"] / r["n"]) if r["n"] else None,
+            "avg_return_pct": r["avg_return"],
+        }
+        for r in by_ticker_rows
+    ]
+    return {
+        "evaluated": n,
+        "hits": hits,
+        "hit_rate": (hits / n) if n else None,
+        "avg_return_pct": overall["avg_return"],
+        "best_tickers": by_ticker[:limit],
+        "worst_tickers": list(reversed(by_ticker[-limit:])) if by_ticker else [],
     }
 
 
