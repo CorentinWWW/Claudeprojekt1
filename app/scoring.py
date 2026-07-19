@@ -128,6 +128,34 @@ def position_tier(score: int) -> str:
     return "🟠 Sondierung"
 
 
+# --- Kelly-lite Positionsanteil (#5) ----------------------------------------------
+def kelly_fraction(
+    hit_rate: Optional[float],
+    avg_win_pct: Optional[float],
+    avg_loss_pct: Optional[float],
+    kelly_multiplier: float = 0.5,
+    cap: float = 0.25,
+) -> Optional[float]:
+    """Grober, UNVERBINDLICHER Bankroll-Anteil nach dem Kelly-Kriterium aus der
+    historischen Trefferquote und dem mittleren Gewinn/Verlust. Bewusst konservativ:
+    Half-Kelly (kelly_multiplier=0.5) und hart gedeckelt (cap, Standard 25%). Gibt einen
+    Anteil in [0, cap] zurueck - oder None, wenn die Eingaben unbrauchbar sind (keine
+    Historie, nicht-positiver Gewinn/Verlust). KEINE Anlageberatung.
+
+    f* = p - (1-p)/b   mit b = avg_win/avg_loss (Odds); negatives f* -> 0 (kein Edge)."""
+    if hit_rate is None or avg_win_pct is None or avg_loss_pct is None:
+        return None
+    if not (0.0 <= hit_rate <= 1.0):
+        return None
+    if avg_win_pct <= 0 or avg_loss_pct <= 0:
+        return None
+    b = avg_win_pct / avg_loss_pct
+    edge = hit_rate - (1.0 - hit_rate) / b
+    if edge <= 0:
+        return 0.0
+    return min(cap, edge * kelly_multiplier)
+
+
 # --- Erwartete Bewegung (#3) ------------------------------------------------------
 def format_expected_move(expected_move_pct, expected_horizon) -> str:
     """Kompakte Anzeige der von Claude geschaetzten erwarteten Kursbewegung + Horizont,

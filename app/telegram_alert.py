@@ -328,6 +328,29 @@ def _format_message(
     if isinstance(corroboration, int) and corroboration > 1:
         trailing += f"\n✅ bestätigt durch {corroboration} Quellen"
 
+    # Grober, unverbindlicher Positionsanteil (Half-Kelly, #5).
+    kelly = extras.get("kelly_fraction")
+    if isinstance(kelly, (int, float)) and kelly > 0:
+        trailing += f"\n💰 Positionsanteil (Half-Kelly, unverbindlich) ~{kelly * 100:.0f}% des Einsatzkapitals"
+
+    # Richtungswechsel gegenueber dem letzten Alert fuer denselben Ticker (#2).
+    flip = extras.get("direction_flip")
+    if isinstance(flip, str) and flip:
+        trailing += f"\n⟳ Richtungswechsel ggü. letztem Alert (vorher {html.escape(flip)})"
+
+    # Sektor-Cluster (#4): mehrere Werte einer Branche zuletzt alarmiert.
+    cluster = extras.get("sector_cluster")
+    if isinstance(cluster, dict) and cluster.get("sector") and cluster.get("count"):
+        trailing += (
+            f"\n🧩 Sektor-Cluster: {html.escape(str(cluster['sector']))} "
+            f"({cluster['count']} Meldungen zuletzt)"
+        )
+
+    # Kurs laeuft bereits gegen die These (#3).
+    divergence = extras.get("divergence")
+    if isinstance(divergence, str) and divergence:
+        trailing += f"\n⚠️ Kurs läuft bereits gegen die These: {html.escape(divergence)}"
+
     if extras.get("hedged"):
         trailing += "\n🗣 unbestätigt/Gerücht – mit Vorsicht behandeln"
 

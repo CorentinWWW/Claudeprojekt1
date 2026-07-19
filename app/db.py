@@ -703,6 +703,120 @@ def get_performance_stats(limit: int = 5) -> dict:
     }
 
 
+def count_alerted_statements_since(since_ts: float) -> int:
+    """Anzahl DISTINKTER alarmierter Statements seit since_ts (fuer das Alerts-pro-Stunde-
+    Ratelimit, #6). ticker_alerts hat eine Zeile pro Ticker - hier zaehlen aber die
+    Meldungen (= Nachrichten), daher DISTINCT statement_id."""
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT COUNT(DISTINCT statement_id) AS c FROM ticker_alerts WHERE alerted_at >= ?",
+            (since_ts,),
+        ).fetchone()
+    return row["c"] or 0
+
+
+def get_last_alert_direction(ticker: str, since_ts: float) -> Optional[str]:
+    """Zuletzt fuer diesen Ticker alarmierte Richtung ('long'/'short') seit since_ts -
+    fuer die Richtungswechsel-Erkennung (#2). None, wenn es keinen juengeren Alert gibt."""
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT direction FROM ticker_alerts WHERE ticker = ? AND alerted_at >= ? "
+            "ORDER BY alerted_at DESC LIMIT 1",
+            ((ticker or "").upper(), since_ts),
+        ).fetchone()
+    return row["direction"] if row else None
+
+
+def get_recent_alerted_sector_counts(hours: int) -> dict:
+    """Wie oft je Sektor in den letzten `hours` Stunden alarmiert wurde (fuer den
+    Sektor-Cluster-Hinweis, #4). Sektoren stehen als JSON-Liste in statements.sectors."""
+    cutoff = time.time() - hours * 3600
+    counts: dict[str, int] = {}
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT sectors FROM statements WHERE alert_sent = 1 AND ingested_at >= ?",
+            (cutoff,),
+        ).fetchall()
+    for row in rows:
+        try:
+            sectors = json.loads(row["sectors"]) if row["sectors"] else []
+        except (TypeError, ValueError):
+            continue
+        for sec in sectors:
+            if isinstance(sec, str) and sec.strip():
+                key = sec.strip()
+                counts[key] = counts.get(key, 0) + 1
+    return counts
+
+
+def get_source_reliability() -> list[dict]:
+    """Trefferquote je Quelle (#7): verbindet die ausgewerteten Ergebnisse mit der Quelle
+    des ausloesenden Statements. Nur Datensaetze mit vorliegender Nachmessung."""
+    with get_conn() as conn:
+        rows = conn.execute(
+            """
+            SELECT s.source AS source, COUNT(*) AS n,
+                   SUM(CASE WHEN o.correct = 1 THEN 1 ELSE 0 END) AS hits,
+                   AVG(o.return_pct) AS avg_return
+            FROM alert_outcomes o JOIN statements s ON o.statement_id = s.id
+            WHERE o.correct IS NOT NULL
+            GROUP BY s.source
+            ORDER BY n DESC
+            """
+        ).fetchall()
+    return [
+        {"source": r["source"], "n": r["n"], "hits": r["hits"],
+         "hit_rate": (r["hits"] / r["n"]) if r["n"] else None,
+         "avg_return_pct": r["avg_return"]}
+        for r in rows
+    ]
+
+
+def get_kelly_inputs() -> dict:
+    """Eingaben fuer den Kelly-lite Positionsanteil (#5): Gesamt-Trefferquote sowie
+    mittlerer GEWINN- und VERLUST-Betrag (jeweils |return_pct|) aus den ausgewerteten
+    Ergebnissen. hit_rate/avg_win_pct/avg_loss_pct sind None, wenn es dafuer keine Daten
+    gibt."""
+    with get_conn() as conn:
+        overall = conn.execute(
+            "SELECT COUNT(*) AS n, SUM(CASE WHEN correct = 1 THEN 1 ELSE 0 END) AS hits "
+            "FROM alert_outcomes WHERE correct IS NOT NULL"
+        ).fetchone()
+        win = conn.execute(
+            "SELECT AVG(ABS(return_pct)) AS a FROM alert_outcomes "
+            "WHERE correct = 1 AND return_pct IS NOT NULL"
+        ).fetchone()
+        loss = conn.execute(
+            "SELECT AVG(ABS(return_pct)) AS a FROM alert_outcomes "
+            "WHERE correct = 0 AND return_pct IS NOT NULL"
+        ).fetchone()
+    n = overall["n"] or 0
+    return {
+        "hit_rate": (overall["hits"] / n) if n else None,
+        "avg_win_pct": win["a"],
+        "avg_loss_pct": loss["a"],
+        "n": n,
+    }
+
+
+def get_outcomes_for_export(limit: int = 1000) -> list[dict]:
+    """Ausgewertete (und offene) Ergebnis-Datensaetze fuer den CSV-Export (#9), inkl.
+    Quelle des ausloesenden Statements. Neueste zuerst."""
+    with get_conn() as conn:
+        rows = conn.execute(
+            """
+            SELECT o.id, o.statement_id, s.source AS source, o.ticker, o.direction,
+                   o.confidence, o.alert_ts, o.alert_price, o.followup_ts,
+                   o.followup_price, o.return_pct, o.correct
+            FROM alert_outcomes o LEFT JOIN statements s ON o.statement_id = s.id
+            ORDER BY o.alert_ts DESC
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
 def get_stats() -> dict:
     with get_conn() as conn:
         total = conn.execute("SELECT COUNT(*) AS c FROM statements").fetchone()["c"]

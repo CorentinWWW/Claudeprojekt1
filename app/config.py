@@ -124,6 +124,38 @@ QUIET_HOURS = _str("QUIET_HOURS")
 QUIET_HOURS_TZ = _str("QUIET_HOURS_TZ", "Europe/Berlin")
 QUIET_HOURS_MIN_CONVICTION = _int("QUIET_HOURS_MIN_CONVICTION", 90)
 
+# Globales Ueberzeugungs-Gate: es wird NUR alarmiert, wenn der (Claude-freie)
+# Ueberzeugungs-Score >= diesem Wert (0-100) ist. Ein einziger, geldorientierter Regler
+# oberhalb der Ticker-Konfidenz-Schwelle - beruecksichtigt zusaetzlich Frische, Quellen-
+# Bestaetigung und Hedge-/Volatilitaets-Abschlag. 0 = aus. Unterdrueckte Meldungen
+# bleiben unmarkiert und werden vom Resend-Pfad erneut versucht (falls der Score spaeter
+# z.B. durch eine bestaetigende zweite Quelle steigt).
+ALERT_MIN_CONVICTION = _int("ALERT_MIN_CONVICTION", 0)
+
+# Anti-Fatigue-Ratelimit: hoechstens so viele ALERT-Meldungen pro rollierender Stunde.
+# Bei Ueberschreitung werden die ueberzaehligen (nach Ueberzeugung schwaecheren) Meldungen
+# zurueckgestellt und vom Resend-Pfad spaeter erneut versucht, sobald das Fenster wieder
+# Luft hat. 0 = aus (keine Begrenzung).
+MAX_ALERTS_PER_HOUR = _int("MAX_ALERTS_PER_HOUR", 0)
+
+# Sektor-Cluster-Hinweis (#4): tauchen innerhalb von SECTOR_CLUSTER_WINDOW_HOURS
+# mindestens SECTOR_CLUSTER_MIN alarmierte Meldungen zu DEMSELBEN Sektor auf, markiert der
+# Alert das als Cluster (mehrere Werte einer Branche bewegen sich = staerkeres Makro-
+# Signal). Rein informativ. MIN <= 1 schaltet den Hinweis ab.
+SECTOR_CLUSTER_MIN = _int("SECTOR_CLUSTER_MIN", 3)
+SECTOR_CLUSTER_WINDOW_HOURS = _int("SECTOR_CLUSTER_WINDOW_HOURS", 6)
+
+# Kurs-Divergenz-Warnung (#3): laeuft der Kurs am Alarm-Tag bereits um mehr als so viele
+# Prozentpunkte GEGEN die eingeschaetzte Richtung (z.B. long, aber schon -X% heute),
+# warnt der Alert. Nur mit ENABLE_PRICE_TRACKING (braucht die heutige Bewegung). 0 = aus.
+DIVERGENCE_WARN_PCT = _float("DIVERGENCE_WARN_PCT", 2.0)
+
+# Kelly-lite Positionsanteil (#5): aus der historischen Trefferquote + mittlerem Gewinn/
+# Verlust einen groben, ausdruecklich unverbindlichen Bankroll-Anteil (Half-Kelly,
+# gedeckelt) ableiten und im Alert anzeigen. Braucht ausgewertete Ergebnisse
+# (ENABLE_PRICE_TRACKING). Keine Anlageberatung.
+ENABLE_KELLY_SUGGESTION = _bool("ENABLE_KELLY_SUGGESTION", True)
+
 # --- Ueberzeugungs-Score / Anreicherung ---
 # Verdichtete Ueberzeugungs-Zahl (0-100) aus Konfidenzen + Frische + Quellen-
 # Korroboration + Hedge-/Volatilitaets-Abschlag im Alert anzeigen (#1), samt grober,
@@ -311,6 +343,43 @@ def validate() -> tuple[list[str], list[str]]:
             "das echte Claude-Calls + Telegram-Alerts ausloesen kann) sind ungeschuetzt "
             "erreichbar. Falls das Dashboard oeffentlich erreichbar ist (z.B. Oracle-Cloud-"
             "Anleitung mit offenem Port 8000), dringend einen Wert setzen."
+        )
+
+    # --- Validierung der optionalen Zustell-Gates / Anreicherungs-Knoepfe (#10) ---
+    # Eine still ins Leere laufende Fehlkonfiguration ('warum kommen keine Alerts?') soll
+    # als Warnung sichtbar werden, statt das Verhalten unbemerkt zu veraendern.
+    if QUIET_HOURS:
+        from app.scoring import parse_hour_window
+        if parse_hour_window(QUIET_HOURS) is None:
+            warnings.append(
+                f"QUIET_HOURS='{QUIET_HOURS}' ist kein gueltiges Fenster (erwartet "
+                "'START-ENDE' mit ganzen Stunden 0-23, z.B. '23-7') - Ruhezeiten sind "
+                "damit unwirksam."
+            )
+    if QUIET_HOURS:
+        try:
+            from zoneinfo import ZoneInfo
+            ZoneInfo(QUIET_HOURS_TZ)
+        except Exception:
+            warnings.append(
+                f"QUIET_HOURS_TZ='{QUIET_HOURS_TZ}' ist keine bekannte Zeitzone - "
+                "die Ruhezeit wird ersatzweise in UTC ausgewertet."
+            )
+    if ALERT_MIN_CONVICTION > 100:
+        warnings.append(
+            f"ALERT_MIN_CONVICTION={ALERT_MIN_CONVICTION} liegt ueber 100 - kein Alert "
+            "kann diese Schwelle je erreichen, es wuerde also NIE alarmiert."
+        )
+    if not (0 <= WEEKLY_DIGEST_WEEKDAY <= 6):
+        warnings.append(
+            f"WEEKLY_DIGEST_WEEKDAY={WEEKLY_DIGEST_WEEKDAY} liegt ausserhalb 0-6 "
+            "(Montag=0..Sonntag=6) - der Wochen-Digest wird nie verschickt."
+        )
+    if MAX_ALERTS_PER_HOUR < 0 or MAX_NEWS_AGE_MINUTES < 0 or TICKER_ALERT_COOLDOWN_MINUTES < 0:
+        warnings.append(
+            "Ein Zustell-Gate (MAX_ALERTS_PER_HOUR / MAX_NEWS_AGE_MINUTES / "
+            "TICKER_ALERT_COOLDOWN_MINUTES) ist negativ - negativ wird wie 'aus' (0) "
+            "behandelt."
         )
 
     return errors, warnings

@@ -10,14 +10,17 @@ from app.classifier import CONTEXT_SNIPPET_MAX_CHARS, DailyCapExceeded, FALLBACK
 from app.config import (
     ALERT_CONFIDENCE_THRESHOLD,
     ALERT_DIGEST_THRESHOLD,
+    ALERT_MIN_CONVICTION,
     ALERT_MIN_EXPECTED_MOVE_PCT,
     ALERT_MIN_TICKER_CONFIDENCE,
     BLOCKLIST_TICKERS,
     CLAUDE_ESCALATION_MODEL,
     DEDUP_SIMILARITY_THRESHOLD,
+    DIVERGENCE_WARN_PCT,
     ENABLE_BORDERLINE_ESCALATION,
     ENABLE_CONVICTION_SCORE,
     ENABLE_HISTORICAL_HITRATE,
+    ENABLE_KELLY_SUGGESTION,
     ENABLE_LIVE_AUDIO,
     ENABLE_NEWS,
     ENABLE_PREFILTER,
@@ -27,6 +30,7 @@ from app.config import (
     ENABLE_WEEKLY_DIGEST,
     ESCALATION_BAND,
     LIVE_AUDIO_STREAM_URLS,
+    MAX_ALERTS_PER_HOUR,
     MAX_CLASSIFICATIONS_PER_DAY,
     MAX_CONCURRENT_CLASSIFICATIONS,
     MAX_NEWS_AGE_MINUTES,
@@ -36,6 +40,8 @@ from app.config import (
     QUIET_HOURS,
     QUIET_HOURS_MIN_CONVICTION,
     QUIET_HOURS_TZ,
+    SECTOR_CLUSTER_MIN,
+    SECTOR_CLUSTER_WINDOW_HOURS,
     TELEGRAM_STARTUP_NOTICE,
     TICKER_ALERT_COOLDOWN_MINUTES,
     TICKER_UNIVERSE,
@@ -50,13 +56,17 @@ from app.config import (
 from app.db import (
     Classification,
     RawStatement,
+    count_alerted_statements_since,
     get_corroboration_count,
     get_dedup_candidates,
+    get_kelly_inputs,
     get_known_source_ids,
+    get_last_alert_direction,
     get_outcomes_awaiting_followup,
     get_pending_alerts,
     get_performance_stats,
     get_recent_alerted,
+    get_recent_alerted_sector_counts,
     get_ticker_hitrate,
     get_topic_thread,
     init_db,
@@ -75,6 +85,7 @@ from app.scoring import (
     has_hedge_language,
     high_volatility_text,
     hour_in_window,
+    kelly_fraction,
     parse_hour_window,
     position_tier,
 )
@@ -107,7 +118,46 @@ logger = logging.getLogger(__name__)
 # In-memory Health-Status pro Quelle, fuer /api/health. Muss nicht persistiert werden -
 # nach einem Neustart baut sich der Status einfach durch die naechsten Polls neu auf.
 source_health: dict[str, dict] = {}
-run_health: dict = {"started_at": None, "loop_restarts": 0, "last_cycle_at": None}
+run_health: dict = {
+    "started_at": None,
+    "loop_restarts": 0,
+    "last_cycle_at": None,
+    # Zyklus-Timing (#11): letzte Dauer + die letzten N Dauern fuer einen gleitenden
+    # Durchschnitt in /api/health (macht sichtbar, ob ein Poll-Zyklus langsam wird).
+    "last_cycle_seconds": None,
+    "recent_cycle_seconds": [],
+}
+_MAX_CYCLE_SAMPLES = 20
+
+
+def active_gates() -> dict:
+    """Uebersicht (#12), welche optionalen, verhaltensaendernden Gates/Features gerade
+    aktiv sind - fuer den Startup-Log und /api/health. So ist eine Fehlkonfiguration
+    ('warum kommen keine Alerts mehr?') sofort sichtbar, statt sich in vielen einzelnen
+    Env-Variablen zu verstecken. None/false = aus."""
+    return {
+        "prefilter": ENABLE_PREFILTER,
+        "stale_filter_minutes": MAX_NEWS_AGE_MINUTES or None,
+        "ticker_cooldown_minutes": TICKER_ALERT_COOLDOWN_MINUTES or None,
+        "quiet_hours": QUIET_HOURS or None,
+        "min_conviction": ALERT_MIN_CONVICTION or None,
+        "max_alerts_per_hour": MAX_ALERTS_PER_HOUR or None,
+        "ticker_universe": len(TICKER_UNIVERSE) or None,
+        "min_expected_move_pct": ALERT_MIN_EXPECTED_MOVE_PCT or None,
+        "watchlist": bool(WATCHLIST_TICKERS or WATCHLIST_SECTORS),
+        "blocklist": len(BLOCKLIST_TICKERS) or None,
+        "price_tracking": ENABLE_PRICE_TRACKING,
+        "borderline_escalation": ENABLE_BORDERLINE_ESCALATION,
+        "weekly_digest": ENABLE_WEEKLY_DIGEST,
+    }
+
+
+def _record_cycle_duration(seconds: float) -> None:
+    run_health["last_cycle_seconds"] = seconds
+    samples = run_health["recent_cycle_seconds"]
+    samples.append(seconds)
+    if len(samples) > _MAX_CYCLE_SAMPLES:
+        del samples[: len(samples) - _MAX_CYCLE_SAMPLES]
 
 # Wortgrenzen-Muster fuer die "besonders wichtig"-Einstufung (siehe is_high_priority).
 # Bewusst STRENGER als der GDELT-Ingestion-Filter (der schon 'market'/'stock'/'trade'
@@ -603,15 +653,65 @@ async def _build_alert_extras(raw, classification, statement_id, score, corrobor
     if price_ctx.get("risk"):
         extras["ticker_risk"] = price_ctx["risk"]
 
+    actionable = actionable_tickers(classification)
+
     if ENABLE_HISTORICAL_HITRATE:
         hitrates = {}
-        for tc in actionable_tickers(classification):
+        for tc in actionable:
             ticker = (tc.get("ticker") or "").upper()
             hr = get_ticker_hitrate(ticker)
             if hr:
                 hitrates[ticker] = hr
         if hitrates:
             extras["ticker_hitrate"] = hitrates
+
+    # Richtungswechsel (#2): weicht die Richtung des staerksten Tickers von der zuletzt
+    # fuer ihn alarmierten Richtung ab (innerhalb 48h)?
+    if actionable:
+        top = max(actionable, key=lambda tc: tc.get("confidence") or 0.0)
+        ticker = (top.get("ticker") or "").upper()
+        prev = get_last_alert_direction(ticker, time.time() - 48 * 3600)
+        if prev and top.get("direction") in ("long", "short") and prev != top.get("direction"):
+            extras["direction_flip"] = prev
+
+    # Sektor-Cluster (#4): mehrere Werte derselben Branche zuletzt alarmiert.
+    if SECTOR_CLUSTER_MIN > 1 and classification is not None and classification.sectors:
+        counts = get_recent_alerted_sector_counts(SECTOR_CLUSTER_WINDOW_HOURS)
+        best = None
+        for sec in classification.sectors:
+            if not isinstance(sec, str):
+                continue
+            total = counts.get(sec.strip(), 0) + 1  # + diese Meldung selbst
+            if total >= SECTOR_CLUSTER_MIN and (best is None or total > best["count"]):
+                best = {"sector": sec.strip(), "count": total}
+        if best:
+            extras["sector_cluster"] = best
+
+    # Kurs-Divergenz (#3): laeuft der Kurs heute bereits gegen die These?
+    if DIVERGENCE_WARN_PCT > 0 and price_ctx.get("change"):
+        against = []
+        for tc in actionable:
+            ticker = (tc.get("ticker") or "").upper()
+            change = price_ctx["change"].get(ticker)
+            if not isinstance(change, (int, float)):
+                continue
+            direction = tc.get("direction")
+            if (direction == "long" and change <= -DIVERGENCE_WARN_PCT) or (
+                direction == "short" and change >= DIVERGENCE_WARN_PCT
+            ):
+                against.append(f"{ticker} heute {change:+.1f}%")
+        if against:
+            extras["divergence"] = ", ".join(against)
+
+    # Kelly-lite Positionsanteil (#5): global aus der bisherigen Trefferquote/Gewinn/
+    # Verlust. Erst ab genuegend ausgewerteten Ergebnissen, damit die Zahl nicht auf
+    # zwei Zufallstreffern beruht.
+    if ENABLE_KELLY_SUGGESTION:
+        ki = get_kelly_inputs()
+        if (ki.get("n") or 0) >= 10:
+            f = kelly_fraction(ki["hit_rate"], ki["avg_win_pct"], ki["avg_loss_pct"])
+            if f and f > 0:
+                extras["kelly_fraction"] = f
 
     if classification is not None and classification.related_topic_id is not None:
         thread = get_topic_thread(classification.related_topic_id)
@@ -685,6 +785,13 @@ async def _send_alerts(alert_worthy: list[tuple]):
     gated: list[tuple] = []
     for raw, classification, statement_id in alert_worthy:
         score, corroboration, hedged = _compute_conviction(raw, classification, statement_id)
+        if ALERT_MIN_CONVICTION > 0 and score < ALERT_MIN_CONVICTION:
+            logger.info(
+                "[%s] Alert unter globaler Ueberzeugungs-Schwelle (%d < %d) - "
+                "zurueckgestellt: %s",
+                raw.source, score, ALERT_MIN_CONVICTION, raw.text[:80],
+            )
+            continue
         if not _passes_cooldown(classification):
             logger.info(
                 "[%s] Alert unterdrueckt (Ticker-Cooldown aktiv): %s",
@@ -701,6 +808,29 @@ async def _send_alerts(alert_worthy: list[tuple]):
 
     if not gated:
         return
+
+    # Anti-Fatigue-Ratelimit (#6): hoechstens MAX_ALERTS_PER_HOUR Meldungen je rollierender
+    # Stunde. Ueberzaehlige (nach Ueberzeugung schwaechere) werden zurueckgestellt und vom
+    # Resend-Pfad spaeter erneut versucht. 0 = aus.
+    if MAX_ALERTS_PER_HOUR > 0:
+        already = count_alerted_statements_since(time.time() - 3600)
+        allowance = MAX_ALERTS_PER_HOUR - already
+        if allowance <= 0:
+            logger.info(
+                "Alert-Ratelimit erreicht (%d/Std bereits verschickt) - %d Meldung(en) "
+                "zurueckgestellt, werden spaeter erneut versucht.",
+                already, len(gated),
+            )
+            return
+        if len(gated) > allowance:
+            gated.sort(key=lambda t: t[3], reverse=True)  # staerkste Ueberzeugung zuerst
+            deferred = len(gated) - allowance
+            gated = gated[:allowance]
+            logger.info(
+                "Alert-Ratelimit: nur die %d ueberzeugendsten Meldung(en) jetzt, "
+                "%d zurueckgestellt (Resend spaeter).",
+                allowance, deferred,
+            )
 
     if len(gated) <= ALERT_DIGEST_THRESHOLD:
         for raw, classification, statement_id, score, corroboration, hedged in gated:
@@ -978,6 +1108,12 @@ async def _poll_loop():
     init_db()
     sources = build_sources()
     logger.info("Aktive Quellen: %s", [s.name for s in sources])
+    # Uebersicht der aktiven optionalen Gates/Features (#12) - macht Fehlkonfiguration
+    # ('warum kommen keine Alerts?') schon im Log sofort sichtbar.
+    logger.info(
+        "Aktive optionale Gates/Features: %s",
+        {k: v for k, v in active_gates().items() if v},
+    )
 
     if TELEGRAM_STARTUP_NOTICE:
         await send_startup_notice([s.name for s in sources])
@@ -994,6 +1130,7 @@ async def _poll_loop():
         run_health["last_cycle_at"] = time.time()
 
         elapsed = time.time() - cycle_start
+        _record_cycle_duration(elapsed)  # #11: Zyklus-Timing fuer /api/health
         await asyncio.sleep(max(1.0, POLL_INTERVAL_SECONDS - elapsed))
 
 

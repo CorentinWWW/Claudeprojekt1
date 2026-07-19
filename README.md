@@ -258,6 +258,34 @@ Chunks (Standard 30s), keine Wort-für-Wort-Live-Transkription.
   15. **Multi-Quellen-Korroboration** – wird dieselbe Meldung von mehreren unabhängigen
       Quellen gebracht, zeigt der Alert „bestätigt durch N Quellen" und der Score steigt.
   Sämtliche Marken/Scores sind Analyse-Hilfen, **keine Anlageberatung**.
+- **Money-, Kontext- & Analytics-Ausbau (12 weitere Verbesserungen)**: dritte Runde,
+  wieder ohne zusätzlichen Claude-Call; verhaltensändernde Gates sind standardmäßig aus:
+  1. **Globales Überzeugungs-Gate** (`ALERT_MIN_CONVICTION`) – ein einziger, geld-
+     orientierter Regler: Alert nur ab Score ≥ Schwelle (0–100).
+  2. **Richtungswechsel-Flag** – kippt die Einschätzung eines Tickers gegenüber dem
+     letzten Alert (z.B. erst long, jetzt short), warnt der Alert „⟳ Richtungswechsel".
+  3. **Kurs-Divergenz-Warnung** (`DIVERGENCE_WARN_PCT`) – läuft der Kurs heute schon
+     gegen die These, „⚠️ Kurs läuft bereits gegen die These" (mit Preis-Tracking).
+  4. **Sektor-Cluster-Hinweis** (`SECTOR_CLUSTER_MIN`) – mehrere Werte einer Branche
+     zuletzt alarmiert = stärkeres Makro-Signal → „🧩 Sektor-Cluster".
+  5. **Kelly-lite Positionsanteil** (`ENABLE_KELLY_SUGGESTION`) – grober, unverbindlicher
+     Bankroll-Anteil (Half-Kelly, gedeckelt) aus der historischen Trefferquote.
+  6. **Anti-Fatigue-Ratelimit** (`MAX_ALERTS_PER_HOUR`) – höchstens N Alerts/Stunde; die
+     überzeugendsten zuerst, der Rest wird über den Resend-Pfad nachgeschickt.
+  7. **Trefferquote je Quelle** – welche Quelle historisch zuverlässiger war
+     (`/api/performance`, Feld `by_source`).
+  8. **Schwellen-Empfehlung** – `/api/calibration` schlägt aus den Backtesting-Buckets
+     eine belegte `ALERT_MIN_TICKER_CONFIDENCE`-Untergrenze vor.
+  9. **CSV-Export** (`/api/outcomes.csv`) – alle Ergebnis-Datensätze für die Offline-
+     Analyse (Spreadsheet).
+  10. **Config-Validierung** – `validate()` warnt bei unsinnigen neuen Einstellungen
+      (ungültige `QUIET_HOURS`, `ALERT_MIN_CONVICTION` > 100, `WEEKLY_DIGEST_WEEKDAY`
+      außerhalb 0–6 …), statt still ins Leere zu laufen.
+  11. **Zyklus-Timing** – `/api/health` zeigt `last_cycle_seconds` + gleitenden
+      Durchschnitt (wird ein Poll-Zyklus langsam?).
+  12. **Aktive-Gates-Übersicht** – Startup-Log und `/api/health` (`active_gates`) zeigen
+      auf einen Blick, welche optionalen Gates gerade Alerts beeinflussen.
+  Auch hier: alles Analyse-Hilfen, **keine Anlageberatung**.
 - **Echte Nachrichtenzeit + Alter im Alert**: statt eines bloßen „gerade erfasst"-
   Zeitstempels liest jede Quelle jetzt die **tatsächliche Veröffentlichungszeit** aus
   (GDELT `seendate`, RSS `published_parsed`, Truth Social `created_at`; Fallback auf
@@ -565,6 +593,11 @@ Siehe `.env.example` für alle Variablen. Wichtige zusätzliche Stellschrauben:
 | `MAX_NEWS_AGE_MINUTES` | Stale-News-Filter: ältere Meldungen gar nicht erst klassifizieren (spart Calls); `0` = aus |
 | `TICKER_ALERT_COOLDOWN_MINUTES` | Ticker-Cooldown: gleicher Ticker+Richtung nicht erneut alarmieren innerhalb des Fensters; `0` = aus |
 | `QUIET_HOURS` / `QUIET_HOURS_TZ` / `QUIET_HOURS_MIN_CONVICTION` | Ruhezeiten (`START-ENDE`, lokale Zeit): nachts nur Alerts ≥ Überzeugungs-Schwelle sofort, der Rest wird nach Fensterende nachgeschickt; leer = aus |
+| `ALERT_MIN_CONVICTION` | Globales Gate: Alert nur ab Überzeugungs-Score ≥ diesem Wert (0–100); `0` = aus |
+| `MAX_ALERTS_PER_HOUR` | Anti-Fatigue-Ratelimit: max. N Alerts je rollierender Stunde, überzählige werden zurückgestellt; `0` = aus |
+| `SECTOR_CLUSTER_MIN` / `SECTOR_CLUSTER_WINDOW_HOURS` | Sektor-Cluster-Hinweis ab N Meldungen derselben Branche im Fenster (`MIN ≤ 1` = aus) |
+| `DIVERGENCE_WARN_PCT` | Warnen, wenn der Kurs heute ≥ X% gegen die These läuft (nur mit Preis-Tracking); `0` = aus |
+| `ENABLE_KELLY_SUGGESTION` | Kelly-lite Positionsanteil im Alert (braucht ausgewertete Ergebnisse) |
 | `ENABLE_MARKET_SESSION_INFO` | US-Börsen-Session (offen/vor-/nachbörslich/zu) im Alert (Standard an) (#7) |
 | `ENABLE_VOLATILITY_FLAG` | High-Volatility-Hinweis im Alert bei Zöllen/Sanktionen/Fed etc. (Standard an) (#6) |
 | `ENABLE_CHART_BUTTONS` / `CHART_URL_TEMPLATE` | Inline-Chart-Buttons pro handelbarem Ticker (TradingView), `{ticker}` wird ersetzt (Standard an) (#9) |
@@ -611,9 +644,10 @@ Einschätzung abgleichen).
 | `GET /` | Dashboard | – |
 | `GET /api/statements?limit=&only_relevant=` | Feed als JSON | `X-API-Key`, falls `DASHBOARD_API_KEY` gesetzt |
 | `GET /api/stats` | Aggregierte Statistik | `X-API-Key`, falls `DASHBOARD_API_KEY` gesetzt |
-| `GET /api/calibration` | Trefferquote gesamt / je Konfidenz-Bucket / je Richtung (nur mit Preis-Tracking befüllt) | `X-API-Key`, falls `DASHBOARD_API_KEY` gesetzt |
-| `GET /api/performance` | Aggregierte Performance + beste/schlechteste Ticker nach Ø-Rendite (nur mit Preis-Tracking befüllt) | `X-API-Key`, falls `DASHBOARD_API_KEY` gesetzt |
-| `GET /api/health` | Status pro Quelle (inkl. `prefiltered`/`stale`), Konfigurationsfehler/-warnungen, Uptime, heutiger Verbrauch des Tages-Kostendeckels (`classification_calls_today`/`_limit`) sowie `alerts_sent_today` | – (bewusst offen für Uptime-Checks) |
+| `GET /api/calibration` | Trefferquote gesamt / je Konfidenz-Bucket / je Richtung + Schwellen-Empfehlung (`recommendation`), nur mit Preis-Tracking befüllt | `X-API-Key`, falls `DASHBOARD_API_KEY` gesetzt |
+| `GET /api/performance` | Aggregierte Performance + beste/schlechteste Ticker, Trefferquote je Quelle (`by_source`) und Kelly-lite Anteil (nur mit Preis-Tracking befüllt) | `X-API-Key`, falls `DASHBOARD_API_KEY` gesetzt |
+| `GET /api/outcomes.csv` | Alle Ergebnis-Datensätze als CSV für die Offline-Analyse | `X-API-Key`, falls `DASHBOARD_API_KEY` gesetzt |
+| `GET /api/health` | Status pro Quelle (inkl. `prefiltered`/`stale`), Konfigurationsfehler/-warnungen, Uptime, `classification_calls_today`/`_limit`, `alerts_sent_today`, Zyklus-Timing (`last_cycle_seconds`/`avg_cycle_seconds`) und `active_gates` | – (bewusst offen für Uptime-Checks) |
 | `POST /api/test` | Beliebigen Text durch die volle Pipeline schicken (siehe oben), max. 4000 Zeichen | `X-API-Key`, falls `DASHBOARD_API_KEY` gesetzt |
 
 ## Tests

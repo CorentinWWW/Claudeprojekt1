@@ -1,10 +1,12 @@
 import asyncio
+import csv
 import hmac
+import io
 import logging
 import time
 
 from fastapi import Depends, FastAPI, Header, HTTPException
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -15,14 +17,18 @@ from app.db import (
     get_alerts_sent_today,
     get_calibration_stats,
     get_classification_calls_today,
+    get_kelly_inputs,
+    get_outcomes_for_export,
     get_performance_stats,
     get_recent,
+    get_source_reliability,
     get_stats,
     init_db,
     insert_statement,
     mark_alert_sent,
 )
-from app.orchestrator import is_alert_worthy, run_forever, run_health, source_health
+from app.orchestrator import active_gates, is_alert_worthy, run_forever, run_health, source_health
+from app.scoring import kelly_fraction
 from app.telegram_alert import send_alert
 
 logger = logging.getLogger(__name__)
@@ -99,22 +105,80 @@ def api_stats():
     return get_stats()
 
 
+def _recommend_min_confidence(calibration: dict, min_samples: int = 5) -> dict | None:
+    """Empfiehlt aus der Kalibrierung eine ALERT_MIN_TICKER_CONFIDENCE-Untergrenze: den
+    niedrigsten Konfidenz-Bucket (mit genug Datenpunkten), ab dem die Trefferquote noch
+    ueberzeugend ist - so wird die Schwelle vom Bauchgefuehl zum belegten Wert. None,
+    wenn es noch zu wenig Daten gibt."""
+    buckets = [
+        b for b in (calibration.get("by_confidence_bucket") or [])
+        if (b.get("n") or 0) >= min_samples and b.get("hit_rate") is not None
+    ]
+    if not buckets:
+        return None
+    # Bester Bucket nach Trefferquote; bei Gleichstand der mit mehr Datenpunkten.
+    best = max(buckets, key=lambda b: (b["hit_rate"], b["n"]))
+    # bucket-Label ist z.B. "80-90%"; die Untergrenze als Empfehlung nehmen.
+    try:
+        lower = int(str(best["bucket"]).split("-")[0].replace("%", ""))
+        recommended = round(lower / 100.0, 2)
+    except (ValueError, KeyError):
+        recommended = None
+    return {
+        "recommended_min_ticker_confidence": recommended,
+        "based_on_bucket": best["bucket"],
+        "bucket_hit_rate": best["hit_rate"],
+        "bucket_n": best["n"],
+    }
+
+
 @app.get("/api/calibration", dependencies=[Depends(require_api_key)])
 def api_calibration():
     """Echte Trefferquote der bisherigen Alerts (#3, nur mit ENABLE_PRICE_TRACKING
     befuellt): wie oft sich der Kurs tatsaechlich in die eingeschaetzte Richtung
-    bewegt hat - insgesamt, je Konfidenz-Bucket und je Richtung. Damit wird die
-    ALERT_MIN_TICKER_CONFIDENCE-Schwelle vom Bauchgefuehl zum belegten Wert."""
-    return get_calibration_stats()
+    bewegt hat - insgesamt, je Konfidenz-Bucket und je Richtung. Plus eine daraus
+    abgeleitete Schwellen-Empfehlung (#8). Damit wird die ALERT_MIN_TICKER_CONFIDENCE-
+    Schwelle vom Bauchgefuehl zum belegten Wert."""
+    stats = get_calibration_stats()
+    stats["recommendation"] = _recommend_min_confidence(stats)
+    return stats
 
 
 @app.get("/api/performance", dependencies=[Depends(require_api_key)])
 def api_performance():
     """Aggregierte Performance der ausgewerteten Alerts (#11, nur mit
-    ENABLE_PRICE_TRACKING befuellt): Gesamt-Trefferquote/-Durchschnittsrendite sowie die
-    besten/schlechtesten Ticker nach mittlerer Rendite. Grundlage fuer den woechentlichen
+    ENABLE_PRICE_TRACKING befuellt): Gesamt-Trefferquote/-Durchschnittsrendite, die
+    besten/schlechtesten Ticker, die Trefferquote JE QUELLE (#7) sowie ein grober,
+    unverbindlicher Kelly-lite Positionsanteil (#5). Grundlage fuer den woechentlichen
     Telegram-Digest und die Beurteilung, auf welchen Werten die Signale wirklich tragen."""
-    return get_performance_stats()
+    stats = get_performance_stats()
+    stats["by_source"] = get_source_reliability()
+    ki = get_kelly_inputs()
+    stats["kelly"] = {
+        "inputs": ki,
+        "suggested_fraction": (
+            kelly_fraction(ki["hit_rate"], ki["avg_win_pct"], ki["avg_loss_pct"])
+            if (ki.get("n") or 0) >= 10 else None
+        ),
+    }
+    return stats
+
+
+@app.get("/api/outcomes.csv", dependencies=[Depends(require_api_key)])
+def api_outcomes_csv(limit: int = 1000):
+    """Ergebnis-Datensaetze als CSV fuer die Offline-Analyse (#9, z.B. in einem
+    Spreadsheet). Nur mit ENABLE_PRICE_TRACKING befuellt."""
+    rows = get_outcomes_for_export(limit=limit)
+    buf = io.StringIO()
+    fieldnames = [
+        "id", "statement_id", "source", "ticker", "direction", "confidence",
+        "alert_ts", "alert_price", "followup_ts", "followup_price", "return_pct", "correct",
+    ]
+    writer = csv.DictWriter(buf, fieldnames=fieldnames, extrasaction="ignore")
+    writer.writeheader()
+    for r in rows:
+        writer.writerow(r)
+    return PlainTextResponse(content=buf.getvalue(), media_type="text/csv")
 
 
 @app.get("/api/health")
@@ -140,6 +204,10 @@ def api_health():
     except Exception:
         alerts_today = None
 
+    # Zyklus-Timing (#11): letzte Dauer + gleitender Durchschnitt der letzten Zyklen.
+    recent = run_health.get("recent_cycle_seconds") or []
+    avg_cycle = (sum(recent) / len(recent)) if recent else None
+
     return {
         "ok": not _startup_errors,
         "errors": _startup_errors,
@@ -147,6 +215,11 @@ def api_health():
         "uptime_seconds": (now - started_at) if started_at else None,
         "loop_restarts": run_health.get("loop_restarts", 0),
         "last_cycle_at": run_health.get("last_cycle_at"),
+        "last_cycle_seconds": run_health.get("last_cycle_seconds"),
+        "avg_cycle_seconds": avg_cycle,
+        # Uebersicht der aktiven optionalen Gates/Features (#12) - macht sofort sichtbar,
+        # ob z.B. ein Ratelimit/eine Ruhezeit gerade Alerts zurueckhaelt.
+        "active_gates": active_gates(),
         "classification_calls_today": calls_today,
         "alerts_sent_today": alerts_today,
         "classification_calls_limit": config.MAX_CLASSIFICATIONS_PER_DAY,
