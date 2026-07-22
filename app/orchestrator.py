@@ -29,6 +29,8 @@ from app.config import (
     ENABLE_TRUTH_SOCIAL,
     ENABLE_WEEKLY_DIGEST,
     ESCALATION_BAND,
+    GITHUB_REPO,
+    GITHUB_TOKEN,
     LIVE_AUDIO_CHUNK_SECONDS,
     LIVE_AUDIO_LANGUAGE,
     LIVE_AUDIO_STREAM_URLS,
@@ -298,6 +300,8 @@ def build_sources():
                 chunk_seconds=LIVE_AUDIO_CHUNK_SECONDS,
                 model_size=WHISPER_MODEL_SIZE,
                 language=LIVE_AUDIO_LANGUAGE,
+                github_token=GITHUB_TOKEN,
+                github_repo=GITHUB_REPO,
             )
         )
     for s in sources:

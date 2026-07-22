@@ -42,6 +42,7 @@ from collections import deque
 from typing import Optional
 
 from app.db import RawStatement
+from app.github_trigger import trigger_speech_detected_workflow
 from app.sources.base import Source
 from app.util import text_similarity
 
@@ -98,6 +99,8 @@ class LiveAudioSource(Source):
         chunk_seconds: int = 20,
         model_size: str = "base",
         language: Optional[str] = "en",
+        github_token: str = "",
+        github_repo: str = "",
     ):
         self.stream_urls = stream_urls
         self.chunk_seconds = max(5, chunk_seconds)
@@ -105,6 +108,8 @@ class LiveAudioSource(Source):
         # Leerer String/None -> Whisper-Sprach-Autoerkennung statt fest "en" -
         # relevant, da Reden/Pressekonferenzen nicht zwangslaeufig englisch sind.
         self.language = language or None
+        self.github_token = github_token
+        self.github_repo = github_repo
         self._model = None
         self._disabled = not stream_urls
         self._deps_ok: Optional[bool] = None
@@ -341,15 +346,18 @@ class LiveAudioSource(Source):
             if not text or _is_repeat(text, list(recent)):
                 continue
             recent.append(text)
-            self._queues[stream_url].put_nowait(
-                RawStatement(
-                    source=self.name,
-                    source_id=f"{stream_url}:{int(time.time() * 1000)}:{idx}",
-                    text=text,
-                    url=stream_url,
-                    published_at=time.time(),
-                )
+            stmt = RawStatement(
+                source=self.name,
+                source_id=f"{stream_url}:{int(time.time() * 1000)}:{idx}",
+                text=text,
+                url=stream_url,
+                published_at=time.time(),
             )
+            self._queues[stream_url].put_nowait(stmt)
+            if self.github_token and self.github_repo:
+                asyncio.create_task(
+                    trigger_speech_detected_workflow(text, stream_url, self.github_token, self.github_repo)
+                )
         return new_last
 
     def _transcribe(self, path: str) -> str:

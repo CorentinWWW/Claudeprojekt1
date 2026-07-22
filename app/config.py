@@ -313,6 +313,16 @@ DASHBOARD_PORT = _int("DASHBOARD_PORT", 8000)
 # anleitet, Port 8000 fuer 0.0.0.0/0 zu oeffnen.
 DASHBOARD_API_KEY = _str("DASHBOARD_API_KEY")
 
+# GitHub-Authentifizierung fuer repository_dispatch-Events (Speech-Detection Triggering).
+# Wenn gesetzt und ENABLE_LIVE_AUDIO aktiv: bei neu erkannten Reden wird automatisch
+# ein GitHub Actions Workflow via repository_dispatch ausgeloest. Der Token braucht
+# "repo" Scope. Leer/ungesetzt = keine automatischen Workflow-Triggers (Live-Audio
+# laeuft trotzdem, Statements landen aber nur in der DB/Telegram).
+GITHUB_TOKEN = _str("GITHUB_TOKEN")
+# GitHub-Repository im Format "owner/repo" (z.B. "CorentinWWW/Claudeprojekt1") -
+# fuer repository_dispatch-Targets. Wird nur benoetigt, falls GITHUB_TOKEN gesetzt ist.
+GITHUB_REPO = _str("GITHUB_REPO")
+
 DB_PATH = os.getenv("DB_PATH", "trump_monitor.db")
 
 
@@ -344,6 +354,17 @@ def validate() -> tuple[list[str], list[str]]:
         warnings.append(
             "ENABLE_LIVE_AUDIO=true aber LIVE_AUDIO_STREAM_URLS ist leer - "
             "Live-Audio-Quelle liefert dadurch nie Ergebnisse."
+        )
+
+    if GITHUB_TOKEN and not GITHUB_REPO:
+        warnings.append(
+            "GITHUB_TOKEN ist gesetzt, aber GITHUB_REPO fehlt - "
+            "repository_dispatch-Triggers zum Starten von Workflows werden nicht funktionieren."
+        )
+    if GITHUB_REPO and not GITHUB_TOKEN:
+        warnings.append(
+            "GITHUB_REPO ist gesetzt, aber GITHUB_TOKEN fehlt - "
+            "repository_dispatch-Triggers zum Starten von Workflows werden nicht funktionieren."
         )
 
     if not DASHBOARD_API_KEY:

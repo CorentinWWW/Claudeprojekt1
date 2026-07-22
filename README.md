@@ -164,6 +164,16 @@ Cron-Modus liefert die Quelle im Ergebnis nichts.
 Spracherkennung pro Häppchen, falls die überwachten Streams nicht durchgehend in
 derselben Sprache sind (z.B. deutschsprachige Pressekonferenzen).
 
+**Automatisches GitHub Actions Workflow-Triggering**: wenn `GITHUB_TOKEN` und
+`GITHUB_REPO` gesetzt sind, wird bei jeder neu erkannten Rede (= nicht-wiederholter
+Transkript-Text) automatisch ein GitHub Actions Workflow via `repository_dispatch`
+ausgelöst (siehe `.github/workflows/speech-detected.yml`). Dies ermöglicht
+ereignisgesteuerte Datenverarbeitung statt festem Poll-Rhythmus: z.B. kann ein
+dedizierter, schnellerer Analyse-Workflow **sofort** nach Sprach-Erkennung starten,
+ohne auf den nächsten 15-Minuten-Cron zu warten. Der Token braucht `repo` Scope
+(Lese-/Schreibzugriff auf Code). Optional; ohne diesen Setup laufen Live-Audio und
+die reguläre Klassifikations-Pipeline weiterhin normal.
+
 ### Sonstige Einschränkungen
 
 - **GDELT liefert Artikel-Titel**, nicht das wörtliche Zitat — gut als Signal,
