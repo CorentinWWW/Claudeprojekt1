@@ -31,6 +31,7 @@ from app.config import (
     ESCALATION_BAND,
     GITHUB_REPO,
     GITHUB_TOKEN,
+    LATE_MOVE_WARN_PCT,
     LIVE_AUDIO_CHUNK_SECONDS,
     LIVE_AUDIO_LANGUAGE,
     LIVE_AUDIO_STREAM_URLS,
@@ -38,6 +39,7 @@ from app.config import (
     MAX_CLASSIFICATIONS_PER_DAY,
     MAX_CONCURRENT_CLASSIFICATIONS,
     MAX_NEWS_AGE_MINUTES,
+    PAPER_TRADING,
     POLL_INTERVAL_SECONDS,
     PRICE_OUTCOME_HORIZON_MINUTES,
     PRIORITY_CLASSIFICATIONS_PER_DAY,
@@ -82,7 +84,7 @@ from app.db import (
     ticker_in_cooldown,
     try_claim_meta_key,
 )
-from app import prices
+from app import paper_trading, prices
 from app.prefilter import looks_market_relevant
 from app.scoring import (
     conviction_score,
@@ -151,6 +153,8 @@ def active_gates() -> dict:
         "watchlist": bool(WATCHLIST_TICKERS or WATCHLIST_SECTORS),
         "blocklist": len(BLOCKLIST_TICKERS) or None,
         "price_tracking": ENABLE_PRICE_TRACKING,
+        "paper_trading": PAPER_TRADING,
+        "late_move_warn_pct": LATE_MOVE_WARN_PCT or None,
         "borderline_escalation": ENABLE_BORDERLINE_ESCALATION,
         "weekly_digest": ENABLE_WEEKLY_DIGEST,
     }
@@ -716,6 +720,20 @@ async def _build_alert_extras(raw, classification, statement_id, score, corrobor
         if against:
             extras["divergence"] = ", ".join(against)
 
+    # "Zu spaet"-Warnung: laeuft der Kurs heute bereits stark MIT der These, ist die
+    # Bewegung moeglicherweise schon groesstenteils gelaufen ("er predigt erst, wenn es
+    # schon hardcore im Geschehen ist"). Betrag der bereits gelaufenen, richtungs-
+    # konformen Tagesbewegung des staerksten handelbaren Tickers.
+    if LATE_MOVE_WARN_PCT > 0 and price_ctx.get("change") and actionable:
+        top = max(actionable, key=lambda tc: tc.get("confidence") or 0.0)
+        ticker = (top.get("ticker") or "").upper()
+        change = price_ctx["change"].get(ticker)
+        direction = top.get("direction")
+        if isinstance(change, (int, float)):
+            with_thesis = change if direction == "long" else -change if direction == "short" else 0.0
+            if with_thesis >= LATE_MOVE_WARN_PCT:
+                extras["late_move"] = with_thesis
+
     # Kelly-lite Positionsanteil (#5): global aus der bisherigen Trefferquote/Gewinn/
     # Verlust. Erst ab genuegend ausgewerteten Ergebnissen, damit die Zahl nicht auf
     # zwei Zufallstreffern beruht.
@@ -854,6 +872,16 @@ async def _send_alerts(alert_worthy: list[tuple]):
             if sent:
                 mark_alert_sent(statement_id)
                 _record_ticker_alerts(classification, statement_id)
+                # Paper-Trading: virtuelle Position(en) fuer die handelbaren Ticker
+                # eroeffnen (Sizing aus dem Ueberzeugungs-Score). Best-effort, nach dem
+                # erfolgreichen Alert - ein Fehler hier darf den Alert nicht ruinieren.
+                if PAPER_TRADING:
+                    try:
+                        await paper_trading.open_positions_for_alert(
+                            classification, statement_id, score
+                        )
+                    except Exception:
+                        logger.warning("[paper] Position eroeffnen fehlgeschlagen.", exc_info=True)
     else:
         # Sammel-Nachricht: die Baselines fuers Backtesting trotzdem erfassen (damit ein
         # Nachrichtenschub keine Luecke in der Erfolgsmessung reisst), aber ohne die
@@ -868,9 +896,16 @@ async def _send_alerts(alert_worthy: list[tuple]):
         digest_items = [(raw, c, sid) for raw, c, sid, _, _, _ in gated]
         sent = await send_digest_alert(digest_items)
         if sent:
-            for raw, classification, statement_id, _, _, _ in gated:
+            for raw, classification, statement_id, score, _, _ in gated:
                 mark_alert_sent(statement_id)
                 _record_ticker_alerts(classification, statement_id)
+                if PAPER_TRADING:
+                    try:
+                        await paper_trading.open_positions_for_alert(
+                            classification, statement_id, score
+                        )
+                    except Exception:
+                        logger.warning("[paper] Position eroeffnen fehlgeschlagen.", exc_info=True)
 
 
 def _row_to_alert_tuple(row: dict) -> tuple:
@@ -952,6 +987,19 @@ async def _evaluate_alert_outcomes():
         set_outcome_followup(o["id"], now, followup_price, return_pct, correct)
 
 
+async def _manage_paper_positions():
+    """Paper-Trading (virtuelles Depot): offene Positionen zum aktuellen Kurs bewerten,
+    bei Stop-Loss/Take-Profit automatisch schliessen (mit Sofort-Meldung) und - gedrosselt
+    auf PAPER_STATUS_INTERVAL_MINUTES - einen Depot-Status schicken ("auf wie viel steht
+    alles"). Best-effort; ein Fehler darf den Poll-Zyklus nicht abbrechen."""
+    if not PAPER_TRADING:
+        return
+    try:
+        await paper_trading.manage_open_positions()
+    except Exception:
+        logger.warning("[paper] Positionsverwaltung fehlgeschlagen.", exc_info=True)
+
+
 async def _maybe_send_weekly_digest():
     """Woechentlicher Performance-Digest (#10): einmal pro Kalenderwoche (am
     WEEKLY_DIGEST_WEEKDAY, ab WEEKLY_DIGEST_MIN_HOUR UTC) eine Telegram-Zusammenfassung
@@ -979,6 +1027,7 @@ async def _maybe_send_weekly_digest():
 async def poll_once(sources, semaphore: asyncio.Semaphore):
     await _resend_pending_alerts()
     await _evaluate_alert_outcomes()
+    await _manage_paper_positions()
     await _maybe_send_weekly_digest()
 
     # Wird gesetzt, sobald ein permanenter Claude-Konfigurationsfehler (kaputter Key,

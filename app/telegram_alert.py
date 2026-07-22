@@ -351,6 +351,14 @@ def _format_message(
     if isinstance(divergence, str) and divergence:
         trailing += f"\n⚠️ Kurs läuft bereits gegen die These: {html.escape(divergence)}"
 
+    # Signal ist spaet dran - Kurs heute schon stark in Signalrichtung gelaufen.
+    late_move = extras.get("late_move")
+    if isinstance(late_move, (int, float)):
+        trailing += (
+            f"\n⏰ Spät dran – Kurs heute schon {late_move:+.1f}% in Signalrichtung "
+            "(Bewegung evtl. großteils gelaufen)"
+        )
+
     if extras.get("hedged"):
         trailing += "\n🗣 unbestätigt/Gerücht – mit Vorsicht behandeln"
 

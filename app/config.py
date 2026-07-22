@@ -150,6 +150,14 @@ SECTOR_CLUSTER_WINDOW_HOURS = _int("SECTOR_CLUSTER_WINDOW_HOURS", 6)
 # warnt der Alert. Nur mit ENABLE_PRICE_TRACKING (braucht die heutige Bewegung). 0 = aus.
 DIVERGENCE_WARN_PCT = _float("DIVERGENCE_WARN_PCT", 2.0)
 
+# "Zu spaet"-Warnung: laeuft der Kurs am Alarm-Tag bereits um mehr als so viele
+# Prozentpunkte MIT der eingeschaetzten Richtung (z.B. long und heute schon +X%), warnt
+# der Alert, dass die Bewegung moeglicherweise schon groesstenteils gelaufen ist ("er
+# predigt erst, wenn es schon hardcore im Geschehen ist"). Macht sichtbar, wenn ein
+# Signal spaet dran ist, statt es unkommentiert zu melden. Nur mit ENABLE_PRICE_TRACKING
+# (braucht die heutige Bewegung). 0 = aus.
+LATE_MOVE_WARN_PCT = _float("LATE_MOVE_WARN_PCT", 3.0)
+
 # Kelly-lite Positionsanteil (#5): aus der historischen Trefferquote + mittlerem Gewinn/
 # Verlust einen groben, ausdruecklich unverbindlichen Bankroll-Anteil (Half-Kelly,
 # gedeckelt) ableiten und im Alert anzeigen. Braucht ausgewertete Ergebnisse
@@ -215,6 +223,30 @@ ESCALATION_BAND = _float("ESCALATION_BAND", 0.1)
 # ab und macht pro Alert zusaetzliche HTTP-Calls - erst einschalten, wenn gewuenscht.
 ENABLE_PRICE_TRACKING = _bool("ENABLE_PRICE_TRACKING", False)
 PRICE_OUTCOME_HORIZON_MINUTES = _int("PRICE_OUTCOME_HORIZON_MINUTES", 60)
+
+# --- Paper-Trading (virtuelles Depot, KEIN echtes Geld / kein Broker) ---
+# Wenn aktiv: bei jedem tatsaechlich verschickten Alert wird fuer die handelbaren Ticker
+# eine VIRTUELLE Position eroeffnet (Einstiegskurs gemerkt), laufend zum aktuellen Kurs
+# bewertet und per Telegram gemeldet, "auf wie viel es steht". Stop-Loss/Take-Profit
+# schliessen die Position automatisch. Das Sizing bestimmt der Bot selbst aus dem
+# Ueberzeugungs-Score (Anteil des Depotwerts, siehe app/paper_trading.py). Reine
+# Simulation zum Mitverfolgen der Signalguete - ausdruecklich keine Anlageberatung und
+# keine echte Orderausfuehrung. Braucht erreichbare Kursdaten (Stooq, best-effort, wie
+# ENABLE_PRICE_TRACKING); ist der Kursdienst nicht erreichbar, entfaellt das Eroeffnen/
+# Bewerten still. Standardmaessig AUS.
+PAPER_TRADING = _bool("PAPER_TRADING", False)
+# Virtuelles Startkapital in EUR (Basiswert des Depots).
+PAPER_STARTING_CAPITAL = _float("PAPER_STARTING_CAPITAL", 500.0)
+# Hoechstens so viele gleichzeitig offene virtuelle Positionen (verhindert, dass das
+# Kapital in zu viele Kleinstpositionen zerfaellt).
+PAPER_MAX_POSITIONS = _int("PAPER_MAX_POSITIONS", 8)
+# Mindesteinsatz je Position in EUR - faellt der freie Barbestand darunter, wird keine
+# neue Position mehr eroeffnet (kein sinnloser Dust-Trade).
+PAPER_MIN_STAKE = _float("PAPER_MIN_STAKE", 10.0)
+# Wie oft (Minuten) hoechstens ein Depot-Status ("auf wie viel steht alles") per
+# Telegram geschickt wird, solange Positionen offen sind. Eroeffnungen und (Stop/Ziel-)
+# Schliessungen werden IMMER sofort gemeldet, unabhaengig davon. 0 = bei jedem Zyklus.
+PAPER_STATUS_INTERVAL_MINUTES = _int("PAPER_STATUS_INTERVAL_MINUTES", 30)
 # Ab wie vielen gleichzeitig alarmwuerdigen Statements in EINEM Poll-Zyklus zu einer
 # gebuendelten Sammel-Nachricht gewechselt wird statt einer Einzelnachricht pro Statement
 # (verhindert eine Alert-Flut bei einem ploetzlichen Nachrichtenschub).
@@ -354,6 +386,13 @@ def validate() -> tuple[list[str], list[str]]:
         warnings.append(
             "ENABLE_LIVE_AUDIO=true aber LIVE_AUDIO_STREAM_URLS ist leer - "
             "Live-Audio-Quelle liefert dadurch nie Ergebnisse."
+        )
+
+    if PAPER_TRADING and (not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID):
+        warnings.append(
+            "PAPER_TRADING=true aber Telegram ist nicht konfiguriert - die virtuellen "
+            "Positionen werden zwar in der DB gefuehrt, aber es gibt keine Depot-/Trade-"
+            "Meldungen (TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID setzen)."
         )
 
     if GITHUB_TOKEN and not GITHUB_REPO:

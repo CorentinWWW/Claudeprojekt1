@@ -2,13 +2,15 @@ name: Market Impact Predictor
 
 on:
   schedule:
-    # Alle 15 Minuten (vorher 30) - Latenz senken (#1): marktrelevante Schlagzeilen
-    # werden schnell eingepreist, jede Minute frueher zaehlt. Kuerzer als */15 ist bei
-    # GitHub-Actions-Cron unzuverlaessig (geplante Laeufe werden bei Last teils
-    # verzoegert oder zusammengefasst) - fuer echte Sekunden-Latenz den Always-on-
-    # Modus nutzen (siehe README: run_forever/Docker/systemd statt Cron). Bei
-    # oeffentlichen Repos sind Actions-Minuten unbegrenzt.
-    - cron: "*/15 * * * *"
+    # Alle 5 Minuten (vorher 15/30) - Latenz senken: die Alerts kamen zuletzt zu spaet
+    # ("erst wenn es schon hardcore im Geschehen ist"), deshalb so haeufig wie bei
+    # GitHub-Actions-Cron sinnvoll moeglich. */5 ist die praktische Untergrenze; geplante
+    # Laeufe werden bei Last teils noch verzoegert/zusammengefasst - fuer echte Sekunden-
+    # Latenz (und damit auch schnellere Stop-/Ziel-Reaktion im Paper-Depot) den Always-on-
+    # Modus nutzen (siehe README: run_forever/Docker/systemd statt Cron). Bei oeffentlichen
+    # Repos sind Actions-Minuten unbegrenzt. Das Job-Timeout unten ist bewusst < 5 Min
+    # gehalten, damit sich ueberlappende Laeufe nicht gegenseitig ausbremsen.
+    - cron: "*/5 * * * *"
   workflow_dispatch:
     inputs:
       test_text:
@@ -31,21 +33,20 @@ concurrency:
 jobs:
   poll:
     runs-on: ubuntu-latest
-    # WICHTIG: bewusst DEUTLICH unter dem Cron-Intervall (*/15 oben) gehalten. Ein
-    # Timeout >= dem Intervall (frueher 20 bei ebenfalls */15) kann dazu fuehren, dass
-    # ein Lauf noch laeuft, wenn der naechste UND uebernaechste geplante Trigger
-    # feuern - "concurrency: cancel-in-progress: false" haelt aber nur GENAU EINEN
-    # wartenden Lauf in der Warteschlange; ein dritter ueberlappender Trigger wird von
-    # GitHub NICHT eingereiht, sondern still verworfen (kein rotes Kreuz, keine
-    # Fehler-Mail - der Zyklus faellt einfach lautlos aus, ausgerechnet waehrend eines
-    # Nachrichtenschubs). 10 Minuten reichen bei serieller Klassifikation
-    # (MAX_CONCURRENT_CLASSIFICATIONS=1, gedeckelt durch den Tages-Kostendeckel) und
-    # nebenlaeufigem RSS-Abruf (siehe news_rss.py: alle Feeds gleichzeitig statt
-    # nacheinander) fuer einen normalen bis maessig starken Nachrichtenschub; ein
-    # abgebrochener Lauf verliert dank _resend_pending_alerts() in orchestrator.py
-    # ohnehin keine marktrelevante Meldung dauerhaft - der naechste (puenktlich
-    # startende) Lauf holt sie nach.
-    timeout-minutes: 10
+    # WICHTIG: bewusst DEUTLICH unter dem Cron-Intervall (*/5 oben) gehalten. Ein
+    # Timeout >= dem Intervall kann dazu fuehren, dass ein Lauf noch laeuft, wenn der
+    # naechste UND uebernaechste geplante Trigger feuern - "concurrency: cancel-in-
+    # progress: false" haelt aber nur GENAU EINEN wartenden Lauf in der Warteschlange;
+    # ein dritter ueberlappender Trigger wird von GitHub NICHT eingereiht, sondern still
+    # verworfen (kein rotes Kreuz, keine Fehler-Mail - der Zyklus faellt einfach lautlos
+    # aus, ausgerechnet waehrend eines Nachrichtenschubs). 4 Minuten reichen bei
+    # serieller Klassifikation (MAX_CONCURRENT_CLASSIFICATIONS=1, gedeckelt durch den
+    # Tages-Kostendeckel) und nebenlaeufigem RSS-Abruf (siehe news_rss.py: alle Feeds
+    # gleichzeitig statt nacheinander) fuer einen normalen bis maessig starken
+    # Nachrichtenschub; ein abgebrochener Lauf verliert dank _resend_pending_alerts() in
+    # orchestrator.py ohnehin keine marktrelevante Meldung dauerhaft - der naechste
+    # (puenktlich startende) Lauf holt sie nach.
+    timeout-minutes: 4
     steps:
       - uses: actions/checkout@v4
 
@@ -93,6 +94,15 @@ jobs:
           # Messfenster in Minuten (leer -> Code-Standard 60). Ueber eine Repo-Variable
           # einstellbar, falls du z.B. einen laengeren Horizont auswerten willst.
           PRICE_OUTCOME_HORIZON_MINUTES: ${{ vars.PRICE_OUTCOME_HORIZON_MINUTES }}
+          # Paper-Trading (virtuelles Depot, KEIN echtes Geld): auf jeden Alert hin wird
+          # fuer die handelbaren Ticker eine virtuelle Position eroeffnet (Einstiegskurs
+          # gemerkt), laufend bewertet und per Telegram gemeldet ("auf wie viel steht es").
+          # Stop/Ziel schliessen automatisch. Der Depot-Zustand ueberlebt einzelne Laeufe
+          # ueber den DB-Cache oben. '|| true' = standardmaessig AN; zum Abschalten eine
+          # Repo-Variable PAPER_TRADING=false setzen. Startkapital ueber PAPER_STARTING_CAPITAL
+          # (Standard 500 EUR) anpassbar.
+          PAPER_TRADING: ${{ vars.PAPER_TRADING || 'true' }}
+          PAPER_STARTING_CAPITAL: ${{ vars.PAPER_STARTING_CAPITAL }}
           MANUAL_TEST_TEXT: ${{ github.event.inputs.test_text }}
           ENABLE_LIVE_AUDIO: "false"
           # Playwright/Chromium ist hier bewusst nicht installiert, um Laeufe

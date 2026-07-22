@@ -182,6 +182,50 @@ die reguläre Klassifikations-Pipeline weiterhin normal.
   braucht es einen kostenpflichtigen Anbieter (nicht Teil dieses Projekts, aber
   leicht als weiterer Alert-Datenpunkt ergänzbar).
 
+## Paper-Trading (virtuelles Depot)
+
+Ein **rein virtuelles Depot** (Standard-Startkapital **500 €**, `PAPER_STARTING_CAPITAL`),
+das die Signalgüte mit echten Kursen mitverfolgt — **kein echtes Geld, kein Broker, keine
+Orderausführung, keine Anlageberatung.** Aktivieren über `PAPER_TRADING=true` (im
+GitHub-Actions-Workflow bereits an, abschaltbar über die Repo-Variable `PAPER_TRADING`).
+
+**Was passiert:**
+- Bei **jedem tatsächlich verschickten Alert** (Long/Short) wird für die handelbaren
+  Ticker eine **virtuelle Position eröffnet** — der Einstiegskurs wird gemerkt. Die
+  **Positionsgröße bestimmt der Bot selbst** aus dem Überzeugungs-Score (Anteil des
+  Depotwerts: stärkeres Signal → mehr Kapital, gedeckelt, siehe
+  `app/paper_trading.py: position_fraction`).
+- **Stop-Loss / Take-Profit** werden aus der Tagesspanne abgeleitet (`suggest_risk_levels`)
+  und schließen die Position **automatisch**, sobald der Kurs sie erreicht — mit sofortiger
+  Telegram-Meldung.
+- Ein **Gegensignal** (z.B. offene Long-Position, neuer Short-Alert auf denselben Ticker)
+  **dreht die Position**: die alte wird glattgestellt, die neue eröffnet.
+- Solange Positionen offen sind, kommt **laufend ein Depot-Status** per Telegram — „auf wie
+  viel steht alles": Gesamtwert, freier Bestand und je Position der aktuelle Kurs samt
+  (noch nicht realisiertem) Gewinn/Verlust. Gedrosselt auf `PAPER_STATUS_INTERVAL_MINUTES`
+  (Standard 30 Min), damit es nicht spammt; Eröffnungen und Schließungen melden sich
+  **immer sofort**, unabhängig davon.
+- Der Depot-Zustand (offene/geschlossene Positionen, realisierter Gewinn) liegt in der
+  SQLite-DB und **überlebt einzelne GitHub-Actions-Läufe** über den DB-Cache.
+
+Braucht erreichbare Kursdaten (Stooq, best-effort — wie das Preis-Tracking); ist der
+Kursdienst mal nicht erreichbar, entfällt das Eröffnen/Bewerten still. Telegram muss
+konfiguriert sein, sonst laufen die Positionen nur stumm in der DB mit.
+
+## Früher dran sein (Latenz)
+
+Die Alerts kamen zuletzt teils erst, **als die Bewegung schon lief**. Zwei Gegenmaßnahmen:
+
+- **Häufigeres Polling:** der GitHub-Actions-Cron läuft jetzt alle **5 Minuten** (vorher 15),
+  das Job-Timeout entsprechend unter dem Intervall (4 Min). Für echte Sekunden-Latenz weiter
+  den **Dauerbetrieb** (`main.py`/Docker/systemd) bzw. die **Live-Audio → repository_dispatch**-
+  Kette nutzen, die eine Rede direkt hört, statt auf die mediale Meldung zu warten.
+- **„Zu spät"-Warnung im Alert:** ist der Kurs am Alarm-Tag bereits stärker als
+  `LATE_MOVE_WARN_PCT` (Standard 3 %) **in Signalrichtung** gelaufen, weist der Alert
+  ausdrücklich darauf hin, dass die Bewegung evtl. großteils gelaufen ist — so wird ein
+  spätes Signal wenigstens als solches sichtbar (Gegenstück zur bestehenden
+  Divergenz-Warnung für Bewegungen *gegen* die These).
+
 ## Robustheit / Reife dieser Version
 
 - **Startup-Validierung**: fehlender `ANTHROPIC_API_KEY`, alle Quellen deaktiviert

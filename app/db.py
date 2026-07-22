@@ -87,6 +87,32 @@ CREATE TABLE IF NOT EXISTS ticker_alerts (
 );
 CREATE INDEX IF NOT EXISTS idx_ticker_alerts_recent
     ON ticker_alerts(ticker, direction, alerted_at);
+
+-- Paper-Trading (virtuelles Depot, siehe app/paper_trading.py): eine Zeile pro
+-- VIRTUELLER Position. entry_price/qty/stake werden beim Eroeffnen (auf einen Alert
+-- hin) festgehalten; wird die Position spaeter geschlossen (Stop/Ziel/Signal-Umkehr),
+-- kommen exit_price/exit_ts/pnl/close_reason dazu und status wechselt auf 'closed'.
+-- Reine Simulation, kein echter Handel.
+CREATE TABLE IF NOT EXISTS paper_positions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    statement_id INTEGER,
+    ticker TEXT NOT NULL,
+    direction TEXT NOT NULL,
+    entry_price REAL NOT NULL,
+    entry_ts REAL NOT NULL,
+    qty REAL NOT NULL,
+    stake REAL NOT NULL,
+    stop REAL,
+    target REAL,
+    status TEXT NOT NULL DEFAULT 'open',
+    exit_price REAL,
+    exit_ts REAL,
+    pnl REAL,
+    close_reason TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_paper_positions_status ON paper_positions(status);
+CREATE INDEX IF NOT EXISTS idx_paper_positions_open_ticker
+    ON paper_positions(ticker, status);
 """
 
 # Fuer DBs, die vor der Einfuehrung von related_topic_id/is_major_escalation angelegt
@@ -233,6 +259,25 @@ def try_claim_meta_key(key: str) -> bool:
             (key, str(time.time())),
         )
         return cur.rowcount > 0
+
+
+def get_meta(key: str) -> Optional[str]:
+    """Liest einen Wert aus dem kleinen meta-Schluessel-Wert-Speicher (oder None)."""
+    with get_conn() as conn:
+        row = conn.execute("SELECT value FROM meta WHERE key = ?", (key,)).fetchone()
+    return row["value"] if row else None
+
+
+def set_meta(key: str, value: str) -> None:
+    """Setzt/aktualisiert einen Wert im meta-Speicher (im Gegensatz zu
+    try_claim_meta_key, das nur einmalig anlegt und nie ueberschreibt). Genutzt z.B. fuer
+    den Zeitstempel des letzten Depot-Status (Paper-Trading-Throttle)."""
+    with get_conn() as conn:
+        conn.execute(
+            "INSERT INTO meta (key, value) VALUES (?, ?) "
+            "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            (key, value),
+        )
 
 
 def get_known_source_ids(source_ids: list[str]) -> set[str]:
@@ -815,6 +860,112 @@ def get_outcomes_for_export(limit: int = 1000) -> list[dict]:
             (limit,),
         ).fetchall()
     return [dict(r) for r in rows]
+
+
+def insert_paper_position(
+    statement_id: Optional[int],
+    ticker: str,
+    direction: str,
+    entry_price: float,
+    entry_ts: float,
+    qty: float,
+    stake: float,
+    stop: Optional[float],
+    target: Optional[float],
+) -> int:
+    """Legt eine neue offene virtuelle Position an (Paper-Trading) und gibt ihre ID zurueck."""
+    with get_conn() as conn:
+        cur = conn.execute(
+            """
+            INSERT INTO paper_positions
+                (statement_id, ticker, direction, entry_price, entry_ts, qty, stake,
+                 stop, target, status)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'open')
+            """,
+            (statement_id, (ticker or "").upper(), direction, entry_price, entry_ts,
+             qty, stake, stop, target),
+        )
+        return cur.lastrowid
+
+
+def get_open_paper_positions() -> list[dict]:
+    """Alle aktuell offenen virtuellen Positionen (aelteste zuerst)."""
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT * FROM paper_positions WHERE status = 'open' ORDER BY entry_ts ASC"
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def get_open_paper_position_for_ticker(ticker: str) -> Optional[dict]:
+    """Die offene Position fuer einen Ticker (oder None) - fuer die Erkennung, ob schon
+    eine Position laeuft (nicht doppelt eroeffnen bzw. bei Gegenrichtung schliessen)."""
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT * FROM paper_positions WHERE status = 'open' AND ticker = ? "
+            "ORDER BY entry_ts DESC LIMIT 1",
+            ((ticker or "").upper(),),
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def count_open_paper_positions() -> int:
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT COUNT(*) AS c FROM paper_positions WHERE status = 'open'"
+        ).fetchone()
+    return row["c"] or 0
+
+
+def close_paper_position(
+    position_id: int, exit_price: float, exit_ts: float, pnl: float, reason: str
+) -> None:
+    """Schliesst eine offene Position: haelt Ausstiegskurs, realisierten Gewinn/Verlust
+    (EUR) und den Grund fest. Die WHERE-Bedingung status='open' macht den Aufruf
+    idempotent - eine bereits geschlossene Position wird nicht erneut veraendert."""
+    with get_conn() as conn:
+        conn.execute(
+            """
+            UPDATE paper_positions
+            SET status = 'closed', exit_price = ?, exit_ts = ?, pnl = ?, close_reason = ?
+            WHERE id = ? AND status = 'open'
+            """,
+            (exit_price, exit_ts, pnl, reason, position_id),
+        )
+
+
+def get_paper_realized_pnl() -> float:
+    """Summe der realisierten Gewinne/Verluste (EUR) aller geschlossenen Positionen."""
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT COALESCE(SUM(pnl), 0.0) AS s FROM paper_positions WHERE status = 'closed'"
+        ).fetchone()
+    return row["s"] or 0.0
+
+
+def get_open_paper_stake_sum() -> float:
+    """Summe des in offenen Positionen gebundenen Einsatzkapitals (EUR)."""
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT COALESCE(SUM(stake), 0.0) AS s FROM paper_positions WHERE status = 'open'"
+        ).fetchone()
+    return row["s"] or 0.0
+
+
+def get_paper_closed_stats() -> dict:
+    """Kennzahlen der geschlossenen virtuellen Positionen: Anzahl, Treffer (pnl > 0) und
+    realisierter Gesamtgewinn (fuer den Depot-Status)."""
+    with get_conn() as conn:
+        row = conn.execute(
+            """
+            SELECT COUNT(*) AS n,
+                   SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END) AS wins,
+                   COALESCE(SUM(pnl), 0.0) AS realized
+            FROM paper_positions WHERE status = 'closed'
+            """
+        ).fetchone()
+    n = row["n"] or 0
+    return {"closed": n, "wins": row["wins"] or 0, "realized_pnl": row["realized"] or 0.0}
 
 
 def get_stats() -> dict:
