@@ -295,6 +295,15 @@ LIVE_AUDIO_STREAM_URLS = [
     u.strip() for u in os.getenv("LIVE_AUDIO_STREAM_URLS", "").split(",") if u.strip()
 ]
 WHISPER_MODEL_SIZE = os.getenv("WHISPER_MODEL_SIZE", "base")
+# Laenge der rollierenden Audio-Haeppchen in Sekunden, die ffmpeg kontinuierlich aus
+# dem Stream schneidet und die einzeln transkribiert werden. Kuerzer = niedrigere
+# Latenz, aber mehr Transkriptions-Overhead pro Sekunde Audio; laenger = effizienter,
+# aber Meldungen kommen entsprechend spaeter an.
+LIVE_AUDIO_CHUNK_SECONDS = _int("LIVE_AUDIO_CHUNK_SECONDS", 20)
+# Sprache fuer die Whisper-Transkription (ISO-639-1, z.B. "en", "de"). Leer =
+# automatische Spracherkennung pro Haeppchen (etwas langsamer, aber sinnvoll, wenn die
+# ueberwachten Streams nicht durchgehend in derselben Sprache sind).
+LIVE_AUDIO_LANGUAGE = _str("LIVE_AUDIO_LANGUAGE", "en")
 
 DASHBOARD_PORT = _int("DASHBOARD_PORT", 8000)
 # Falls gesetzt, verlangen alle /api/*-Endpunkte einen passenden "X-API-Key"-Header.

@@ -29,6 +29,8 @@ from app.config import (
     ENABLE_TRUTH_SOCIAL,
     ENABLE_WEEKLY_DIGEST,
     ESCALATION_BAND,
+    LIVE_AUDIO_CHUNK_SECONDS,
+    LIVE_AUDIO_LANGUAGE,
     LIVE_AUDIO_STREAM_URLS,
     MAX_ALERTS_PER_HOUR,
     MAX_CLASSIFICATIONS_PER_DAY,
@@ -290,7 +292,14 @@ def build_sources():
     if ENABLE_TRUTH_SOCIAL:
         sources.append(TruthSocialSource())
     if ENABLE_LIVE_AUDIO:
-        sources.append(LiveAudioSource(LIVE_AUDIO_STREAM_URLS, model_size=WHISPER_MODEL_SIZE))
+        sources.append(
+            LiveAudioSource(
+                LIVE_AUDIO_STREAM_URLS,
+                chunk_seconds=LIVE_AUDIO_CHUNK_SECONDS,
+                model_size=WHISPER_MODEL_SIZE,
+                language=LIVE_AUDIO_LANGUAGE,
+            )
+        )
     for s in sources:
         source_health.setdefault(
             s.name,

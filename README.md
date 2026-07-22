@@ -95,7 +95,7 @@ Direkt nach dem Start:
 | Nachrichten (GDELT) | `app/sources/news_gdelt.py` | Stabil, kostenlos, kein Key nötig | ~15 Min |
 | Nachrichten (RSS) | `app/sources/news_rss.py` | Stabil, kostenlos | Minuten |
 | Truth Social | `app/sources/truth_social.py` | Best-Effort: direkter API-Call, mit Browser-Fallback | Sekunden-Minuten |
-| Live-Audio (Reden) | `app/sources/live_audio.py` | Experimentell, optionale Deps | ~30s Chunks |
+| Live-Audio (Reden) | `app/sources/live_audio.py` | Experimentell, optionale Deps, nur Dauerbetrieb | ~20s Latenz |
 
 Quellen einzeln an/aus schalten über `.env` (`ENABLE_NEWS`, `ENABLE_TRUTH_SOCIAL`,
 `ENABLE_LIVE_AUDIO`).
@@ -139,8 +139,30 @@ Braucht zusätzlich `pip install yt-dlp faster-whisper` sowie `ffmpeg` im System
 Es gibt **keine automatische Erkennung**, wann eine relevante Person live spricht —
 Stream-URLs müssen manuell in `LIVE_AUDIO_STREAM_URLS` gepflegt werden (z.B. Link zu
 einem angekündigten Event, einer Pressekonferenz oder einem 24/7-Nachrichtensender).
-Transkription läuft in
-Chunks (Standard 30s), keine Wort-für-Wort-Live-Transkription.
+
+**Hört kontinuierlich zu, solange der Prozess läuft** (nicht nur ein Snapshot pro
+Poll-Zyklus): pro Stream läuft ein Hintergrund-Task, der den Stream durchgehend liest.
+`ffmpeg` schneidet dabei per Segment-Muxer rollierende Haeppchen
+(`LIVE_AUDIO_CHUNK_SECONDS`, Standard 20s) **ohne Lücken dazwischen** heraus - jedes
+fertige Häppchen wird sofort transkribiert (faster-whisper, mit VAD-Filter gegen
+Halluzinationen bei Stille/Musik) und in eine Warteschlange gelegt, die der
+Poll-Zyklus dann nur noch ausliest. Stirbt der Stream (Ende, abgelaufene signierte
+URL) oder läuft ein Segment-Fenster ab (proaktiver Refresh nach 1h, bevor die
+URL abläuft), wird mit exponentiellem Backoff neu verbunden. Nahezu identische,
+unmittelbar aufeinanderfolgende Transkript-Häppchen (typisches Whisper-Verhalten bei
+Stille - immer dieselbe Standardphrase) werden verworfen.
+
+**Funktioniert deshalb nur im Dauerbetrieb** (`main.py` + Docker/systemd/
+`run_forever`, siehe Abschnitt Deployment) — **nicht** im GitHub-Actions-Cron-Modus
+(`run_once.py`): dort beendet sich der Prozess nach einem einzigen Poll-Zyklus sofort
+wieder, die Hintergrund-Aufnahme kommt also nie über die ersten paar Sekunden
+Stream-Extraktion hinaus. `run_once.py` warnt entsprechend im Log und ruft
+`aclose()` auf, damit keine `ffmpeg`-Prozesse verwaist zurückbleiben, aber im
+Cron-Modus liefert die Quelle im Ergebnis nichts.
+
+`LIVE_AUDIO_LANGUAGE` (Standard `en`) auf leer setzen für automatische
+Spracherkennung pro Häppchen, falls die überwachten Streams nicht durchgehend in
+derselben Sprache sind (z.B. deutschsprachige Pressekonferenzen).
 
 ### Sonstige Einschränkungen
 
@@ -465,14 +487,14 @@ Chunks (Standard 30s), keine Wort-für-Wort-Live-Transkription.
 Es gibt zwei grundsätzlich verschiedene Betriebsarten:
 
 - **Einfachster Weg - GitHub Actions** (kein Account/Server/Kreditkarte nötig,
-  nur Telegram-Alerts, kein Dashboard, Polling alle 30 Min statt 60s)
+  nur Telegram-Alerts, kein Dashboard, Polling alle 15 Min statt 60s)
 - **Voller Funktionsumfang** - Dashboard, 60s-Polling, Truth-Social-Browser-Fallback,
   Live-Audio - braucht einen (kostenlosen) Server (z.B. Oracle Cloud Free Tier)
 
 ### Einfachster Weg: GitHub Actions (empfohlen zum Ausprobieren)
 
 Kein eigener Server, keine Kreditkarte, keine SSH/Firewall-Konfiguration - nur dieses
-GitHub-Repo. Ein Workflow (`.github/workflows/monitor.yml`) führt alle 30 Minuten
+GitHub-Repo. Ein Workflow (`.github/workflows/monitor.yml`) führt alle 15 Minuten
 automatisch einen Poll-Zyklus aus (`run_once.py`: alle Quellen abfragen, klassifizieren,
 bei Relevanz Telegram-Alert schicken) und beendet sich wieder. Der Dedup-Status
 zwischen Läufen wird über den GitHub-Actions-Cache mitgeschleppt.
