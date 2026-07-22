@@ -80,6 +80,19 @@ jobs:
           # leeren String, den config.py wie "nicht gesetzt" behandelt -> es gilt dann der
           # Standard 0.90 aus dem Code.
           ALERT_MIN_TICKER_CONFIDENCE: ${{ vars.ALERT_MIN_TICKER_CONFIDENCE }}
+          # Preis-Tracking / Backtesting: nach jedem Alert wird der Kurs der handelbaren
+          # Ticker erfasst und nach PRICE_OUTCOME_HORIZON_MINUTES erneut gemessen - so
+          # entsteht ueber die Laeufe hinweg eine ECHTE Trefferquote (Dashboard
+          # /api/performance + woechentlicher Telegram-Digest) statt Bauchgefuehl. Der
+          # Zustand ueberlebt einzelne Laeufe ueber den DB-Cache oben. Best-effort ueber
+          # Stooq (kostenlos, kein Key); ist der Kursdienst mal nicht erreichbar, entfaellt
+          # die Messung still (Circuit-Breaker), der Poll-Zyklus laeuft normal weiter.
+          # '|| true' = standardmaessig AN; zum Abschalten eine Repo-Variable
+          # ENABLE_PRICE_TRACKING=false setzen (Settings -> Variables), ohne Code zu aendern.
+          ENABLE_PRICE_TRACKING: ${{ vars.ENABLE_PRICE_TRACKING || 'true' }}
+          # Messfenster in Minuten (leer -> Code-Standard 60). Ueber eine Repo-Variable
+          # einstellbar, falls du z.B. einen laengeren Horizont auswerten willst.
+          PRICE_OUTCOME_HORIZON_MINUTES: ${{ vars.PRICE_OUTCOME_HORIZON_MINUTES }}
           MANUAL_TEST_TEXT: ${{ github.event.inputs.test_text }}
           ENABLE_LIVE_AUDIO: "false"
           # Playwright/Chromium ist hier bewusst nicht installiert, um Laeufe

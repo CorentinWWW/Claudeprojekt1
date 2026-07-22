@@ -218,9 +218,13 @@ Chunks (Standard 30s), keine Wort-für-Wort-Live-Transkription.
      Tickers (TradingView).
   10. **Persönlicher Filter** – Watchlist/Blocklist nach Tickern und Sektoren
       (`WATCHLIST_TICKERS`/`WATCHLIST_SECTORS`/`BLOCKLIST_TICKERS`).
-  Alle netzabhängigen Teile (#2/#3/#8) sind **best-effort und standardmäßig aus** – ist
-  der Kursdienst nicht erreichbar, entfällt das Feature still, der Poll-Zyklus läuft
-  normal weiter. Kurs-/Trefferquoten sind Analyse-Hilfen, **keine Anlageberatung**.
+  Alle netzabhängigen Teile (#2/#3/#8) sind **best-effort** – ist der Kursdienst nicht
+  erreichbar, entfällt das Feature still (Circuit-Breaker), der Poll-Zyklus läuft normal
+  weiter. Der ausgelieferte GitHub-Actions-Workflow und `.env.example` haben
+  `ENABLE_PRICE_TRACKING` **an**, damit die Erfolgsmessung von Anfang an mitläuft (der
+  reine Code-Standard ist weiterhin aus, damit die Tests offline/schnell bleiben); zum
+  Abschalten eine Repo-Variable `ENABLE_PRICE_TRACKING=false` setzen. Kurs-/Trefferquoten
+  sind Analyse-Hilfen, **keine Anlageberatung**.
 - **Präzisions- & Feedback-Ausbau (15 weitere Verbesserungen)**: baut auf dem obigen
   Trading-Ausbau auf und schärft Signalqualität, Risiko-Handling und Nachvollziehbarkeit
   – alles ohne zusätzlichen Claude-Call (bis auf die zwei neuen Schätzfelder, die im
@@ -606,7 +610,7 @@ Siehe `.env.example` für alle Variablen. Wichtige zusätzliche Stellschrauben:
 | `ENABLE_HISTORICAL_HITRATE` | Historische Pro-Ticker-Trefferquote im Alert (braucht Preis-Tracking zum Befüllen) |
 | `ENABLE_RISK_LEVELS` | Vorgeschlagene Stop-/Take-Profit-Marken aus der Tagesspanne (nur mit Preis-Tracking) |
 | `ENABLE_BORDERLINE_ESCALATION` / `CLAUDE_ESCALATION_MODEL` / `ESCALATION_BAND` | Grenzfälle nahe der Schwelle mit stärkerem Modell zweitprüfen (Standard **aus**, kostet Extra-Calls) (#4) |
-| `ENABLE_PRICE_TRACKING` / `PRICE_OUTCOME_HORIZON_MINUTES` | Kurs-Feedback/Backtesting + heutige Bewegung im Alert, best-effort über Stooq (Standard **aus**) (#2/#3/#8) |
+| `ENABLE_PRICE_TRACKING` / `PRICE_OUTCOME_HORIZON_MINUTES` | Kurs-Feedback/Backtesting + heutige Bewegung im Alert, best-effort über Stooq. Im ausgelieferten Workflow/`.env.example` **an** (Code-Standard aus); Repo-Variable `ENABLE_PRICE_TRACKING=false` schaltet ab (#2/#3/#8) |
 | `PRICE_CACHE_TTL_SECONDS` | Kurz-Cache für Live-Kursabfragen (gleiche Quote nicht doppelt holen); `0` = aus |
 | `ENABLE_WEEKLY_DIGEST` / `WEEKLY_DIGEST_WEEKDAY` / `WEEKLY_DIGEST_MIN_HOUR` | Wöchentlicher Performance-Digest per Telegram (braucht ausgewertete Ergebnisse) |
 | `MAX_CONCURRENT_CLASSIFICATIONS` | Wie viele Claude-Calls parallel laufen dürfen (Standard **1** = seriell, siehe Duplikat-Hinweis oben; höher = schneller bei Nachrichtenschüben, aber Risiko doppelter Alerts) |
