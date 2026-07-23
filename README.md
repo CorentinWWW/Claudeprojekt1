@@ -4,7 +4,7 @@
 Zentralbank-/Fed-Entscheidungen, Politiker- und CEO-Statements, Quartalszahlen,
 Fusionen/Übernahmen, geopolitische Ereignisse und mehr, aus Nachrichtenfeeds
 (GDELT/RSS), optional ergänzt um Original-Quellen-Posts (z.B. ein bestimmter
-Truth-Social-Account) und Live-Reden. Lässt Claude für jede Meldung einschätzen,
+Truth-Social-Account). Lässt Claude für jede Meldung einschätzen,
 ob sie marktrelevant ist (positiv/negativ/neutral, betroffene Ticker mit
 Long/Short-Einschätzung je Aktie) und schickt bei Relevanz einen Telegram-Alert -
 aber nur einmal pro Thema pro Tag, außer die Lage eskaliert wirklich. Ein
@@ -17,7 +17,7 @@ sind LLM-generiert und können falsch liegen - eigene Anlageentscheidung auf eig
 ## Architektur
 
 ```
-Quellen (News/Truth Social/Live-Audio) --poll()--> Orchestrator (Supervisor, Concurrency)
+Quellen (News/Truth Social) --poll()--> Orchestrator (Supervisor, Concurrency)
                                                         |
                                     Tier 1: Text-Duplikat-Check (difflib, 24h,
                                             auch INNERHALB einer Charge)
@@ -95,10 +95,8 @@ Direkt nach dem Start:
 | Nachrichten (GDELT) | `app/sources/news_gdelt.py` | Stabil, kostenlos, kein Key nötig | ~15 Min |
 | Nachrichten (RSS) | `app/sources/news_rss.py` | Stabil, kostenlos | Minuten |
 | Truth Social | `app/sources/truth_social.py` | Best-Effort: direkter API-Call, mit Browser-Fallback | Sekunden-Minuten |
-| Live-Audio (Reden) | `app/sources/live_audio.py` | Experimentell, optionale Deps, nur Dauerbetrieb | ~20s Latenz |
 
-Quellen einzeln an/aus schalten über `.env` (`ENABLE_NEWS`, `ENABLE_TRUTH_SOCIAL`,
-`ENABLE_LIVE_AUDIO`).
+Quellen einzeln an/aus schalten über `.env` (`ENABLE_NEWS`, `ENABLE_TRUTH_SOCIAL`).
 
 **Allgemeine Abdeckung, nicht auf eine Person eingeschränkt:** GDELT und RSS filtern
 bewusst NICHT auf ein bestimmtes Thema/eine bestimmte Person, sondern decken alle
@@ -132,47 +130,6 @@ Testen nicht verifizieren (Netzwerk-Policy blockiert ausgehende Verbindungen zu
 diesem Host). Beide Codepfade wurden mechanisch getestet (Chromium startet,
 navigiert, Fehlerbehandlung greift), aber die tatsächliche Erfolgsrate auf einem
 Server mit echtem Internetzugang lässt sich erst nach dem Deployment verifizieren.
-
-### Live-Audio im Detail
-
-Braucht zusätzlich `pip install yt-dlp faster-whisper` sowie `ffmpeg` im System.
-Es gibt **keine automatische Erkennung**, wann eine relevante Person live spricht —
-Stream-URLs müssen manuell in `LIVE_AUDIO_STREAM_URLS` gepflegt werden (z.B. Link zu
-einem angekündigten Event, einer Pressekonferenz oder einem 24/7-Nachrichtensender).
-
-**Hört kontinuierlich zu, solange der Prozess läuft** (nicht nur ein Snapshot pro
-Poll-Zyklus): pro Stream läuft ein Hintergrund-Task, der den Stream durchgehend liest.
-`ffmpeg` schneidet dabei per Segment-Muxer rollierende Haeppchen
-(`LIVE_AUDIO_CHUNK_SECONDS`, Standard 20s) **ohne Lücken dazwischen** heraus - jedes
-fertige Häppchen wird sofort transkribiert (faster-whisper, mit VAD-Filter gegen
-Halluzinationen bei Stille/Musik) und in eine Warteschlange gelegt, die der
-Poll-Zyklus dann nur noch ausliest. Stirbt der Stream (Ende, abgelaufene signierte
-URL) oder läuft ein Segment-Fenster ab (proaktiver Refresh nach 1h, bevor die
-URL abläuft), wird mit exponentiellem Backoff neu verbunden. Nahezu identische,
-unmittelbar aufeinanderfolgende Transkript-Häppchen (typisches Whisper-Verhalten bei
-Stille - immer dieselbe Standardphrase) werden verworfen.
-
-**Funktioniert deshalb nur im Dauerbetrieb** (`main.py` + Docker/systemd/
-`run_forever`, siehe Abschnitt Deployment) — **nicht** im GitHub-Actions-Cron-Modus
-(`run_once.py`): dort beendet sich der Prozess nach einem einzigen Poll-Zyklus sofort
-wieder, die Hintergrund-Aufnahme kommt also nie über die ersten paar Sekunden
-Stream-Extraktion hinaus. `run_once.py` warnt entsprechend im Log und ruft
-`aclose()` auf, damit keine `ffmpeg`-Prozesse verwaist zurückbleiben, aber im
-Cron-Modus liefert die Quelle im Ergebnis nichts.
-
-`LIVE_AUDIO_LANGUAGE` (Standard `en`) auf leer setzen für automatische
-Spracherkennung pro Häppchen, falls die überwachten Streams nicht durchgehend in
-derselben Sprache sind (z.B. deutschsprachige Pressekonferenzen).
-
-**Automatisches GitHub Actions Workflow-Triggering**: wenn `GITHUB_TOKEN` und
-`GITHUB_REPO` gesetzt sind, wird bei jeder neu erkannten Rede (= nicht-wiederholter
-Transkript-Text) automatisch ein GitHub Actions Workflow via `repository_dispatch`
-ausgelöst (siehe `.github/workflows/speech-detected.yml`). Dies ermöglicht
-ereignisgesteuerte Datenverarbeitung statt festem Poll-Rhythmus: z.B. kann ein
-dedizierter, schnellerer Analyse-Workflow **sofort** nach Sprach-Erkennung starten,
-ohne auf den nächsten 15-Minuten-Cron zu warten. Der Token braucht `repo` Scope
-(Lese-/Schreibzugriff auf Code). Optional; ohne diesen Setup laufen Live-Audio und
-die reguläre Klassifikations-Pipeline weiterhin normal.
 
 ### Sonstige Einschränkungen
 
@@ -253,8 +210,7 @@ Die Alerts kamen zuletzt teils erst, **als die Bewegung schon lief**. Zwei Gegen
 
 - **Häufigeres Polling:** der GitHub-Actions-Cron läuft jetzt alle **5 Minuten** (vorher 15),
   das Job-Timeout entsprechend unter dem Intervall (4 Min). Für echte Sekunden-Latenz weiter
-  den **Dauerbetrieb** (`main.py`/Docker/systemd) bzw. die **Live-Audio → repository_dispatch**-
-  Kette nutzen, die eine Rede direkt hört, statt auf die mediale Meldung zu warten.
+  den **Dauerbetrieb** (`main.py`/Docker/systemd) nutzen.
 - **„Zu spät"-Warnung im Alert:** ist der Kurs am Alarm-Tag bereits stärker als
   `LATE_MOVE_WARN_PCT` (Standard 3 %) **in Signalrichtung** gelaufen, weist der Alert
   ausdrücklich darauf hin, dass die Bewegung evtl. großteils gelaufen ist — so wird ein
@@ -553,8 +509,7 @@ Die Alerts kamen zuletzt teils erst, **als die Bewegung schon lief**. Zwei Gegen
   dekodiert, GDELT/RSS wiederholen bei transienten Verbindungsfehlern automatisch
   (nicht bei permanenten Blocks wie 403), ein einzelner kaputter RSS-Eintrag kostet
   nicht mehr den ganzen Feed, der Truth-Social-Browser-Fallback hat einen
-  Gesamt-Timeout, Live-Audio-Temp-Dateien werden auch bei fehlgeschlagener
-  Transkription zuverlässig aufgeräumt.
+  Gesamt-Timeout.
 - **Weitere Härtung nach systematischem Bug-Hunt** (5 parallele Review-Durchläufe
   über den gesamten Code):
   - Batch-Queries statt Query-pro-Statement bei der Duplikatprüfung
@@ -586,8 +541,8 @@ Es gibt zwei grundsätzlich verschiedene Betriebsarten:
 
 - **Einfachster Weg - GitHub Actions** (kein Account/Server/Kreditkarte nötig,
   nur Telegram-Alerts, kein Dashboard, Polling alle 15 Min statt 60s)
-- **Voller Funktionsumfang** - Dashboard, 60s-Polling, Truth-Social-Browser-Fallback,
-  Live-Audio - braucht einen (kostenlosen) Server (z.B. Oracle Cloud Free Tier)
+- **Voller Funktionsumfang** - Dashboard, 60s-Polling, Truth-Social-Browser-Fallback -
+  braucht einen (kostenlosen) Server (z.B. Oracle Cloud Free Tier)
 
 ### Einfachster Weg: GitHub Actions (empfohlen zum Ausprobieren)
 
@@ -612,8 +567,8 @@ Bedarf im Workflow auf `*/15` verkürzen, wenn das Repo öffentlich ist oder gen
 Freiminuten übrig sind.
 
 Kein Dashboard in diesem Modus - Telegram ist der Alert-Kanal, `Actions`-Tab das Log.
-Live-Audio und der Truth-Social-Browser-Fallback sind hier bewusst deaktiviert (siehe
-`monitor.yml`), damit jeder Lauf kurz und günstig bleibt.
+Der Truth-Social-Browser-Fallback ist hier bewusst deaktiviert (siehe `monitor.yml`),
+damit jeder Lauf kurz und günstig bleibt.
 
 ### Voller Funktionsumfang: eigener (kostenloser) Server
 

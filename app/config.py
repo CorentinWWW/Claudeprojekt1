@@ -336,7 +336,6 @@ TOPIC_CONTEXT_MAX_ITEMS = _int("TOPIC_CONTEXT_MAX_ITEMS", 20)
 
 ENABLE_NEWS = _bool("ENABLE_NEWS", True)
 ENABLE_TRUTH_SOCIAL = _bool("ENABLE_TRUTH_SOCIAL", True)
-ENABLE_LIVE_AUDIO = _bool("ENABLE_LIVE_AUDIO", False)
 
 # Welcher Truth-Social-Account beobachtet wird, falls ENABLE_TRUTH_SOCIAL aktiv ist -
 # frei konfigurierbar, nicht hart auf eine Person festgelegt. Diese Quelle ist eine von
@@ -358,20 +357,6 @@ TRUTH_SOCIAL_BROWSER_FALLBACK_MIN_INTERVAL = _int(
     "TRUTH_SOCIAL_BROWSER_FALLBACK_MIN_INTERVAL", 300
 )
 
-LIVE_AUDIO_STREAM_URLS = [
-    u.strip() for u in os.getenv("LIVE_AUDIO_STREAM_URLS", "").split(",") if u.strip()
-]
-WHISPER_MODEL_SIZE = os.getenv("WHISPER_MODEL_SIZE", "base")
-# Laenge der rollierenden Audio-Haeppchen in Sekunden, die ffmpeg kontinuierlich aus
-# dem Stream schneidet und die einzeln transkribiert werden. Kuerzer = niedrigere
-# Latenz, aber mehr Transkriptions-Overhead pro Sekunde Audio; laenger = effizienter,
-# aber Meldungen kommen entsprechend spaeter an.
-LIVE_AUDIO_CHUNK_SECONDS = _int("LIVE_AUDIO_CHUNK_SECONDS", 20)
-# Sprache fuer die Whisper-Transkription (ISO-639-1, z.B. "en", "de"). Leer =
-# automatische Spracherkennung pro Haeppchen (etwas langsamer, aber sinnvoll, wenn die
-# ueberwachten Streams nicht durchgehend in derselben Sprache sind).
-LIVE_AUDIO_LANGUAGE = _str("LIVE_AUDIO_LANGUAGE", "en")
-
 DASHBOARD_PORT = _int("DASHBOARD_PORT", 8000)
 # Falls gesetzt, verlangen alle /api/*-Endpunkte einen passenden "X-API-Key"-Header.
 # Ohne das waere z.B. /api/test (kostet einen echten Claude-Call + kann einen echten
@@ -379,16 +364,6 @@ DASHBOARD_PORT = _int("DASHBOARD_PORT", 8000)
 # relevant, weil die README-Anleitung fuer die Oracle-Cloud-Variante explizit dazu
 # anleitet, Port 8000 fuer 0.0.0.0/0 zu oeffnen.
 DASHBOARD_API_KEY = _str("DASHBOARD_API_KEY")
-
-# GitHub-Authentifizierung fuer repository_dispatch-Events (Speech-Detection Triggering).
-# Wenn gesetzt und ENABLE_LIVE_AUDIO aktiv: bei neu erkannten Reden wird automatisch
-# ein GitHub Actions Workflow via repository_dispatch ausgeloest. Der Token braucht
-# "repo" Scope. Leer/ungesetzt = keine automatischen Workflow-Triggers (Live-Audio
-# laeuft trotzdem, Statements landen aber nur in der DB/Telegram).
-GITHUB_TOKEN = _str("GITHUB_TOKEN")
-# GitHub-Repository im Format "owner/repo" (z.B. "CorentinWWW/Claudeprojekt1") -
-# fuer repository_dispatch-Targets. Wird nur benoetigt, falls GITHUB_TOKEN gesetzt ist.
-GITHUB_REPO = _str("GITHUB_REPO")
 
 DB_PATH = os.getenv("DB_PATH", "trump_monitor.db")
 
@@ -414,31 +389,14 @@ def validate() -> tuple[list[str], list[str]]:
             "Telegram-Alerts verschickt, Statements werden nur in der DB erfasst."
         )
 
-    if not ENABLE_NEWS and not ENABLE_TRUTH_SOCIAL and not ENABLE_LIVE_AUDIO:
-        errors.append("Alle Quellen sind deaktiviert (ENABLE_NEWS/TRUTH_SOCIAL/LIVE_AUDIO=false).")
-
-    if ENABLE_LIVE_AUDIO and not LIVE_AUDIO_STREAM_URLS:
-        warnings.append(
-            "ENABLE_LIVE_AUDIO=true aber LIVE_AUDIO_STREAM_URLS ist leer - "
-            "Live-Audio-Quelle liefert dadurch nie Ergebnisse."
-        )
+    if not ENABLE_NEWS and not ENABLE_TRUTH_SOCIAL:
+        errors.append("Alle Quellen sind deaktiviert (ENABLE_NEWS/TRUTH_SOCIAL=false).")
 
     if PAPER_TRADING and (not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID):
         warnings.append(
             "PAPER_TRADING=true aber Telegram ist nicht konfiguriert - die virtuellen "
             "Positionen werden zwar in der DB gefuehrt, aber es gibt keine Depot-/Trade-"
             "Meldungen (TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID setzen)."
-        )
-
-    if GITHUB_TOKEN and not GITHUB_REPO:
-        warnings.append(
-            "GITHUB_TOKEN ist gesetzt, aber GITHUB_REPO fehlt - "
-            "repository_dispatch-Triggers zum Starten von Workflows werden nicht funktionieren."
-        )
-    if GITHUB_REPO and not GITHUB_TOKEN:
-        warnings.append(
-            "GITHUB_REPO ist gesetzt, aber GITHUB_TOKEN fehlt - "
-            "repository_dispatch-Triggers zum Starten von Workflows werden nicht funktionieren."
         )
 
     if not DASHBOARD_API_KEY:

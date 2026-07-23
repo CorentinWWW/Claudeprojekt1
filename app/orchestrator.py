@@ -21,7 +21,6 @@ from app.config import (
     ENABLE_CONVICTION_SCORE,
     ENABLE_HISTORICAL_HITRATE,
     ENABLE_KELLY_SUGGESTION,
-    ENABLE_LIVE_AUDIO,
     ENABLE_NEWS,
     ENABLE_PREFILTER,
     ENABLE_PRICE_TRACKING,
@@ -33,12 +32,7 @@ from app.config import (
     ENABLE_GAP_PREDICTION,
     GAP_MIN_EXPECTED_MOVE_PCT,
     GAP_NEAR_CLOSE_MINUTES,
-    GITHUB_REPO,
-    GITHUB_TOKEN,
     LATE_MOVE_WARN_PCT,
-    LIVE_AUDIO_CHUNK_SECONDS,
-    LIVE_AUDIO_LANGUAGE,
-    LIVE_AUDIO_STREAM_URLS,
     MAX_ALERTS_PER_HOUR,
     MAX_CLASSIFICATIONS_PER_DAY,
     MAX_CONCURRENT_CLASSIFICATIONS,
@@ -63,7 +57,6 @@ from app.config import (
     WATCHLIST_TICKERS,
     WEEKLY_DIGEST_MIN_HOUR,
     WEEKLY_DIGEST_WEEKDAY,
-    WHISPER_MODEL_SIZE,
 )
 from app.db import (
     Classification,
@@ -103,7 +96,6 @@ from app.scoring import (
     position_tier,
     predict_gap,
 )
-from app.sources.live_audio import LiveAudioSource
 from app.sources.news_gdelt import GdeltNewsSource
 from app.sources.news_rss import RssNewsSource
 from app.sources.truth_social import TruthSocialSource
@@ -308,17 +300,6 @@ def build_sources():
         sources.append(RssNewsSource())
     if ENABLE_TRUTH_SOCIAL:
         sources.append(TruthSocialSource())
-    if ENABLE_LIVE_AUDIO:
-        sources.append(
-            LiveAudioSource(
-                LIVE_AUDIO_STREAM_URLS,
-                chunk_seconds=LIVE_AUDIO_CHUNK_SECONDS,
-                model_size=WHISPER_MODEL_SIZE,
-                language=LIVE_AUDIO_LANGUAGE,
-                github_token=GITHUB_TOKEN,
-                github_repo=GITHUB_REPO,
-            )
-        )
     for s in sources:
         source_health.setdefault(
             s.name,

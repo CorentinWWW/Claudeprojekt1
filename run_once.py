@@ -16,7 +16,7 @@ import sys
 import time
 
 from app.classifier import DailyCapExceeded, classify
-from app.config import ENABLE_LIVE_AUDIO, MAX_CONCURRENT_CLASSIFICATIONS, validate
+from app.config import MAX_CONCURRENT_CLASSIFICATIONS, validate
 from app.db import RawStatement, init_db, insert_statement, mark_alert_sent
 from app.orchestrator import build_sources, is_alert_worthy, poll_once
 from app.telegram_alert import send_alert
@@ -40,28 +40,9 @@ async def main() -> int:
     init_db()
     sources = build_sources()
     logger.info("Aktive Quellen: %s", [s.name for s in sources])
-    if ENABLE_LIVE_AUDIO:
-        # Live-Audio hoert kontinuierlich im Hintergrund zu, solange der Prozess lebt -
-        # in diesem Einzellauf-Modus (ein poll()-Aufruf, dann sofort Prozessende)
-        # bleiben fuer eine echte Transkription praktisch keine paar Sekunden Zeit.
-        # Fuer eine funktionierende Live-Audio-Ueberwachung den Dauerbetrieb nutzen
-        # (README: main.py + Docker/systemd/run_forever statt GitHub-Actions-Cron).
-        logger.warning(
-            "ENABLE_LIVE_AUDIO ist aktiv, aber run_once.py beendet sich nach einem "
-            "Zyklus - Live-Audio braucht Dauerbetrieb (main.py/Docker/systemd) um "
-            "tatsaechlich etwas zu transkribieren."
-        )
 
     semaphore = asyncio.Semaphore(MAX_CONCURRENT_CLASSIFICATIONS)
-    try:
-        await poll_once(sources, semaphore)
-    finally:
-        # Live-Audio startet langlebige ffmpeg-Kindprozesse im Hintergrund - ohne
-        # dieses aclose() wuerden sie nach Prozessende verwaist zurueckbleiben.
-        for source in sources:
-            aclose = getattr(source, "aclose", None)
-            if aclose is not None:
-                await aclose()
+    await poll_once(sources, semaphore)
 
     test_text = os.getenv("MANUAL_TEST_TEXT", "").strip()
     if test_text:
