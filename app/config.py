@@ -173,6 +173,31 @@ GAP_NEAR_CLOSE_MINUTES = _int("GAP_NEAR_CLOSE_MINUTES", 45)
 # keinen Gap-Hinweis ausloesen. 0 = aus (jeder klar gerichtete Alert im Fenster zaehlt).
 GAP_MIN_EXPECTED_MOVE_PCT = _float("GAP_MIN_EXPECTED_MOVE_PCT", 0.0)
 
+# --- Gap-Chase-Bewertung (Gegenstueck: der Gap ist schon passiert) ---
+# Nutzerwunsch: wurde ein Ticker bereits UEBER NACHT/VORBOERSLICH stark gepusht (Markt
+# war zu) und steht zur Boersenoeffnung entsprechend extrem hoch/niedrig - lohnt sich ein
+# Einstieg dann ueberhaupt noch, und falls ja, wann sollte man wieder verkaufen? Prueft
+# kurz NACH der Eroeffnung (siehe GAP_CHASE_WINDOW_MINUTES) den tatsaechlichen Gap
+# (heutiger Eroeffnungskurs vs. gestriger Schluss, aus der Kurshistorie) gegen Claudes
+# erwartete Bewegung: ist der Groteil davon schon gelaufen, wird vom Nachkaufen
+# abgeraten (Gap-Fade-Risiko); ist noch Luft, wird ein grobes Ausstiegs-Kursziel
+# genannt. Braucht ENABLE_PRICE_TRACKING (Kurs + Historie). Standardmaessig AN wie die
+# uebrigen reinen Anreicherungs-Funktionen (ENABLE_HISTORICAL_HITRATE/ENABLE_RISK_LEVELS)
+# - aendert nie, OB alarmiert wird, nur was im Alert dazu steht.
+ENABLE_GAP_CHASE_EVALUATION = _bool("ENABLE_GAP_CHASE_EVALUATION", True)
+# Nur innerhalb so vieler Minuten NACH Boersenoeffnung relevant - danach ist "der Markt
+# war zu" nicht mehr die Erklaerung fuer eine grosse Kursbewegung.
+GAP_CHASE_WINDOW_MINUTES = _int("GAP_CHASE_WINDOW_MINUTES", 30)
+# Ab welcher (richtungsbereinigten) Gap-Groesse (%) die Bewertung ueberhaupt erst
+# auftaucht - ein normaler kleiner Sprung zur Eroeffnung ist kein "extrem hoch/tief".
+GAP_CHASE_MIN_GAP_PCT = _float("GAP_CHASE_MIN_GAP_PCT", 3.0)
+# Liegt Claudes Erwartungswert vor: "zu spaet", wenn der Gap bereits >= diesem Anteil
+# (0-1) der erwarteten Gesamtbewegung ausgemacht hat.
+GAP_CHASE_TOO_LATE_RATIO = _float("GAP_CHASE_TOO_LATE_RATIO", 0.8)
+# Ohne Erwartungswert (Claude liefert nicht immer eine Schaetzung): grobe Ersatzschwelle
+# in % - ab dieser Gap-Groesse allein gilt es als "zu spaet", unabhaengig vom Kontext.
+GAP_CHASE_TOO_LATE_ABS_PCT = _float("GAP_CHASE_TOO_LATE_ABS_PCT", 6.0)
+
 # Kelly-lite Positionsanteil (#5): aus der historischen Trefferquote + mittlerem Gewinn/
 # Verlust einen groben, ausdruecklich unverbindlichen Bankroll-Anteil (Half-Kelly,
 # gedeckelt) ableiten und im Alert anzeigen. Braucht ausgewertete Ergebnisse

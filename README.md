@@ -225,6 +225,18 @@ Die Alerts kamen zuletzt teils erst, **als die Bewegung schon lief**. Zwei Gegen
   ausdrücklich: „🚀 Mögliche Übernacht-Rallye … Einstieg jetzt, **bevor** der Kurs zum
   nächsten Open hochgappt". Ist die Session bereits **vorbörslich**, wird stattdessen
   gewarnt, dass der Gap evtl. schon läuft. Rein zeit-/richtungsbasiert, kein Extra-Call.
+- **Gap-Chase-Bewertung** (`ENABLE_GAP_CHASE_EVALUATION`, Standard an, braucht
+  Preis-Tracking): das Gegenstück zur Antizipation oben — der Gap ist bereits passiert
+  (Markt war zu, jetzt zur Börsenöffnung entsprechend extrem hoch/niedrig). Kurz **nach**
+  der Eröffnung (`GAP_CHASE_WINDOW_MINUTES`, Standard 30 min) vergleicht der Bot den
+  tatsächlichen Gap (heutiger Eröffnungskurs vs. gestriger Schluss, aus der
+  Kurshistorie) mit Claudes geschätzter Gesamtbewegung: hat der Gap bereits
+  `GAP_CHASE_TOO_LATE_RATIO` (Standard 80 %) davon aufgebraucht (ohne Schätzung:
+  `GAP_CHASE_TOO_LATE_ABS_PCT`, Standard 6 %), rät der Alert vom (Nach-)Kauf ab
+  („⏭ … riskant, Gap-Fade-Gefahr“); ist noch Luft, heißt es „🎯 … kann sich noch lohnen“
+  samt einem groben Ausstiegs-Kursziel (aus der verbleibenden geschätzten Bewegung, sonst
+  aus derselben Tagesspannen-Logik wie die normalen Stop-/Ziel-Vorschläge). Nur relevant,
+  wenn der Gap überhaupt `GAP_CHASE_MIN_GAP_PCT` (Standard 3 %) erreicht.
 
 ## Robustheit / Reife dieser Version
 
@@ -699,6 +711,7 @@ Siehe `.env.example` für alle Variablen. Wichtige zusätzliche Stellschrauben:
 | `ENABLE_HISTORICAL_HITRATE` | Historische Pro-Ticker-Trefferquote im Alert (braucht Preis-Tracking zum Befüllen) |
 | `ENABLE_RISK_LEVELS` | Vorgeschlagene Stop-/Take-Profit-Marken aus der Tagesspanne (nur mit Preis-Tracking) |
 | `ENABLE_HISTORICAL_PERFORMANCE_GATE` / `HISTORICAL_PERFORMANCE_MIN_SAMPLES` / `_WEIGHT` / `_SUPPRESS_BELOW` | Der staerkste handelbare Ticker "lernt" aus seiner EIGENEN historischen Trefferquote (braucht Preis-Tracking): hebt/senkt den Ueberzeugungs-Score, optional harte Unterdrueckung bei belegt schlechter Bilanz. Standard **aus** |
+| `ENABLE_GAP_CHASE_EVALUATION` / `GAP_CHASE_WINDOW_MINUTES` / `_MIN_GAP_PCT` / `_TOO_LATE_RATIO` / `_TOO_LATE_ABS_PCT` | Gegenstueck zur Uebernacht-Gap-Antizipation: der Gap ist schon passiert (Markt war zu, jetzt zur Boersenoeffnung extrem hoch/niedrig) - lohnt sich ein Einstieg noch, und falls ja, wann verkaufen? Braucht Preis-Tracking. Standard **an** |
 | `ENABLE_BORDERLINE_ESCALATION` / `CLAUDE_ESCALATION_MODEL` / `ESCALATION_BAND` | Grenzfälle nahe der Schwelle mit stärkerem Modell zweitprüfen (Standard **aus**, kostet Extra-Calls) (#4) |
 | `ENABLE_PRICE_TRACKING` / `PRICE_OUTCOME_HORIZON_MINUTES` | Kurs-Feedback/Backtesting + heutige Bewegung im Alert, best-effort über Stooq. Im ausgelieferten Workflow/`.env.example` **an** (Code-Standard aus); Repo-Variable `ENABLE_PRICE_TRACKING=false` schaltet ab (#2/#3/#8) |
 | `PRICE_CACHE_TTL_SECONDS` | Kurz-Cache für Live-Kursabfragen (gleiche Quote nicht doppelt holen); `0` = aus |

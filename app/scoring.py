@@ -7,6 +7,7 @@ Quellen-Korroboration), zu einer einzigen, auf einen Blick lesbaren Ueberzeugung
 zusammen und leiten daraus eine grobe, ausdruecklich unverbindliche Positionsgroessen-
 Einordnung ab. KEINE Anlageberatung - nur eine Verdichtung der vorhandenen Signale.
 """
+import math
 import re
 from typing import Optional
 
@@ -254,6 +255,66 @@ def predict_gap(
         # Vorboerslich: das Gap laeuft moeglicherweise gerade schon - noch melden, aber
         # als "evtl. schon in Bewegung" markieren (early=False).
         return {"gap_direction": gap_direction, "phase": _GAP_PHASE["pre"], "early": False}
+
+    return None
+
+
+# --- Gap-Chase-Bewertung (Gegenstueck zu predict_gap: der Gap ist bereits passiert) ----
+# predict_gap() warnt VOR einem Gap, waehrend der Markt noch zu ist. Dieses Gegenstueck
+# greift NACH der Eroeffnung: ist ein Ticker bereits ueber Nacht/vorboerslich stark in
+# Signalrichtung gegappt (Markt war zu, jetzt zur Boersenoeffnung extrem hoch/niedrig),
+# lohnt sich ein Einstieg dann ueberhaupt noch, oder ist der Groteil der erwarteten
+# Bewegung schon gelaufen (Chase-/Gap-Fade-Risiko)?
+def evaluate_gap_chase(
+    direction: Optional[str],
+    gap_pct: Optional[float],
+    expected_move_pct: Optional[float] = None,
+    too_late_ratio: float = 0.8,
+    too_late_abs_pct: float = 6.0,
+) -> Optional[dict]:
+    """Bewertet einen bereits GESCHEHENEN Ueber-Nacht-/Vorboersen-Gap kurz nach
+    Boersenoeffnung: lohnt sich ein Einstieg noch, oder ist der Groteil der erwarteten
+    Bewegung schon gelaufen?
+
+    gap_pct = (heutiger Eroeffnungskurs - gestriger Schluss) / gestriger Schluss * 100
+    (siehe prices.previous_close), VORZEICHENBEHAFTET (nicht richtungsbereinigt).
+
+    Gibt None zurueck, wenn keine Bewertung moeglich/sinnvoll ist: fehlende Richtung/
+    Gap, oder der Gap ging GEGEN die eingeschaetzte Richtung (das ist die bestehende
+    Kurs-Divergenz-Warnung, kein Chase-Fall). Sonst ein Dict:
+        {
+          "gap_pct": <richtungsbereinigter Gap in %, positiv = mit der These>,
+          "too_late": True/False,
+          "used_fraction": <Anteil der erwarteten Bewegung, der schon gelaufen ist,
+                            oder None ohne Claude-Schaetzung>,
+          "remaining_pct": <geschaetzte verbleibende Bewegung in %, oder None>,
+        }
+
+    Mit Erwartungswert (expected_move_pct > 0, aus Claudes Schaetzung): "zu spaet",
+    wenn der Gap bereits >= too_late_ratio (Standard 80%) der erwarteten Gesamtbewegung
+    ausgemacht hat. Ohne Erwartungswert: "zu spaet", wenn der Gap allein schon
+    >= too_late_abs_pct (Standard 6%) betraegt - eine grobe, konservative Ersatzschwelle."""
+    if direction not in ("long", "short"):
+        return None
+    if not isinstance(gap_pct, (int, float)) or not math.isfinite(gap_pct):
+        return None
+    with_thesis = gap_pct if direction == "long" else -gap_pct
+    if with_thesis <= 0:
+        # Gegen die These gegappt - kein Chase-Fall (das deckt die bestehende
+        # Divergenz-Warnung ab), sondern schlicht kein Grund zur Eile.
+        return None
+
+    if isinstance(expected_move_pct, (int, float)) and expected_move_pct > 0:
+        used_fraction = with_thesis / expected_move_pct
+        too_late = used_fraction >= too_late_ratio
+        remaining_pct = max(0.0, expected_move_pct - with_thesis)
+        return {
+            "gap_pct": with_thesis, "too_late": too_late,
+            "used_fraction": used_fraction, "remaining_pct": remaining_pct,
+        }
+
+    too_late = with_thesis >= too_late_abs_pct
+    return {"gap_pct": with_thesis, "too_late": too_late, "used_fraction": None, "remaining_pct": None}
 
     return None
 

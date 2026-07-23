@@ -436,6 +436,29 @@ def _format_message(
                     "schon."
                 )
 
+    # Gap-Chase-Bewertung: Gegenstueck zur obigen Antizipation - der Gap ist bereits
+    # passiert (Markt war zu, jetzt zur Boersenoeffnung extrem hoch/niedrig gegappt).
+    # Lohnt sich ein Einstieg noch, und falls ja, wann verkaufen?
+    chase = extras.get("gap_chase")
+    if isinstance(chase, dict) and isinstance(chase.get("gap_pct"), (int, float)):
+        ticker = html.escape(str(chase.get("ticker") or "")).strip()
+        ticker_part = f"{ticker}: " if ticker else ""
+        gap_val = chase["gap_pct"]
+        if chase.get("too_late"):
+            trailing += (
+                f"\n⏭ {ticker_part}bereits {gap_val:+.1f}% über Nacht/vorbörslich "
+                "gegappt – Großteil der erwarteten Bewegung dürfte schon gelaufen sein. "
+                "Jetzt noch einsteigen ist riskant (Gap-Fade-Gefahr) – eher abwarten/"
+                "auf einen Pullback warten."
+            )
+        else:
+            target = chase.get("target_price")
+            target_str = f" · Ausstieg ~{target:g}" if isinstance(target, (int, float)) else ""
+            trailing += (
+                f"\n🎯 {ticker_part}bereits {gap_val:+.1f}% gegappt, aber noch nicht "
+                f"ausgereizt – Einstieg kann sich noch lohnen{target_str}."
+            )
+
     # Technische Gesamtbewertung (TradingView-Stil) je handelbarem Ticker.
     tech_line = _technical_segment(extras.get("technical"))
     if tech_line:

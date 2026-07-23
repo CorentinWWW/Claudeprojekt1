@@ -291,3 +291,24 @@ async def get_history(
     if ttl > 0:
         _HISTORY_CACHE[symbol] = (now, history)
     return history
+
+
+def previous_close(history: Optional[dict], today: str) -> Optional[float]:
+    """Schlusskurs des letzten VOR `today` (ISO 'YYYY-MM-DD', US-Marktzeit - siehe
+    market_hours.current_market_date) abgeschlossenen Handelstags aus der
+    Tageshistorie - fuer die Gap-Berechnung (heutiger Eroeffnungskurs vs. gestriger
+    Schluss). Filtert explizit auf Datum < today, statt sich auf einen festen Index
+    (z.B. "-1" oder "-2") zu verlassen: ob Stooqs Tageshistorie den heutigen, noch
+    laufenden Handelstag schon als eigene (unvollstaendige) Zeile enthaelt, ist nicht
+    garantiert - der Datums-Filter funktioniert in beiden Faellen gleich zuverlaessig.
+    None bei fehlenden/unvollstaendigen Daten."""
+    if not history or not today:
+        return None
+    dates = history.get("date") or []
+    closes = history.get("close") or []
+    if len(dates) != len(closes) or not dates:
+        return None
+    for d, c in zip(reversed(dates), reversed(closes)):
+        if isinstance(d, str) and d < today:
+            return c
+    return None

@@ -29,8 +29,13 @@ from app.config import (
     ENABLE_TRUTH_SOCIAL,
     ENABLE_WEEKLY_DIGEST,
     ESCALATION_BAND,
+    ENABLE_GAP_CHASE_EVALUATION,
     ENABLE_GAP_PREDICTION,
     ENABLE_HISTORICAL_PERFORMANCE_GATE,
+    GAP_CHASE_MIN_GAP_PCT,
+    GAP_CHASE_TOO_LATE_ABS_PCT,
+    GAP_CHASE_TOO_LATE_RATIO,
+    GAP_CHASE_WINDOW_MINUTES,
     GAP_MIN_EXPECTED_MOVE_PCT,
     GAP_NEAR_CLOSE_MINUTES,
     HISTORICAL_PERFORMANCE_MIN_SAMPLES,
@@ -88,10 +93,16 @@ from app.db import (
     try_claim_meta_key,
 )
 from app import indicators, paper_trading, prices
-from app.market_hours import minutes_until_close, us_market_session
+from app.market_hours import (
+    current_market_date,
+    minutes_since_open,
+    minutes_until_close,
+    us_market_session,
+)
 from app.prefilter import looks_market_relevant
 from app.scoring import (
     conviction_score,
+    evaluate_gap_chase,
     has_hedge_language,
     high_volatility_text,
     historical_performance_adjust,
@@ -658,6 +669,50 @@ async def _fetch_technicals(classification) -> dict:
     return {t: r for t, r in zip(tickers, results) if r is not None}
 
 
+async def _evaluate_gap_chase(ticker: str, direction: str | None, expected_move_pct) -> dict | None:
+    """Best-effort Gegenstueck zur Uebernacht-Gap-Antizipation: prueft kurz NACH
+    Boersenoeffnung (siehe GAP_CHASE_WINDOW_MINUTES), ob dieser Ticker bereits ueber
+    Nacht/vorboerslich stark in Signalrichtung gegappt ist (heutiger Eroeffnungskurs vs.
+    gestriger Schluss, aus der Kurshistorie), und falls ja, ob sich ein Einstieg jetzt
+    noch lohnt (siehe scoring.evaluate_gap_chase). None ausserhalb des Zeitfensters, bei
+    zu kleinem Gap, oder wenn Kursdaten fehlen (nie ein Fehler)."""
+    minutes_open = minutes_since_open()
+    if minutes_open is None or minutes_open > GAP_CHASE_WINDOW_MINUTES:
+        return None
+    quote = await prices.get_quote(ticker)
+    if not quote or not quote.get("open") or not quote.get("price"):
+        return None
+    hist = await prices.get_history(ticker)
+    today = current_market_date()
+    prev_close = prices.previous_close(hist, today) if hist and today else None
+    if not prev_close or prev_close <= 0:
+        return None
+
+    gap_pct = (quote["open"] - prev_close) / prev_close * 100.0
+    verdict = evaluate_gap_chase(
+        direction, gap_pct, expected_move_pct=expected_move_pct,
+        too_late_ratio=GAP_CHASE_TOO_LATE_RATIO, too_late_abs_pct=GAP_CHASE_TOO_LATE_ABS_PCT,
+    )
+    if verdict is None or abs(verdict["gap_pct"]) < GAP_CHASE_MIN_GAP_PCT:
+        return None
+
+    if not verdict["too_late"]:
+        # Nur fuer den "lohnt sich noch"-Fall ein Ausstiegs-Kursziel angeben - fuer
+        # "zu spaet" wird ja gerade vom (Nach-)Kauf abgeraten. Mit Erwartungswert: aus der
+        # verbleibenden geschaetzten Bewegung; sonst dieselbe Tagesspannen-Logik wie die
+        # normalen Stop-/Ziel-Vorschlaege (#5).
+        price = quote["price"]
+        remaining = verdict.get("remaining_pct")
+        if isinstance(remaining, (int, float)) and remaining > 0:
+            target = price * (1 + remaining / 100.0) if direction == "long" else price * (1 - remaining / 100.0)
+            verdict["target_price"] = round(target, 2)
+        else:
+            levels = prices.suggest_risk_levels(price, direction, quote.get("high"), quote.get("low"))
+            if levels:
+                verdict["target_price"] = levels.get("target")
+    return verdict
+
+
 def _apply_technical_conviction(score: int, summary: dict | None) -> int:
     """Hebt/senkt den Ueberzeugungs-Score, je nachdem ob die Technik das Signal
     bestaetigt (agrees True) oder ihm widerspricht (agrees False). Gewicht ueber
@@ -819,6 +874,19 @@ async def _build_alert_extras(raw, classification, statement_id, score, corrobor
         if gap:
             gap = {**gap, "ticker": (top.get("ticker") or "").upper()}
             extras["overnight_gap"] = gap
+
+    # Gap-Chase-Bewertung: Gegenstueck zur obigen Antizipation - der Gap ist bereits
+    # passiert (Markt war zu, jetzt zur Boersenoeffnung extrem hoch/niedrig). Lohnt sich
+    # ein Einstieg noch, und falls ja, wann verkaufen? Nur kurz nach der Eroeffnung
+    # relevant (siehe _evaluate_gap_chase), braucht ENABLE_PRICE_TRACKING fuer Kurs+Historie.
+    if ENABLE_GAP_CHASE_EVALUATION and ENABLE_PRICE_TRACKING and actionable:
+        top = max(actionable, key=lambda tc: tc.get("confidence") or 0.0)
+        chase = await _evaluate_gap_chase(
+            (top.get("ticker") or "").upper(), top.get("direction"),
+            classification.expected_move_pct if classification else None,
+        )
+        if chase:
+            extras["gap_chase"] = {**chase, "ticker": (top.get("ticker") or "").upper()}
 
     # Kelly-lite Positionsanteil (#5): global aus der bisherigen Trefferquote/Gewinn/
     # Verlust. Erst ab genuegend ausgewerteten Ergebnissen, damit die Zahl nicht auf

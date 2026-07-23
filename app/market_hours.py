@@ -85,3 +85,40 @@ def minutes_until_close(ts: float | None = None) -> int | None:
     if minutes >= _REGULAR_END:
         return None
     return _REGULAR_END - minutes
+
+
+def minutes_since_open(ts: float | None = None) -> int | None:
+    """Minuten seit dem regulaeren Handelsbeginn (9:30 ET) - fuer die Gap-Chase-
+    Bewertung (kurz nach Eroeffnung pruefen, ob ein ueber Nacht/vorboerslich gepushter
+    Kurs sich noch lohnt oder schon "verbraucht" ist). Nur waehrend der laufenden
+    regulaeren Session sinnvoll; sonst None (Wochenende, vor-/nachboerslich/zu, keine
+    Zeitzonendaten). Waehrend der regulaeren Session: nicht-negative Minutenzahl seit
+    9:30 ET (0 direkt bei Eroeffnung)."""
+    if _ET is None:
+        return None
+    now = (
+        datetime.datetime.fromtimestamp(ts, _ET)
+        if ts is not None
+        else datetime.datetime.now(_ET)
+    )
+    if now.weekday() >= 5:
+        return None
+    minutes = now.hour * 60 + now.minute
+    if minutes < _REGULAR_START or minutes >= _REGULAR_END:
+        return None
+    return minutes - _REGULAR_START
+
+
+def current_market_date(ts: float | None = None) -> str | None:
+    """Heutiges Kalenderdatum in US-Ostkueste-Zeit als ISO-String ('YYYY-MM-DD') - fuer
+    den Abgleich mit den Datumsangaben in Stooqs Tageshistorie (siehe
+    prices.previous_close: welche Zeile ist "gestern", welche ggf. schon "heute"?).
+    None ohne Zeitzonendaten."""
+    if _ET is None:
+        return None
+    now = (
+        datetime.datetime.fromtimestamp(ts, _ET)
+        if ts is not None
+        else datetime.datetime.now(_ET)
+    )
+    return now.date().isoformat()
