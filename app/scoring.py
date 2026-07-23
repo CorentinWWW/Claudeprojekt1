@@ -156,6 +156,22 @@ def kelly_fraction(
     return min(cap, edge * kelly_multiplier)
 
 
+# --- Historische-Performance-Feedback (Ticker lernt aus eigenen vergangenen Alerts) -----
+def historical_performance_adjust(
+    hit_rate: Optional[float], n: int, min_samples: int, weight: float
+) -> float:
+    """Ueberzeugungs-Score-Zu-/Abschlag aus der HISTORISCHEN Trefferquote eines Tickers -
+    macht die eigene bisherige Erfolgsbilanz fuer GENAU diesen Ticker zu einem Signal fuer
+    neue Alerts, statt jede neue Meldung unabhaengig davon gleich zu behandeln. 50%
+    Trefferquote (Coinflip) wirkt neutral (0.0); linear skaliert bis +weight bei 100%
+    bzw. -weight bei 0%. Gibt 0.0 (kein Effekt) zurueck, wenn keine Trefferquote vorliegt,
+    zu wenige Samples (< min_samples) - verhindert, dass 1-2 Zufallstreffer/-verluste den
+    Score verzerren - oder weight <= 0 (Feature aus)."""
+    if hit_rate is None or n < min_samples or weight <= 0:
+        return 0.0
+    return (hit_rate - 0.5) * 2.0 * weight
+
+
 # --- Erwartete Bewegung (#3) ------------------------------------------------------
 def format_expected_move(expected_move_pct, expected_horizon) -> str:
     """Kompakte Anzeige der von Claude geschaetzten erwarteten Kursbewegung + Horizont,

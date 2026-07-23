@@ -30,8 +30,12 @@ from app.config import (
     ENABLE_WEEKLY_DIGEST,
     ESCALATION_BAND,
     ENABLE_GAP_PREDICTION,
+    ENABLE_HISTORICAL_PERFORMANCE_GATE,
     GAP_MIN_EXPECTED_MOVE_PCT,
     GAP_NEAR_CLOSE_MINUTES,
+    HISTORICAL_PERFORMANCE_MIN_SAMPLES,
+    HISTORICAL_PERFORMANCE_SUPPRESS_BELOW,
+    HISTORICAL_PERFORMANCE_WEIGHT,
     LATE_MOVE_WARN_PCT,
     MAX_ALERTS_PER_HOUR,
     MAX_CLASSIFICATIONS_PER_DAY,
@@ -90,6 +94,7 @@ from app.scoring import (
     conviction_score,
     has_hedge_language,
     high_volatility_text,
+    historical_performance_adjust,
     hour_in_window,
     kelly_fraction,
     parse_hour_window,
@@ -156,6 +161,12 @@ def active_gates() -> dict:
         "paper_trading": PAPER_TRADING,
         "technicals": ENABLE_TECHNICALS,
         "technicals_require_agreement": TECHNICALS_REQUIRE_AGREEMENT if ENABLE_TECHNICALS else None,
+        "historical_performance_gate": ENABLE_HISTORICAL_PERFORMANCE_GATE,
+        "historical_performance_suppress_below": (
+            HISTORICAL_PERFORMANCE_SUPPRESS_BELOW
+            if ENABLE_HISTORICAL_PERFORMANCE_GATE and HISTORICAL_PERFORMANCE_SUPPRESS_BELOW > 0
+            else None
+        ),
         "late_move_warn_pct": LATE_MOVE_WARN_PCT or None,
         "gap_prediction": ENABLE_GAP_PREDICTION,
         "borderline_escalation": ENABLE_BORDERLINE_ESCALATION,
@@ -661,6 +672,24 @@ def _apply_technical_conviction(score: int, summary: dict | None) -> int:
     return score
 
 
+def _apply_historical_performance(score: int, hitrate: dict | None) -> int:
+    """Hebt/senkt den Ueberzeugungs-Score anhand der HISTORISCHEN Trefferquote des
+    staerksten handelbaren Tickers (siehe scoring.historical_performance_adjust) - macht
+    die eigene bisherige Erfolgsbilanz fuer diesen Ticker zu einem Signal fuer NEUE
+    Alerts, statt sie nur informativ anzuzeigen (das leistet bereits
+    ENABLE_HISTORICAL_HITRATE im Alert-Text, ohne Rueckwirkung auf die Entscheidung).
+    Gewicht ueber HISTORICAL_PERFORMANCE_WEIGHT; Ergebnis bleibt in [0,100]."""
+    if not hitrate:
+        return score
+    adjust = historical_performance_adjust(
+        hitrate.get("hit_rate"), hitrate.get("n") or 0,
+        HISTORICAL_PERFORMANCE_MIN_SAMPLES, HISTORICAL_PERFORMANCE_WEIGHT,
+    )
+    if not adjust:
+        return score
+    return max(0, min(100, round(score + adjust)))
+
+
 def _freshness_minutes(published_at) -> float | None:
     """Alter einer Meldung in Minuten aus der echten Veroeffentlichungszeit (Epoch) -
     oder None, wenn kein brauchbarer Zeitstempel vorliegt. Negatives (leichte Uhr-
@@ -903,6 +932,35 @@ async def _send_alerts(alert_worthy: list[tuple]):
                         )
                         continue
                     score = _apply_technical_conviction(score, summary)
+
+        # Historische-Performance-Feedback: der staerkste handelbare Ticker "lernt" aus
+        # seiner EIGENEN bisherigen Erfolgsbilanz (siehe scoring.historical_performance_adjust)
+        # - hebt/senkt den Ueberzeugungs-Score und kann - falls
+        # HISTORICAL_PERFORMANCE_SUPPRESS_BELOW gesetzt - einen Alert fuer einen Ticker mit
+        # belegt schlechter historischer Trefferquote unterdruecken. Braucht
+        # ENABLE_PRICE_TRACKING, um ueberhaupt Daten zu haben; ohne welche liefert
+        # get_ticker_hitrate None und es passiert nichts.
+        if ENABLE_HISTORICAL_PERFORMANCE_GATE:
+            actionable = actionable_tickers(classification)
+            if actionable:
+                top = max(actionable, key=lambda tc: tc.get("confidence") or 0.0)
+                hr = get_ticker_hitrate((top.get("ticker") or "").upper())
+                if hr and (hr.get("n") or 0) >= HISTORICAL_PERFORMANCE_MIN_SAMPLES:
+                    hit_rate = hr.get("hit_rate")
+                    if (
+                        HISTORICAL_PERFORMANCE_SUPPRESS_BELOW > 0
+                        and isinstance(hit_rate, (int, float))
+                        and hit_rate < HISTORICAL_PERFORMANCE_SUPPRESS_BELOW
+                    ):
+                        logger.info(
+                            "[%s] Alert unterdrueckt (historische Trefferquote fuer %s: "
+                            "%.0f%% < %.0f%%, n=%d): %s",
+                            raw.source, top.get("ticker"), hit_rate * 100,
+                            HISTORICAL_PERFORMANCE_SUPPRESS_BELOW * 100, hr["n"],
+                            raw.text[:80],
+                        )
+                        continue
+                    score = _apply_historical_performance(score, hr)
 
         if ALERT_MIN_CONVICTION > 0 and score < ALERT_MIN_CONVICTION:
             logger.info(

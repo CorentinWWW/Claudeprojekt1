@@ -196,6 +196,30 @@ ENABLE_HISTORICAL_HITRATE = _bool("ENABLE_HISTORICAL_HITRATE", True)
 # nur wirksam mit ENABLE_PRICE_TRACKING (braucht einen Live-Kurs).
 ENABLE_RISK_LEVELS = _bool("ENABLE_RISK_LEVELS", True)
 
+# --- Historische-Performance-Feedback (Ticker "lernt" aus eigenen vergangenen Alerts) ---
+# ENABLE_HISTORICAL_HITRATE (oben) zeigt die historische Pro-Ticker-Trefferquote nur an -
+# sie fliesst NICHT in die Alarm-Entscheidung ein, ein Ticker mit belegt schlechter Bilanz
+# wird also genauso behandelt wie einer mit durchweg guter. Dieses Gate schliesst die
+# Luecke: der staerkste handelbare Ticker eines Alerts wird anhand SEINER eigenen
+# historischen Trefferquote (aus den ausgewerteten alert_outcomes) im Ueberzeugungs-Score
+# hoch-/heruntergestuft - dieselbe Meldung wirkt also je nachdem, ob der Bot bei GENAU
+# diesem Ticker bisher meist richtig oder meist falsch lag. Braucht ENABLE_PRICE_TRACKING,
+# um ueberhaupt Daten zu haben (sonst keine Wirkung). Standardmaessig AUS wie alle
+# verhaltensaendernden Zustell-Gates.
+ENABLE_HISTORICAL_PERFORMANCE_GATE = _bool("ENABLE_HISTORICAL_PERFORMANCE_GATE", False)
+# Mindestanzahl ausgewerteter Alerts fuer GENAU diesen Ticker, bevor seine Trefferquote als
+# belastbar genug gilt, um den Score zu beeinflussen - verhindert, dass 1-2 Zufallstreffer/
+# -verluste den Score verzerren.
+HISTORICAL_PERFORMANCE_MIN_SAMPLES = _int("HISTORICAL_PERFORMANCE_MIN_SAMPLES", 5)
+# Maximaler Zu-/Abschlag (Punkte, 0-100) bei 100%/0% historischer Trefferquote; linear
+# skaliert um die 50%-Coinflip-Marke (50% Trefferquote wirkt neutral). 0 = kein Effekt.
+HISTORICAL_PERFORMANCE_WEIGHT = _int("HISTORICAL_PERFORMANCE_WEIGHT", 15)
+# Optionales hartes Gate: faellt die historische Trefferquote eines Tickers (bei
+# ausreichend Samples, siehe MIN_SAMPLES) unter diesen Wert (0-1), wird der Alert
+# unterdrueckt statt nur den Score zu senken - "bei diesem Ticker hat es bisher meistens
+# nicht gestimmt, hier aufhoeren". 0 = aus (nur der Score-Effekt oben wirkt).
+HISTORICAL_PERFORMANCE_SUPPRESS_BELOW = _float("HISTORICAL_PERFORMANCE_SUPPRESS_BELOW", 0.0)
+
 # Woechentlicher Performance-Digest per Telegram (#10): einmal pro Woche (am
 # WEEKLY_DIGEST_WEEKDAY, 0=Montag .. 6=Sonntag, ab WEEKLY_DIGEST_MIN_HOUR UTC) eine
 # Zusammenfassung der Trefferquote/besten/schlechtesten Calls. Braucht ausgewertete

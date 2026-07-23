@@ -366,6 +366,20 @@ Die Alerts kamen zuletzt teils erst, **als die Bewegung schon lief**. Zwei Gegen
   12. **Aktive-Gates-Übersicht** – Startup-Log und `/api/health` (`active_gates`) zeigen
       auf einen Blick, welche optionalen Gates gerade Alerts beeinflussen.
   Auch hier: alles Analyse-Hilfen, **keine Anlageberatung**.
+- **Historische-Performance-Feedback** (`ENABLE_HISTORICAL_PERFORMANCE_GATE`, Standard
+  **aus**): `ENABLE_HISTORICAL_HITRATE` zeigt die historische Pro-Ticker-Trefferquote
+  bisher nur im Alert an - sie floss NICHT in die Entscheidung selbst ein, ein Ticker
+  mit belegt schlechter Bilanz wurde also genauso behandelt wie einer mit durchweg
+  guter. Dieses Gate schließt die Lücke: der stärkste handelbare Ticker eines Alerts
+  wird anhand SEINER EIGENEN historischen Trefferquote (aus den ausgewerteten
+  `alert_outcomes`, braucht `ENABLE_PRICE_TRACKING`) im Überzeugungs-Score hoch-/
+  heruntergestuft (`HISTORICAL_PERFORMANCE_WEIGHT`, linear um die 50%-Coinflip-Marke) -
+  der Bot lernt so aus seinen eigenen vergangenen Alerts für genau diesen Ticker, statt
+  jede neue Meldung unabhängig davon gleich zu bewerten. Erst ab
+  `HISTORICAL_PERFORMANCE_MIN_SAMPLES` ausgewerteten Alerts für diesen Ticker wirksam,
+  damit nicht 1-2 Zufallstreffer den Score verzerren. Optional
+  (`HISTORICAL_PERFORMANCE_SUPPRESS_BELOW`) wird ein Alert für einen Ticker mit belegt
+  schlechter Trefferquote sogar komplett unterdrückt statt nur den Score zu senken.
 - **Echte Nachrichtenzeit + Alter im Alert**: statt eines bloßen „gerade erfasst"-
   Zeitstempels liest jede Quelle jetzt die **tatsächliche Veröffentlichungszeit** aus
   (GDELT `seendate`, RSS `published_parsed`, Truth Social `created_at`; Fallback auf
@@ -684,6 +698,7 @@ Siehe `.env.example` für alle Variablen. Wichtige zusätzliche Stellschrauben:
 | `ALERT_MIN_EXPECTED_MOVE_PCT` | Nur alarmieren, wenn Claudes grobe erwartete Bewegung ≥ diesem % ist (`0` = aus) |
 | `ENABLE_HISTORICAL_HITRATE` | Historische Pro-Ticker-Trefferquote im Alert (braucht Preis-Tracking zum Befüllen) |
 | `ENABLE_RISK_LEVELS` | Vorgeschlagene Stop-/Take-Profit-Marken aus der Tagesspanne (nur mit Preis-Tracking) |
+| `ENABLE_HISTORICAL_PERFORMANCE_GATE` / `HISTORICAL_PERFORMANCE_MIN_SAMPLES` / `_WEIGHT` / `_SUPPRESS_BELOW` | Der staerkste handelbare Ticker "lernt" aus seiner EIGENEN historischen Trefferquote (braucht Preis-Tracking): hebt/senkt den Ueberzeugungs-Score, optional harte Unterdrueckung bei belegt schlechter Bilanz. Standard **aus** |
 | `ENABLE_BORDERLINE_ESCALATION` / `CLAUDE_ESCALATION_MODEL` / `ESCALATION_BAND` | Grenzfälle nahe der Schwelle mit stärkerem Modell zweitprüfen (Standard **aus**, kostet Extra-Calls) (#4) |
 | `ENABLE_PRICE_TRACKING` / `PRICE_OUTCOME_HORIZON_MINUTES` | Kurs-Feedback/Backtesting + heutige Bewegung im Alert, best-effort über Stooq. Im ausgelieferten Workflow/`.env.example` **an** (Code-Standard aus); Repo-Variable `ENABLE_PRICE_TRACKING=false` schaltet ab (#2/#3/#8) |
 | `PRICE_CACHE_TTL_SECONDS` | Kurz-Cache für Live-Kursabfragen (gleiche Quote nicht doppelt holen); `0` = aus |
