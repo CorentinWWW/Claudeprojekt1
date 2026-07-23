@@ -26,6 +26,7 @@ from app.config import (
     ENABLE_PREFILTER,
     ENABLE_PRICE_TRACKING,
     ENABLE_RISK_LEVELS,
+    ENABLE_TECHNICALS,
     ENABLE_TRUTH_SOCIAL,
     ENABLE_WEEKLY_DIGEST,
     ESCALATION_BAND,
@@ -48,6 +49,8 @@ from app.config import (
     QUIET_HOURS_TZ,
     SECTOR_CLUSTER_MIN,
     SECTOR_CLUSTER_WINDOW_HOURS,
+    TECHNICALS_CONVICTION_WEIGHT,
+    TECHNICALS_REQUIRE_AGREEMENT,
     TELEGRAM_STARTUP_NOTICE,
     TICKER_ALERT_COOLDOWN_MINUTES,
     TICKER_UNIVERSE,
@@ -84,7 +87,7 @@ from app.db import (
     ticker_in_cooldown,
     try_claim_meta_key,
 )
-from app import paper_trading, prices
+from app import indicators, paper_trading, prices
 from app.prefilter import looks_market_relevant
 from app.scoring import (
     conviction_score,
@@ -154,6 +157,8 @@ def active_gates() -> dict:
         "blocklist": len(BLOCKLIST_TICKERS) or None,
         "price_tracking": ENABLE_PRICE_TRACKING,
         "paper_trading": PAPER_TRADING,
+        "technicals": ENABLE_TECHNICALS,
+        "technicals_require_agreement": TECHNICALS_REQUIRE_AGREEMENT if ENABLE_TECHNICALS else None,
         "late_move_warn_pct": LATE_MOVE_WARN_PCT or None,
         "borderline_escalation": ENABLE_BORDERLINE_ESCALATION,
         "weekly_digest": ENABLE_WEEKLY_DIGEST,
@@ -622,6 +627,53 @@ async def _fetch_ticker_context(classification, statement_id) -> dict:
     return result
 
 
+async def _ticker_technical(ticker: str, direction: str | None) -> dict | None:
+    """Best-effort: historische Tageskurse holen, das TradingView-artige Indikator-Panel
+    berechnen und um die Uebereinstimmung mit der eingeschaetzten Richtung ergaenzen.
+    None, wenn keine/zu wenige Kursdaten vorliegen (Feature entfaellt dann still)."""
+    hist = await prices.get_history(ticker)
+    if not hist:
+        return None
+    summary = indicators.technical_summary(
+        hist.get("high"), hist.get("low"), hist.get("close"), hist.get("volume")
+    )
+    if not summary:
+        return None
+    summary["agrees"] = indicators.agreement(summary.get("label"), direction)
+    summary["contradicts_strongly"] = indicators.strongly_contradicts(
+        summary.get("label"), direction
+    )
+    return summary
+
+
+async def _fetch_technicals(classification) -> dict:
+    """Technik-Bewertung fuer ALLE handelbaren Ticker einer Meldung (fuer die Anzeige im
+    Alert). {TICKER: summary}. Kursabfragen gleichzeitig statt nacheinander."""
+    actionable = actionable_tickers(classification)
+    if not actionable:
+        return {}
+    tickers = [(tc.get("ticker") or "").upper() for tc in actionable]
+    directions = [tc.get("direction") for tc in actionable]
+    results = await asyncio.gather(
+        *(_ticker_technical(t, d) for t, d in zip(tickers, directions))
+    )
+    return {t: r for t, r in zip(tickers, results) if r is not None}
+
+
+def _apply_technical_conviction(score: int, summary: dict | None) -> int:
+    """Hebt/senkt den Ueberzeugungs-Score, je nachdem ob die Technik das Signal
+    bestaetigt (agrees True) oder ihm widerspricht (agrees False). Gewicht ueber
+    TECHNICALS_CONVICTION_WEIGHT; 0 = Score unveraendert. Ergebnis bleibt in [0,100]."""
+    if not summary or TECHNICALS_CONVICTION_WEIGHT <= 0:
+        return score
+    agrees = summary.get("agrees")
+    if agrees is True:
+        return min(100, score + TECHNICALS_CONVICTION_WEIGHT)
+    if agrees is False:
+        return max(0, score - TECHNICALS_CONVICTION_WEIGHT)
+    return score
+
+
 def _freshness_minutes(published_at) -> float | None:
     """Alter einer Meldung in Minuten aus der echten Veroeffentlichungszeit (Epoch) -
     oder None, wenn kein brauchbarer Zeitstempel vorliegt. Negatives (leichte Uhr-
@@ -744,6 +796,14 @@ async def _build_alert_extras(raw, classification, statement_id, score, corrobor
             if f and f > 0:
                 extras["kelly_fraction"] = f
 
+    # Technische Gesamtbewertung (TradingView-Stil) je handelbarem Ticker fuer die Anzeige
+    # (die Score-Wirkung/das Gate greifen bereits vorher in _send_alerts). Die Historie
+    # ist gecacht, der staerkste Ticker ist hier daher meist ein Cache-Treffer.
+    if ENABLE_TECHNICALS and actionable:
+        tech = await _fetch_technicals(classification)
+        if tech:
+            extras["technical"] = tech
+
     if classification is not None and classification.related_topic_id is not None:
         thread = get_topic_thread(classification.related_topic_id)
         if len(thread) > 1:
@@ -816,6 +876,29 @@ async def _send_alerts(alert_worthy: list[tuple]):
     gated: list[tuple] = []
     for raw, classification, statement_id in alert_worthy:
         score, corroboration, hedged = _compute_conviction(raw, classification, statement_id)
+
+        # Technische Zweitmeinung (TradingView-Stil): fuer den staerksten handelbaren
+        # Ticker die Gesamtbewertung holen. Sie hebt/senkt den Ueberzeugungs-Score (so
+        # wirkt sie auf ALLE nachgelagerten Gates UND das Paper-Sizing) und kann - falls
+        # TECHNICALS_REQUIRE_AGREEMENT aktiv - einen klar widersprechenden Alert
+        # unterdruecken. Best-effort; ohne erreichbare Kurshistorie passiert nichts.
+        if ENABLE_TECHNICALS:
+            actionable = actionable_tickers(classification)
+            if actionable:
+                top = max(actionable, key=lambda tc: tc.get("confidence") or 0.0)
+                summary = await _ticker_technical(
+                    (top.get("ticker") or "").upper(), top.get("direction")
+                )
+                if summary is not None:
+                    if TECHNICALS_REQUIRE_AGREEMENT and summary.get("contradicts_strongly"):
+                        logger.info(
+                            "[%s] Alert unterdrueckt (Technik widerspricht klar: %s vs %s): %s",
+                            raw.source, summary.get("label"), top.get("direction"),
+                            raw.text[:80],
+                        )
+                        continue
+                    score = _apply_technical_conviction(score, summary)
+
         if ALERT_MIN_CONVICTION > 0 and score < ALERT_MIN_CONVICTION:
             logger.info(
                 "[%s] Alert unter globaler Ueberzeugungs-Schwelle (%d < %d) - "

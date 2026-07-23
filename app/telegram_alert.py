@@ -59,6 +59,54 @@ def _volatility_flag(text: Optional[str]) -> str:
     return ""
 
 
+_TECH_EMOJI = {
+    "Strong Buy": "🟢🟢", "Buy": "🟢", "Neutral": "⚪",
+    "Sell": "🔴", "Strong Sell": "🔴🔴",
+}
+
+
+def _technical_segment(technical: Optional[dict]) -> str:
+    """Kompakte technische Gesamtbewertung (TradingView-Stil) je handelbarem Ticker:
+    Rating, MA/Oszillator-Zaehlung, ein paar Kennzahlen (RSI/MACD/ADX) und ob die Technik
+    das Signal bestaetigt oder ihm widerspricht. Leer, wenn keine Technik vorliegt."""
+    if not technical or not isinstance(technical, dict):
+        return ""
+    lines = []
+    for ticker, summ in technical.items():
+        if not isinstance(summ, dict):
+            continue
+        label = summ.get("label") or "Neutral"
+        emoji = _TECH_EMOJI.get(label, "⚪")
+        ma = summ.get("ma") or {}
+        osc = summ.get("oscillators") or {}
+        vals = summ.get("values") or {}
+        parts = [
+            f"{emoji} <b>{html.escape(str(ticker))}</b> Technik: {html.escape(label)}",
+            f"(MA {ma.get('buy', 0)}▲/{ma.get('sell', 0)}▼, "
+            f"Osz {osc.get('buy', 0)}▲/{osc.get('sell', 0)}▼)",
+        ]
+        detail = []
+        rsi_v = vals.get("rsi")
+        if isinstance(rsi_v, (int, float)):
+            detail.append(f"RSI {rsi_v:.0f}")
+        macd_h = vals.get("macd_hist")
+        if isinstance(macd_h, (int, float)):
+            detail.append(f"MACD{'▲' if macd_h > 0 else '▼'}")
+        adx_v = vals.get("adx")
+        if isinstance(adx_v, (int, float)):
+            detail.append(f"ADX {adx_v:.0f}")
+        line = "📊 " + " ".join(parts)
+        if detail:
+            line += " · " + " ".join(detail)
+        agrees = summ.get("agrees")
+        if agrees is True:
+            line += " · ✅ bestätigt Signal"
+        elif agrees is False:
+            line += " · ⚠️ widerspricht Signal"
+        lines.append(line)
+    return "\n".join(lines)
+
+
 def _thread_segment(thread: Optional[list]) -> str:
     """Kompakte Verlaufs-Zeitleiste bei einer Eskalation (#5): wie viele Meldungen zum
     Thema es gibt und wann/womit es begann. Der Basistext kommt aus der DB und wird
@@ -358,6 +406,11 @@ def _format_message(
             f"\n⏰ Spät dran – Kurs heute schon {late_move:+.1f}% in Signalrichtung "
             "(Bewegung evtl. großteils gelaufen)"
         )
+
+    # Technische Gesamtbewertung (TradingView-Stil) je handelbarem Ticker.
+    tech_line = _technical_segment(extras.get("technical"))
+    if tech_line:
+        trailing += f"\n{tech_line}"
 
     if extras.get("hedged"):
         trailing += "\n🗣 unbestätigt/Gerücht – mit Vorsicht behandeln"

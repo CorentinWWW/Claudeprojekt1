@@ -182,6 +182,41 @@ die reguläre Klassifikations-Pipeline weiterhin normal.
   braucht es einen kostenpflichtigen Anbieter (nicht Teil dieses Projekts, aber
   leicht als weiterer Alert-Datenpunkt ergänzbar).
 
+## Technische Analyse (TradingView-Stil)
+
+Zusätzlich zum Nachrichten-/Textsignal holt sich der Predictor eine **technische
+Zweitmeinung** aus den Kursdaten — analog zum „Technicals"-Panel auf TradingView.
+Aktivieren über `ENABLE_TECHNICALS=true` (im Workflow bereits an).
+
+Für jeden handelbaren Ticker eines Alerts wird die **Tageshistorie** (Stooq, best-effort,
+kein Key) geladen und ein großer Teil der TradingView-Standardindikatoren in reinem
+Python berechnet (`app/indicators.py`, keine zusätzlichen Dependencies):
+
+- **Gleitende Durchschnitte:** SMA & EMA (10/20/30/50/100/200), VWMA(20), Hull-MA(9),
+  Ichimoku-Basislinie(9/26/52)
+- **Oszillatoren:** RSI(14), Stochastik(14,3,3), Stochastik-RSI, CCI(20), ADX(14)+DI,
+  Awesome Oscillator, Momentum(10), MACD(12,26,9), Williams %R(14), Bull/Bear Power(13),
+  Ultimate Oscillator(7,14,28)
+- **Kontext:** ATR(14), Bollinger-Bänder(20,2), ROC, OBV
+
+Daraus wird — nach der TradingView-Methodik (je Indikator Buy/Sell/Neutral, Mehrheit je
+Gruppe, Mittel aus MA- und Oszillator-Gruppe) — eine **Gesamtbewertung** gebildet:
+**Strong Buy / Buy / Neutral / Sell / Strong Sell**.
+
+**Wie das den Predictor verbessert:**
+- Die Bewertung steht im Alert (mit MA-/Oszillator-Zählung und RSI/MACD/ADX) und zeigt,
+  ob die Technik das Signal **✅ bestätigt** oder ihm **⚠️ widerspricht**.
+- Bei Bestätigung/Widerspruch wird der **Überzeugungs-Score angehoben/gesenkt**
+  (`TECHNICALS_CONVICTION_WEIGHT`, Standard ±10) — das wirkt auf alle nachgelagerten
+  Gates **und** auf die Paper-Trading-Positionsgröße.
+- Optional (`TECHNICALS_REQUIRE_AGREEMENT=true`) wird ein Alert **unterdrückt**, wenn die
+  Technik klar widerspricht (Long trotz „Strong Sell" bzw. Short trotz „Strong Buy").
+  Standard aus — die Technik reichert dann nur an.
+
+Die Indikator-Mathematik ist mit bekannten Reihen unit-getestet (`tests/test_indicators.py`).
+Bewusst best-effort: ist die Historie nicht erreichbar, entfällt die Technik still, der
+Alert läuft normal weiter.
+
 ## Paper-Trading (virtuelles Depot)
 
 Ein **rein virtuelles Depot** (Standard-Startkapital **500 €**, `PAPER_STARTING_CAPITAL`),

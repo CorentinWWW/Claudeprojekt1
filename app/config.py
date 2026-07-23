@@ -224,6 +224,26 @@ ESCALATION_BAND = _float("ESCALATION_BAND", 0.1)
 ENABLE_PRICE_TRACKING = _bool("ENABLE_PRICE_TRACKING", False)
 PRICE_OUTCOME_HORIZON_MINUTES = _int("PRICE_OUTCOME_HORIZON_MINUTES", 60)
 
+# --- Technische Analyse (TradingView-Stil, siehe app/indicators.py) ---
+# Wenn aktiv: fuer die handelbaren Ticker eines Alerts werden aus den historischen
+# Tageskursen (Stooq, best-effort) gaengige technische Indikatoren berechnet und zu einer
+# Gesamtbewertung (Strong Buy..Strong Sell) verdichtet. Diese wird im Alert angezeigt und
+# darauf geprueft, ob sie die von Claude eingeschaetzte Long/Short-Richtung BESTAETIGT
+# oder ihr WIDERSPRICHT - eine technische Zweitmeinung zusaetzlich zum Nachrichtensignal.
+# Best-effort (Historie nicht erreichbar -> Feature entfaellt still). Standardmaessig AUS.
+ENABLE_TECHNICALS = _bool("ENABLE_TECHNICALS", False)
+# Optionales, konservatives Alarm-Gate: nur wirksam, wenn ENABLE_TECHNICALS aktiv ist.
+# Ist es an, wird ein Alert unterdrueckt, wenn die technische Gesamtbewertung dem Signal
+# KLAR widerspricht (Long trotz 'Strong Sell' bzw. Short trotz 'Strong Buy'). Standard
+# AUS - die Technik reichert den Alert dann nur an, unterdrueckt aber nichts.
+TECHNICALS_REQUIRE_AGREEMENT = _bool("TECHNICALS_REQUIRE_AGREEMENT", False)
+# Um wie viele Punkte (0-100) der Ueberzeugungs-Score angehoben/gesenkt wird, wenn die
+# Technik das Signal bestaetigt/widerlegt. 0 = Score unveraendert lassen (nur Anzeige).
+TECHNICALS_CONVICTION_WEIGHT = _int("TECHNICALS_CONVICTION_WEIGHT", 10)
+# Wie lange (Sekunden) die Kurs-Historie eines Tickers zwischengespeichert wird - Tages-
+# bars aendern sich innerhalb eines Tages kaum, das spart wiederholte Downloads.
+HISTORY_CACHE_TTL_SECONDS = _int("HISTORY_CACHE_TTL_SECONDS", 900)
+
 # --- Paper-Trading (virtuelles Depot, KEIN echtes Geld / kein Broker) ---
 # Wenn aktiv: bei jedem tatsaechlich verschickten Alert wird fuer die handelbaren Ticker
 # eine VIRTUELLE Position eroeffnet (Einstiegskurs gemerkt), laufend zum aktuellen Kurs

@@ -103,6 +103,13 @@ jobs:
           # (Standard 500 EUR) anpassbar.
           PAPER_TRADING: ${{ vars.PAPER_TRADING || 'true' }}
           PAPER_STARTING_CAPITAL: ${{ vars.PAPER_STARTING_CAPITAL }}
+          # Technische Analyse (TradingView-Stil): technische Gesamtbewertung je Ticker aus
+          # der Kurshistorie (Stooq), als Bestaetigung/Widerspruch zum Nachrichtensignal.
+          # '|| true' = standardmaessig AN; zum Abschalten Repo-Variable ENABLE_TECHNICALS=false.
+          # Optionales hartes Gate (nur bei klarem Widerspruch unterdruecken) ueber
+          # TECHNICALS_REQUIRE_AGREEMENT=true (Repo-Variable), standardmaessig aus.
+          ENABLE_TECHNICALS: ${{ vars.ENABLE_TECHNICALS || 'true' }}
+          TECHNICALS_REQUIRE_AGREEMENT: ${{ vars.TECHNICALS_REQUIRE_AGREEMENT }}
           MANUAL_TEST_TEXT: ${{ github.event.inputs.test_text }}
           ENABLE_LIVE_AUDIO: "false"
           # Playwright/Chromium ist hier bewusst nicht installiert, um Laeufe

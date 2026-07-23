@@ -23,6 +23,11 @@ logger = logging.getLogger(__name__)
 # Antwort (mit Header): Symbol,Date,Time,Open,High,Low,Close,Volume
 _STOOQ_URL = "https://stooq.com/q/l/?s={symbol}&f=sd2t2ohlcv&h&e=csv"
 
+# Stooq-Tageshistorie als CSV, ohne API-Key:
+#   https://stooq.com/q/d/l/?s=aapl.us&i=d
+# Antwort (mit Header): Date,Open,High,Low,Close,Volume (aelteste Zeile zuerst)
+_STOOQ_HISTORY_URL = "https://stooq.com/q/d/l/?s={symbol}&i=d"
+
 # --- Kurz-Cache + Circuit-Breaker (#13) -------------------------------------------
 # Cache: dieselbe Ticker-Quote wird innerhalb von PRICE_CACHE_TTL_SECONDS nicht erneut
 # vom Kursdienst geholt (spart HTTP-Calls, wenn ein Ticker in einem Zyklus mehrfach
@@ -30,6 +35,8 @@ _STOOQ_URL = "https://stooq.com/q/l/?s={symbol}&f=sd2t2ohlcv&h&e=csv"
 # aufeinanderfolgenden Fehlern kurz gar nicht mehr anfragen, statt einen down/rate-limited
 # Kursdienst bei jedem Ticker erneut zu hammern.
 _QUOTE_CACHE: dict[str, tuple[float, Optional[dict]]] = {}
+# Getrennter Cache fuer die (groessere, sich langsam aendernde) Tageshistorie.
+_HISTORY_CACHE: dict[str, tuple[float, Optional[dict]]] = {}
 _breaker = {"consecutive_failures": 0, "open_until": 0.0}
 _BREAKER_THRESHOLD = 5
 _BREAKER_COOLDOWN_SECONDS = 120.0
@@ -38,6 +45,7 @@ _BREAKER_COOLDOWN_SECONDS = 120.0
 def clear_cache() -> None:
     """Setzt Cache + Circuit-Breaker zurueck (fuer Tests / manuellen Reset)."""
     _QUOTE_CACHE.clear()
+    _HISTORY_CACHE.clear()
     _breaker["consecutive_failures"] = 0
     _breaker["open_until"] = 0.0
 
@@ -180,3 +188,106 @@ async def get_quote(ticker: str, client: Optional[httpx.AsyncClient] = None) -> 
 async def get_price(ticker: str, client: Optional[httpx.AsyncClient] = None) -> Optional[float]:
     quote = await get_quote(ticker, client=client)
     return quote["price"] if quote else None
+
+
+def parse_stooq_history_csv(text: str, max_bars: int = 400) -> Optional[dict]:
+    """Parst die Stooq-Tageshistorie-CSV zu parallelen Listen
+    {'date','open','high','low','close','volume'} (aelteste zuerst). Nur Zeilen mit
+    vollstaendigen, endlichen O/H/L/C werden uebernommen; Volumen fehlt teils ('N/D') und
+    wird dann 0.0. Gibt die letzten max_bars Zeilen zurueck. None bei unbrauchbarer Antwort."""
+    if not isinstance(text, str):
+        return None
+    lines = [ln for ln in text.strip().splitlines() if ln.strip()]
+    if len(lines) < 2:
+        return None
+    header = [h.strip().lower() for h in lines[0].split(",")]
+    try:
+        di = header.index("date")
+        oi = header.index("open")
+        hi = header.index("high")
+        li = header.index("low")
+        ci = header.index("close")
+    except ValueError:
+        return None
+    vi = header.index("volume") if "volume" in header else None
+
+    dates, opens, highs, lows, closes, volumes = [], [], [], [], [], []
+
+    def _num(cell: str) -> Optional[float]:
+        cell = cell.strip()
+        if not cell or cell.upper() == "N/D":
+            return None
+        try:
+            v = float(cell)
+        except ValueError:
+            return None
+        return v if math.isfinite(v) else None
+
+    for ln in lines[1:]:
+        cols = ln.split(",")
+        if len(cols) < len(header):
+            continue
+        o, h, l, c = _num(cols[oi]), _num(cols[hi]), _num(cols[li]), _num(cols[ci])
+        if None in (o, h, l, c):
+            continue
+        v = _num(cols[vi]) if vi is not None else None
+        dates.append(cols[di].strip())
+        opens.append(o)
+        highs.append(h)
+        lows.append(l)
+        closes.append(c)
+        volumes.append(v if v is not None else 0.0)
+
+    if len(closes) < 2:
+        return None
+    return {
+        "date": dates[-max_bars:],
+        "open": opens[-max_bars:],
+        "high": highs[-max_bars:],
+        "low": lows[-max_bars:],
+        "close": closes[-max_bars:],
+        "volume": volumes[-max_bars:],
+    }
+
+
+async def get_history(
+    ticker: str, client: Optional[httpx.AsyncClient] = None, max_bars: int = 400
+) -> Optional[dict]:
+    """Holt die Tageshistorie eines US-Tickers (best-effort, nie eine Exception nach
+    aussen). Nutzt einen eigenen Cache (HISTORY_CACHE_TTL_SECONDS) und denselben
+    Circuit-Breaker wie die Live-Quote, damit ein gestoerter Kursdienst nicht bei jedem
+    Ticker erneut angefragt wird."""
+    if not ticker:
+        return None
+    symbol = to_stooq_symbol(ticker)
+    now = time.time()
+    ttl = config.HISTORY_CACHE_TTL_SECONDS
+    if ttl > 0:
+        cached = _HISTORY_CACHE.get(symbol)
+        if cached is not None and (now - cached[0]) < ttl:
+            return cached[1]
+
+    if now < _breaker["open_until"]:
+        logger.debug("Kurs-Circuit-Breaker offen, ueberspringe Historie fuer %s.", ticker)
+        return None
+
+    url = _STOOQ_HISTORY_URL.format(symbol=symbol)
+    try:
+        if client is not None:
+            resp = await client.get(url)
+        else:
+            async with httpx.AsyncClient(timeout=12, follow_redirects=True) as c:
+                resp = await c.get(url)
+        resp.raise_for_status()
+        history = parse_stooq_history_csv(resp.text, max_bars=max_bars)
+    except Exception:
+        logger.debug("Historie fuer %s fehlgeschlagen (best-effort).", ticker, exc_info=True)
+        _breaker["consecutive_failures"] += 1
+        if _breaker["consecutive_failures"] >= _BREAKER_THRESHOLD:
+            _breaker["open_until"] = now + _BREAKER_COOLDOWN_SECONDS
+        return None
+
+    _breaker["consecutive_failures"] = 0
+    if ttl > 0:
+        _HISTORY_CACHE[symbol] = (now, history)
+    return history
