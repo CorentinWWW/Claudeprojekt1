@@ -81,6 +81,23 @@ jobs:
           # leeren String, den config.py wie "nicht gesetzt" behandelt -> es gilt dann der
           # Standard 0.90 aus dem Code.
           ALERT_MIN_TICKER_CONFIDENCE: ${{ vars.ALERT_MIN_TICKER_CONFIDENCE }}
+          # Zustell-Gates: alle standardmaessig aus im Code, hier auf Nutzerwunsch scharf
+          # gestellt (per Repo-Variable ueberschreibbar). ACHTUNG (siehe Commit-Message/
+          # Chat): viele dieser Gates gleichzeitig koennen Alerts stark ausduennen, weil
+          # eine Meldung durch ALLE Schwellen gleichzeitig muss.
+          MAX_NEWS_AGE_MINUTES: ${{ vars.MAX_NEWS_AGE_MINUTES || '180' }}
+          TICKER_ALERT_COOLDOWN_MINUTES: ${{ vars.TICKER_ALERT_COOLDOWN_MINUTES || '60' }}
+          ALERT_MIN_CONVICTION: ${{ vars.ALERT_MIN_CONVICTION || '70' }}
+          MAX_ALERTS_PER_HOUR: ${{ vars.MAX_ALERTS_PER_HOUR || '5' }}
+          ALERT_MIN_EXPECTED_MOVE_PCT: ${{ vars.ALERT_MIN_EXPECTED_MOVE_PCT || '2.0' }}
+          # Historische-Performance-Feedback: Ticker lernt aus eigener Bilanz, inkl. hartem
+          # Unterdrueckungs-Gate ab < 40% Trefferquote (erst aussagekraeftig, sobald genug
+          # ausgewertete Alerts vorliegen, siehe HISTORICAL_PERFORMANCE_MIN_SAMPLES).
+          ENABLE_HISTORICAL_PERFORMANCE_GATE: ${{ vars.ENABLE_HISTORICAL_PERFORMANCE_GATE || 'true' }}
+          HISTORICAL_PERFORMANCE_SUPPRESS_BELOW: ${{ vars.HISTORICAL_PERFORMANCE_SUPPRESS_BELOW || '0.4' }}
+          # Zweitmeinung fuer Grenzfaelle: kostet einen Extra-Call (Sonnet) pro Grenzfall,
+          # zaehlt gegen das Tages-Limit.
+          ENABLE_BORDERLINE_ESCALATION: ${{ vars.ENABLE_BORDERLINE_ESCALATION || 'true' }}
           # Preis-Tracking / Backtesting: nach jedem Alert wird der Kurs der handelbaren
           # Ticker erfasst und nach PRICE_OUTCOME_HORIZON_MINUTES erneut gemessen - so
           # entsteht ueber die Laeufe hinweg eine ECHTE Trefferquote (Dashboard
@@ -107,9 +124,9 @@ jobs:
           # der Kurshistorie (Stooq), als Bestaetigung/Widerspruch zum Nachrichtensignal.
           # '|| true' = standardmaessig AN; zum Abschalten Repo-Variable ENABLE_TECHNICALS=false.
           # Optionales hartes Gate (nur bei klarem Widerspruch unterdruecken) ueber
-          # TECHNICALS_REQUIRE_AGREEMENT=true (Repo-Variable), standardmaessig aus.
+          # TECHNICALS_REQUIRE_AGREEMENT - auf Nutzerwunsch hier scharf gestellt.
           ENABLE_TECHNICALS: ${{ vars.ENABLE_TECHNICALS || 'true' }}
-          TECHNICALS_REQUIRE_AGREEMENT: ${{ vars.TECHNICALS_REQUIRE_AGREEMENT }}
+          TECHNICALS_REQUIRE_AGREEMENT: ${{ vars.TECHNICALS_REQUIRE_AGREEMENT || 'true' }}
           MANUAL_TEST_TEXT: ${{ github.event.inputs.test_text }}
           # Playwright/Chromium ist hier bewusst nicht installiert, um Laeufe
           # kurz zu halten - Truth Social nutzt in diesem Modus nur den
