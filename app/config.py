@@ -158,6 +158,21 @@ DIVERGENCE_WARN_PCT = _float("DIVERGENCE_WARN_PCT", 2.0)
 # (braucht die heutige Bewegung). 0 = aus.
 LATE_MOVE_WARN_PCT = _float("LATE_MOVE_WARN_PCT", 3.0)
 
+# --- Uebernacht-/Vorboersen-Gap-Antizipation ---
+# Sagt frueh, dass eine Aktie steigen/fallen duerfte, BEVOR ein Katalysator kurz vor/nach
+# Boersenschluss ausgehypt wird und der Kurs VORBOERSLICH schon extrem gegappt ist. Kommt
+# ein klar gerichteter Alert in einem Fenster, in dem der Markt ihn nicht mehr voll
+# einpreisen kann (nachboerslich, ueber Nacht, uebers Wochenende oder kurz vor Schluss),
+# weist der Alert auf ein wahrscheinliches Gap am naechsten Open hin - "jetzt rein, bevor
+# es hochschiesst". Rein zeit-/richtungsbasiert (kein Extra-Call). Standardmaessig AN.
+ENABLE_GAP_PREDICTION = _bool("ENABLE_GAP_PREDICTION", True)
+# Ab wie vielen Minuten VOR Boersenschluss ein Alert in der laufenden Session schon als
+# Gap-Kandidat gilt (kaum noch Zeit, heute einzupreisen).
+GAP_NEAR_CLOSE_MINUTES = _int("GAP_NEAR_CLOSE_MINUTES", 45)
+# Optionaler Mindest-Erwartungswert (%, aus Claudes Schaetzung), damit Mini-Katalysatoren
+# keinen Gap-Hinweis ausloesen. 0 = aus (jeder klar gerichtete Alert im Fenster zaehlt).
+GAP_MIN_EXPECTED_MOVE_PCT = _float("GAP_MIN_EXPECTED_MOVE_PCT", 0.0)
+
 # Kelly-lite Positionsanteil (#5): aus der historischen Trefferquote + mittlerem Gewinn/
 # Verlust einen groben, ausdruecklich unverbindlichen Bankroll-Anteil (Half-Kelly,
 # gedeckelt) ableiten und im Alert anzeigen. Braucht ausgewertete Ergebnisse

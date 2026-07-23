@@ -63,3 +63,25 @@ def session_label(session: str) -> str:
     """Kurzes, emoji-versehenes Label fuer die Anzeige - leerer String bei
     'unknown' (dann wird im Alert einfach nichts angezeigt)."""
     return _SESSION_LABEL.get(session, "")
+
+
+def minutes_until_close(ts: float | None = None) -> int | None:
+    """Minuten bis zum reguläeren Handelsschluss (16:00 ET) - fuer die Uebernacht-Gap-
+    Antizipation (kommt ein Katalysator kurz vor Schluss, kann der Markt ihn heute kaum
+    noch einpreisen). Nur an Wochentagen VOR dem Schluss sinnvoll; sonst None:
+    - None am Wochenende, nach dem regulaeren Schluss (nachboerslich/zu) und ohne
+      Zeitzonendaten.
+    - Waehrend vorboerslich/regulaer: positive Minutenzahl bis 16:00 ET."""
+    if _ET is None:
+        return None
+    now = (
+        datetime.datetime.fromtimestamp(ts, _ET)
+        if ts is not None
+        else datetime.datetime.now(_ET)
+    )
+    if now.weekday() >= 5:
+        return None
+    minutes = now.hour * 60 + now.minute
+    if minutes >= _REGULAR_END:
+        return None
+    return _REGULAR_END - minutes

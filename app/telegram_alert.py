@@ -407,6 +407,35 @@ def _format_message(
             "(Bewegung evtl. großteils gelaufen)"
         )
 
+    # Uebernacht-/Vorboersen-Gap-Antizipation: frueh sagen, dass der Kurs zum naechsten
+    # Open gappen duerfte - bevor es vorboerslich schon hochschiesst.
+    gap = extras.get("overnight_gap")
+    if isinstance(gap, dict) and gap.get("gap_direction") in ("up", "down"):
+        phase = html.escape(str(gap.get("phase", "")))
+        if gap.get("gap_direction") == "up":
+            if gap.get("early"):
+                trailing += (
+                    f"\n🚀 Mögliche Übernacht-Rallye: Katalysator {phase} – der Markt kann "
+                    "kaum noch reagieren. Einstieg jetzt, bevor der Kurs zum nächsten Open "
+                    "hochgappt (bevor es vorbörslich schon läuft)."
+                )
+            else:
+                trailing += (
+                    f"\n🚀 Vorbörslicher Anstieg möglich ({phase}) – der Gap läuft evtl. "
+                    "schon; prüfen, ob noch ein Einstieg lohnt."
+                )
+        else:
+            if gap.get("early"):
+                trailing += (
+                    f"\n📉 Mögliche Übernacht-Lücke nach unten: Katalysator {phase} – "
+                    "Reaktion dürfte als Gap zum nächsten Open kommen."
+                )
+            else:
+                trailing += (
+                    f"\n📉 Vorbörslicher Rückgang möglich ({phase}) – die Lücke läuft evtl. "
+                    "schon."
+                )
+
     # Technische Gesamtbewertung (TradingView-Stil) je handelbarem Ticker.
     tech_line = _technical_segment(extras.get("technical"))
     if tech_line:

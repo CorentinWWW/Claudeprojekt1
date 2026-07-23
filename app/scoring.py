@@ -169,6 +169,79 @@ def format_expected_move(expected_move_pct, expected_horizon) -> str:
     return f"~{pct:.0f}%" + (f" · {horizon}" if horizon else "")
 
 
+# --- Uebernacht-/Vorboersen-Gap-Antizipation --------------------------------------
+# Zweck (Nutzerwunsch): fruehzeitig sagen, dass eine Aktie steigen (oder fallen) wird,
+# BEVOR der Katalysator kurz vor/nach Boersenschluss ausgehypt wird und der Kurs dann
+# VORBOERSLICH schon extrem gegappt ist. Kern-Idee: kommt ein klar gerichteter, frischer
+# Katalysator in einem Fenster, in dem der Markt ihn NICHT MEHR VOLL EINPREISEN kann
+# (nachboerslich, ueber Nacht, uebers Wochenende - oder nur noch wenige Minuten vor
+# Schluss), landet die Reaktion oft als Gap im naechsten Open. Genau dann soll der Alert
+# sagen: "jetzt rein, bevor es zum naechsten Open hochschiesst" statt erst, wenn der
+# Gap vorboerslich schon gelaufen ist.
+
+_GAP_PHASE = {
+    "after": "nachbörslich",
+    "closed": "über Nacht",
+    "weekend": "übers Wochenende",
+    "near_close": "kurz vor Börsenschluss",
+    "pre": "vorbörslich",
+}
+
+
+def predict_gap(
+    direction: Optional[str],
+    session: Optional[str],
+    minutes_to_close: Optional[int],
+    expected_move_pct: Optional[float] = None,
+    near_close_minutes: int = 45,
+    min_expected_move_pct: float = 0.0,
+) -> Optional[dict]:
+    """Antizipiert einen Uebernacht-/Vorboersen-Gap fuer einen klar gerichteten Alert.
+
+    Gibt None zurueck, wenn kein Gap-Fenster vorliegt (z.B. mitten in der regulaeren
+    Session, wenn der Markt die Meldung noch ueber Stunden einpreisen kann - dann ist es
+    eine normale Intraday-Bewegung, kein Uebernacht-Gap). Sonst ein Dict:
+        {
+          "gap_direction": "up" | "down",   # up = Kurs duerfte hoch gappen
+          "phase": "<menschlich>",          # z.B. "nachbörslich"
+          "early": True/False,              # True = noch VOR dem Gap (Einstieg moeglich);
+                                            # False = vorboerslich, Gap laeuft evtl. schon
+        }
+    Rein zeit-/richtungsbasiert (kein Netz/Claude). min_expected_move_pct filtert
+    optional Mini-Katalysatoren heraus (0 = aus)."""
+    if direction == "long":
+        gap_direction = "up"
+    elif direction == "short":
+        gap_direction = "down"
+    else:
+        return None
+
+    if session in (None, "unknown"):
+        return None
+
+    # Optionaler Mindest-Erwartungswert (falls Claude eine Schaetzung geliefert hat).
+    if min_expected_move_pct > 0 and isinstance(expected_move_pct, (int, float)):
+        if abs(float(expected_move_pct)) < min_expected_move_pct:
+            return None
+
+    if session in ("after", "closed", "weekend"):
+        return {"gap_direction": gap_direction, "phase": _GAP_PHASE[session], "early": True}
+
+    if session == "open":
+        # Nur noch kurz bis Schluss: kaum Zeit, heute einzupreisen -> Gap-Kandidat.
+        if isinstance(minutes_to_close, int) and 0 <= minutes_to_close <= near_close_minutes:
+            return {"gap_direction": gap_direction, "phase": _GAP_PHASE["near_close"],
+                    "early": True}
+        return None
+
+    if session == "pre":
+        # Vorboerslich: das Gap laeuft moeglicherweise gerade schon - noch melden, aber
+        # als "evtl. schon in Bewegung" markieren (early=False).
+        return {"gap_direction": gap_direction, "phase": _GAP_PHASE["pre"], "early": False}
+
+    return None
+
+
 # --- Ruhezeiten-Fenster (#7, reine Zeitfenster-Logik) -----------------------------
 def parse_hour_window(spec: Optional[str]) -> Optional[tuple[int, int]]:
     """Parst eine Ruhezeit-Angabe 'START-ENDE' (ganze Stunden 0-23, z.B. '23-7') zu

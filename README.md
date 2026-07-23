@@ -260,6 +260,15 @@ Die Alerts kamen zuletzt teils erst, **als die Bewegung schon lief**. Zwei Gegen
   ausdrücklich darauf hin, dass die Bewegung evtl. großteils gelaufen ist — so wird ein
   spätes Signal wenigstens als solches sichtbar (Gegenstück zur bestehenden
   Divergenz-Warnung für Bewegungen *gegen* die These).
+- **Übernacht-/Vorbörsen-Gap-Antizipation** (`ENABLE_GAP_PREDICTION`, Standard an):
+  Der Klassiker ist, dass ein Katalysator **kurz vor/nach Börsenschluss** aufkommt, über
+  Nacht ausgehypt wird und der Kurs dann **vorbörslich schon extrem gappt** — zu spät zum
+  Einsteigen. Kommt ein klar gerichteter Alert in einem Fenster, in dem der Markt ihn
+  nicht mehr voll einpreisen kann — **nachbörslich, über Nacht, übers Wochenende** oder
+  **kurz vor Schluss** (< `GAP_NEAR_CLOSE_MINUTES`, Standard 45 min) — sagt der Alert
+  ausdrücklich: „🚀 Mögliche Übernacht-Rallye … Einstieg jetzt, **bevor** der Kurs zum
+  nächsten Open hochgappt". Ist die Session bereits **vorbörslich**, wird stattdessen
+  gewarnt, dass der Gap evtl. schon läuft. Rein zeit-/richtungsbasiert, kein Extra-Call.
 
 ## Robustheit / Reife dieser Version
 

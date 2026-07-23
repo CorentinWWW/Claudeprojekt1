@@ -30,6 +30,9 @@ from app.config import (
     ENABLE_TRUTH_SOCIAL,
     ENABLE_WEEKLY_DIGEST,
     ESCALATION_BAND,
+    ENABLE_GAP_PREDICTION,
+    GAP_MIN_EXPECTED_MOVE_PCT,
+    GAP_NEAR_CLOSE_MINUTES,
     GITHUB_REPO,
     GITHUB_TOKEN,
     LATE_MOVE_WARN_PCT,
@@ -88,6 +91,7 @@ from app.db import (
     try_claim_meta_key,
 )
 from app import indicators, paper_trading, prices
+from app.market_hours import minutes_until_close, us_market_session
 from app.prefilter import looks_market_relevant
 from app.scoring import (
     conviction_score,
@@ -97,6 +101,7 @@ from app.scoring import (
     kelly_fraction,
     parse_hour_window,
     position_tier,
+    predict_gap,
 )
 from app.sources.live_audio import LiveAudioSource
 from app.sources.news_gdelt import GdeltNewsSource
@@ -160,6 +165,7 @@ def active_gates() -> dict:
         "technicals": ENABLE_TECHNICALS,
         "technicals_require_agreement": TECHNICALS_REQUIRE_AGREEMENT if ENABLE_TECHNICALS else None,
         "late_move_warn_pct": LATE_MOVE_WARN_PCT or None,
+        "gap_prediction": ENABLE_GAP_PREDICTION,
         "borderline_escalation": ENABLE_BORDERLINE_ESCALATION,
         "weekly_digest": ENABLE_WEEKLY_DIGEST,
     }
@@ -785,6 +791,24 @@ async def _build_alert_extras(raw, classification, statement_id, score, corrobor
             with_thesis = change if direction == "long" else -change if direction == "short" else 0.0
             if with_thesis >= LATE_MOVE_WARN_PCT:
                 extras["late_move"] = with_thesis
+
+    # Uebernacht-/Vorboersen-Gap-Antizipation: klar gerichteter Katalysator in einem
+    # Fenster, in dem der Markt ihn nicht mehr voll einpreisen kann (nachboerslich, ueber
+    # Nacht, uebers Wochenende, kurz vor Schluss) -> Hinweis auf ein wahrscheinliches Gap
+    # am naechsten Open, damit man einsteigen kann, BEVOR es vorboerslich hochschiesst.
+    if ENABLE_GAP_PREDICTION and actionable:
+        top = max(actionable, key=lambda tc: tc.get("confidence") or 0.0)
+        gap = predict_gap(
+            top.get("direction"),
+            us_market_session(),
+            minutes_until_close(),
+            expected_move_pct=(classification.expected_move_pct if classification else None),
+            near_close_minutes=GAP_NEAR_CLOSE_MINUTES,
+            min_expected_move_pct=GAP_MIN_EXPECTED_MOVE_PCT,
+        )
+        if gap:
+            gap = {**gap, "ticker": (top.get("ticker") or "").upper()}
+            extras["overnight_gap"] = gap
 
     # Kelly-lite Positionsanteil (#5): global aus der bisherigen Trefferquote/Gewinn/
     # Verlust. Erst ab genuegend ausgewerteten Ergebnissen, damit die Zahl nicht auf
