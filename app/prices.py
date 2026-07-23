@@ -74,6 +74,18 @@ def suggest_risk_levels(
     if not span or span <= 0:
         span = price * 0.015  # Fallback: 1.5% des Kurses
     rr = 1.5
+    # Bei sehr volatilen/duennen Titeln kann die Tagesspanne groesser als der Kurs
+    # selbst ausfallen. Ungebremst wuerde das den Long-Stop auf <= 0 druecken (ein
+    # Kurs kann nie <= 0 werden, also nie erreichbar) bzw. beim Short sogar ein
+    # negatives Ziel ergeben (ebenfalls nie erreichbar) - und damit den automatischen
+    # Stop-/Ziel-Ausstieg im Paper-Depot (stop_or_target_hit) lautlos dauerhaft
+    # deaktivieren, ausgerechnet bei den volatilsten (und damit riskantesten)
+    # Positionen. In dem Fall auf denselben prozentualen Fallback zurueckfallen wie
+    # bei fehlender/nuller Spanne, statt auf einen unerreichbaren Wert zu klemmen.
+    if direction == "long" and span >= price:
+        span = price * 0.015
+    elif direction == "short" and span >= price / rr:
+        span = price * 0.015
     if direction == "long":
         stop = price - span
         target = price + rr * span
@@ -81,6 +93,7 @@ def suggest_risk_levels(
         stop = price + span
         target = price - rr * span
     stop = max(0.0, stop)
+    target = max(0.0, target)
     return {"stop": round(stop, 2), "target": round(target, 2), "rr": rr}
 
 
@@ -308,7 +321,13 @@ def previous_close(history: Optional[dict], today: str) -> Optional[float]:
     closes = history.get("close") or []
     if len(dates) != len(closes) or not dates:
         return None
-    for d, c in zip(reversed(dates), reversed(closes)):
-        if isinstance(d, str) and d < today:
-            return c
-    return None
+    # Ueber ALLE passenden Zeilen das Maximum bestimmen statt beim ersten Treffer von
+    # hinten abzubrechen: Stooqs CSV-Zeilenreihenfolge wird nirgends erzwungen/geprueft
+    # (parse_stooq_history_csv uebernimmt sie unveraendert), eine einzelne unsortierte/
+    # doppelte Zeile (Symbol-Relisting, Datenfehler) wuerde sonst den falschen Schluss-
+    # kurs liefern statt des tatsaechlich juengsten Handelstags vor `today`.
+    best_date, best_close = None, None
+    for d, c in zip(dates, closes):
+        if isinstance(d, str) and d < today and (best_date is None or d > best_date):
+            best_date, best_close = d, c
+    return best_close

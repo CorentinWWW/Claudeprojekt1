@@ -180,6 +180,7 @@ def active_gates() -> dict:
         ),
         "late_move_warn_pct": LATE_MOVE_WARN_PCT or None,
         "gap_prediction": ENABLE_GAP_PREDICTION,
+        "gap_chase_evaluation": ENABLE_GAP_CHASE_EVALUATION and ENABLE_PRICE_TRACKING,
         "borderline_escalation": ENABLE_BORDERLINE_ESCALATION,
         "weekly_digest": ENABLE_WEEKLY_DIGEST,
     }
@@ -704,7 +705,16 @@ async def _evaluate_gap_chase(ticker: str, direction: str | None, expected_move_
         price = quote["price"]
         remaining = verdict.get("remaining_pct")
         if isinstance(remaining, (int, float)) and remaining > 0:
-            target = price * (1 + remaining / 100.0) if direction == "long" else price * (1 - remaining / 100.0)
+            # WICHTIG: expected_move_pct ist (wie gap_pct/remaining_pct) relativ zu
+            # prev_close definiert, nicht relativ zum aktuellen (bereits gegappten)
+            # Kurs - deshalb hier auf prev_close aufsetzen statt auf price, sonst
+            # wuerden sich Gap- und Rest-Bewegung fehlerhaft multiplikativ statt
+            # additiv aufaddieren (Ziel systematisch verzerrt, staerker je groesser
+            # der Gap).
+            target = (
+                prev_close * (1 + expected_move_pct / 100.0) if direction == "long"
+                else prev_close * (1 - expected_move_pct / 100.0)
+            )
             verdict["target_price"] = round(target, 2)
         else:
             levels = prices.suggest_risk_levels(price, direction, quote.get("high"), quote.get("low"))

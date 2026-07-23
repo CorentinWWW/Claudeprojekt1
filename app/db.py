@@ -1,5 +1,6 @@
 import datetime
 import json
+import logging
 import sqlite3
 import time
 from contextlib import contextmanager
@@ -8,6 +9,8 @@ from typing import Optional
 
 from app.config import DB_PATH, DEDUP_SIMILARITY_THRESHOLD, DEDUP_WINDOW_SECONDS
 from app.util import text_similarity
+
+logger = logging.getLogger(__name__)
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS statements (
@@ -73,6 +76,11 @@ CREATE TABLE IF NOT EXISTS alert_outcomes (
 );
 CREATE INDEX IF NOT EXISTS idx_alert_outcomes_pending
     ON alert_outcomes(followup_price, alert_ts);
+-- get_ticker_hitrate() wird pro Alert-Zyklus einmal pro handelbarem Ticker
+-- ausgefuehrt (Extras-Anzeige + Historische-Performance-Gate) - ohne Index waere das
+-- ein Full-Table-Scan, der mit wachsender alert_outcomes-Tabelle immer teurer wird.
+CREATE INDEX IF NOT EXISTS idx_alert_outcomes_ticker
+    ON alert_outcomes(ticker, correct);
 
 -- Leichtgewichtiges Protokoll jedes tatsaechlich verschickten Alerts pro handelbarem
 -- Ticker+Richtung - UNABHAENGIG vom Preis-Tracking (alert_outcomes wird nur mit
@@ -184,6 +192,23 @@ def init_db():
         for col_name, alter_sql in _MIGRATION_COLUMNS.items():
             if col_name not in existing_cols:
                 conn.execute(alter_sql)
+
+
+def checkpoint_wal() -> None:
+    """Schreibt den WAL-Journal (siehe get_conn: journal_mode=WAL) vollstaendig in die
+    Hauptdatenbankdatei zurueck und leert ihn (TRUNCATE). In GitHub Actions cached
+    'actions/cache' NUR 'trump_monitor.db' (siehe monitor.yml), nicht die WAL-/SHM-
+    Begleitdateien - ohne diesen expliziten Checkpoint am Lauf-Ende koennten zuletzt
+    committete Daten (z.B. 'Alert wurde verschickt') ausschliesslich in der (nicht
+    gecachten) WAL-Datei stehen und beim naechsten Lauf durch die Cache-Restore
+    scheinbar wieder verschwunden sein - mit dem Risiko eines doppelt verschickten
+    Telegram-Alerts. Best-effort: ein Fehlschlag hier soll den Poll-Zyklus nicht zum
+    Scheitern bringen."""
+    try:
+        with get_conn() as conn:
+            conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    except sqlite3.Error:
+        logger.warning("WAL-Checkpoint fehlgeschlagen (best-effort).", exc_info=True)
 
 
 def _utc_day_start_epoch() -> float:
@@ -744,7 +769,11 @@ def get_performance_stats(limit: int = 5) -> dict:
         "hit_rate": (hits / n) if n else None,
         "avg_return_pct": overall["avg_return"],
         "best_tickers": by_ticker[:limit],
-        "worst_tickers": list(reversed(by_ticker[-limit:])) if by_ticker else [],
+        # Von hinten aus dem REST (nicht schon in best_tickers enthaltenen) Bereich
+        # nehmen - sonst ueberlappen sich beide Listen, sobald es weniger als
+        # 2*limit unterschiedliche Ticker gibt (derselbe Ticker erschiene dann
+        # gleichzeitig als "bester" und "schlechtester").
+        "worst_tickers": list(reversed(by_ticker[limit:][-limit:])) if len(by_ticker) > limit else [],
     }
 
 

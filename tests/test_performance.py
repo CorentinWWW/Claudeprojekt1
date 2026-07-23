@@ -98,7 +98,32 @@ def test_performance_stats():
     check("Trefferquote 2/3", abs(stats["hit_rate"] - 2 / 3) < 1e-9)
     check("bester Ticker ist NVDA (hoechste Ø-Rendite)",
           stats["best_tickers"][0]["ticker"] == "NVDA")
-    check("schlechtester Ticker ist INTC", stats["worst_tickers"][0]["ticker"] == "INTC")
+    # Mit nur 2 Tickern insgesamt (< limit=5) sind BEIDE bereits in best_tickers
+    # enthalten - worst_tickers darf sie dann nicht nochmal (ueberlappend) zeigen.
+    check("weniger Ticker als Limit -> worst_tickers leer (kein Overlap mit best_tickers)",
+          stats["worst_tickers"] == [])
+    os.unlink(name)
+
+
+def test_performance_stats_best_worst_no_overlap():
+    """Bei MEHR Tickern als dem Limit (Standard 5) duerfen sich best_tickers und
+    worst_tickers nicht ueberschneiden - vorher tauchte derselbe Ticker (Rang genau am
+    Limit) gleichzeitig als 'bester' und 'schlechtester' auf."""
+    config, db, orch, name = _fresh()
+    returns = {
+        "NVDA": 10.0, "AAPL": 8.0, "MSFT": 6.0, "GOOG": 4.0, "AMZN": 2.0,
+        "TSLA": -1.0, "META": -3.0,
+    }
+    for i, (ticker, ret) in enumerate(returns.items(), start=1):
+        _evaluate(db, i, ticker, "long", return_pct=ret, correct=ret > 0)
+
+    stats = db.get_performance_stats()
+    best = [t["ticker"] for t in stats["best_tickers"]]
+    worst = [t["ticker"] for t in stats["worst_tickers"]]
+    check("best_tickers = Top 5 nach Rendite", best == ["NVDA", "AAPL", "MSFT", "GOOG", "AMZN"])
+    check("worst_tickers = die 2 verbleibenden, schlechtestes zuerst", worst == ["META", "TSLA"])
+    check("keine Ueberschneidung zwischen best_tickers und worst_tickers",
+          not (set(best) & set(worst)))
     os.unlink(name)
 
 
@@ -178,6 +203,7 @@ def main():
     test_corroboration()
     test_ticker_hitrate()
     test_performance_stats()
+    test_performance_stats_best_worst_no_overlap()
     test_alerts_today_metric()
     test_weekly_digest_format()
     test_weekly_digest_trigger()

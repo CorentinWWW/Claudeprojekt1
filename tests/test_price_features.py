@@ -78,6 +78,19 @@ def test_risk_levels():
     check("Stop nie negativ",
           suggest_risk_levels(1.0, "long", day_high=100.0, day_low=1.0)["stop"] >= 0.0)
 
+    # Extrem grosse Tagesspanne relativ zum Kurs (duenn gehandelter/sehr volatiler
+    # Titel): darf weder einen unerreichbaren Long-Stop (<= 0, ein Kurs kann nie <= 0
+    # werden) noch ein unerreichbares/negatives Short-Ziel erzeugen - sonst wuerde der
+    # automatische Stop-/Ziel-Ausstieg im Paper-Depot fuer genau diese volatilen Titel
+    # lautlos nie ausloesen.
+    lvl_wide_long = suggest_risk_levels(1.0, "long", day_high=100.0, day_low=1.0)
+    check("extreme Spanne (long): Stop bleibt erreichbar (> 0)", lvl_wide_long["stop"] > 0.0)
+    check("extreme Spanne (long): Ziel bleibt sinnvoll (> Kurs)", lvl_wide_long["target"] > 1.0)
+
+    lvl_wide_short = suggest_risk_levels(1.0, "short", day_high=100.0, day_low=1.0)
+    check("extreme Spanne (short): Ziel bleibt erreichbar (> 0)", lvl_wide_short["target"] > 0.0)
+    check("extreme Spanne (short): Stop bleibt sinnvoll (> Kurs)", lvl_wide_short["stop"] > 1.0)
+
 
 def test_quote_cache():
     import app.config as config

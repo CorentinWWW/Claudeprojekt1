@@ -91,6 +91,24 @@ def test_previous_close():
     check("date/close-Laengen inkonsistent -> None",
           previous_close({"date": ["2026-07-20", "2026-07-21"], "close": [100.0]}, "2026-07-21") is None)
 
+    # Zeilenreihenfolge wird von Stooq NICHT garantiert sortiert (Relisting/Datenfehler
+    # koennen eine Zeile falsch einordnen) - previous_close() muss trotzdem das Datum
+    # mit dem tatsaechlichen Maximum < today waehlen, nicht einfach die letzte im Array
+    # passende Zeile.
+    hist_out_of_order = {
+        "date": ["2026-07-20", "2026-07-21", "2026-07-16"],
+        "close": [100.0, 113.0, 90.0],
+    }
+    check("unsortierte Historie -> trotzdem der ECHTE juengste Vortag (2026-07-20)",
+          previous_close(hist_out_of_order, "2026-07-21") == 100.0)
+
+    hist_duplicate = {
+        "date": ["2026-07-17", "2026-07-20", "2026-07-18"],
+        "close": [98.0, 100.0, 99.0],
+    }
+    check("Duplikat/Ausreisser am Ende der Liste -> trotzdem 2026-07-20 (100.0)",
+          previous_close(hist_duplicate, "2026-07-21") == 100.0)
+
 
 # ---------------------------------------------------------------------------
 # market_hours.minutes_since_open / current_market_date
@@ -185,6 +203,13 @@ def test_evaluate_gap_chase_orchestrator():
     check("Ausstiegs-Kursziel wird genannt", result2 and isinstance(result2.get("target_price"), (int, float)))
     check("Kursziel liegt ueber dem aktuellen Kurs (long)",
           result2 and result2["target_price"] > 105.2)
+    # Kursziel MUSS auf prev_close (100.0) mit der VOLLEN erwarteten Bewegung (15%)
+    # aufsetzen (100 * 1.15 = 115.0), nicht die verbleibende Bewegung (10%) auf den
+    # bereits gegappten Live-Kurs (105.2) draufmultiplizieren (105.2 * 1.10 = 115.72,
+    # falscher, verzerrter Wert - Gap- und Restbewegung wuerden sich sonst
+    # faelschlich multiplikativ statt additiv auf prev_close aufaddieren).
+    check("Kursziel exakt auf prev_close-Basis berechnet (100 * 1.15 = 115.0)",
+          result2 and abs(result2["target_price"] - 115.0) < 1e-9)
 
     # Ausserhalb des Zeitfensters nach Eroeffnung -> keine Bewertung mehr.
     _mock_prices(orch, open_price=112.0, price=112.5, prev_close=100.0)
