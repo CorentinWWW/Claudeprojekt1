@@ -19,6 +19,8 @@ from app.db import (
     get_classification_calls_today,
     get_kelly_inputs,
     get_outcomes_for_export,
+    get_paper_closed_stats,
+    get_paper_realized_pnl,
     get_performance_stats,
     get_recent,
     get_source_reliability,
@@ -28,6 +30,7 @@ from app.db import (
     mark_alert_sent,
 )
 from app.orchestrator import active_gates, is_alert_worthy, run_forever, run_health, source_health
+from app.paper_trading import account_snapshot
 from app.scoring import kelly_fraction
 from app.telegram_alert import send_alert
 
@@ -162,6 +165,28 @@ def api_performance():
         ),
     }
     return stats
+
+
+@app.get("/api/paper", dependencies=[Depends(require_api_key)])
+def api_paper():
+    """Paper-Trading Depot-Status: aktueller Wert, Gewinn/Verlust, Anzahl offener und
+    geschlossener Positionen, Win-Rate. Nur mit PAPER_TRADING befuellt."""
+    if not config.PAPER_TRADING:
+        return {"error": "Paper-Trading ist nicht aktiviert", "enabled": False}
+    snap = account_snapshot()
+    closed = get_paper_closed_stats()
+    return {
+        "enabled": True,
+        "starting_capital": config.PAPER_STARTING_CAPITAL,
+        "account_value": snap["account_value"],
+        "free_cash": snap["free_cash"],
+        "open_stake": snap["open_stake"],
+        "realized_pnl": snap["realized_pnl"],
+        "closed_trades": closed["closed"],
+        "wins": closed["wins"],
+        "win_rate": closed["wins"] / closed["closed"] if closed["closed"] else None,
+        "total_return_pct": (snap["account_value"] - config.PAPER_STARTING_CAPITAL) / config.PAPER_STARTING_CAPITAL * 100.0 if config.PAPER_STARTING_CAPITAL else 0.0,
+    }
 
 
 @app.get("/api/outcomes.csv", dependencies=[Depends(require_api_key)])

@@ -46,6 +46,7 @@ from app.config import (
     MAX_CLASSIFICATIONS_PER_DAY,
     MAX_CONCURRENT_CLASSIFICATIONS,
     MAX_NEWS_AGE_MINUTES,
+    PAPER_STARTING_CAPITAL,
     PAPER_TRADING,
     POLL_INTERVAL_SECONDS,
     PRICE_OUTCOME_HORIZON_MINUTES,
@@ -77,6 +78,7 @@ from app.db import (
     get_known_source_ids,
     get_last_alert_direction,
     get_outcomes_awaiting_followup,
+    get_paper_closed_stats,
     get_pending_alerts,
     get_performance_stats,
     get_recent_alerted,
@@ -1248,10 +1250,46 @@ async def _maybe_send_weekly_digest():
     await send_weekly_digest(stats)
 
 
+async def _maybe_send_daily_depot_update():
+    """Taegliches Depot-Update (morgens 08:00 UTC + abends 20:00 UTC), nur wenn
+    PAPER_TRADING aktiv ist. Zeigt Wert, P&L, offene/geschlossene Positionen, Win-Rate."""
+    if not PAPER_TRADING:
+        return
+    now = datetime.datetime.now(datetime.timezone.utc)
+    # Morgens 08 UTC oder abends 20 UTC, aber nur einmal pro 6-Stunden-Fenster
+    if now.hour not in (8, 20):
+        return
+    day_hour = f"{now.year}-{now.month:02d}-{now.day:02d}_{now.hour:02d}h"
+    if not try_claim_meta_key(f"depot_update_{day_hour}"):
+        return
+
+    snap = paper_trading.account_snapshot()
+    closed = get_paper_closed_stats()
+    start_capital = PAPER_STARTING_CAPITAL
+    pnl = snap["realized_pnl"]
+    total_return_pct = (snap["account_value"] - start_capital) / start_capital * 100.0 if start_capital else 0.0
+
+    from app.telegram_alert import send_text
+    time_label = "☀️ Morgen" if now.hour == 8 else "🌙 Abend"
+    lines = [
+        f"{time_label} <b>Paper-Depot Update</b>",
+        f"💼 Wert {snap['account_value']:.2f}€ (Start {start_capital:.0f}€)",
+        f"📈 Gewinn/Verlust {pnl:+.2f}€ ({total_return_pct:+.1f}%)",
+        f"💰 Frei {snap['free_cash']:.2f}€ · gebunden {snap['open_stake']:.2f}€",
+    ]
+    if closed["closed"] > 0:
+        lines.append(f"✅ {closed['wins']}/{closed['closed']} geschlossene Trades ({closed['wins']/closed['closed']*100:.0f}%)")
+    else:
+        lines.append("📭 Keine geschlossenen Trades")
+
+    await send_text("\n".join(lines))
+
+
 async def poll_once(sources, semaphore: asyncio.Semaphore):
     await _resend_pending_alerts()
     await _evaluate_alert_outcomes()
     await _manage_paper_positions()
+    await _maybe_send_daily_depot_update()
     await _maybe_send_weekly_digest()
 
     # Wird gesetzt, sobald ein permanenter Claude-Konfigurationsfehler (kaputter Key,
