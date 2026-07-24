@@ -10,7 +10,7 @@ from fastapi.responses import FileResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from app import config
+from app import config, ensemble
 from app.classifier import DailyCapExceeded, classify, selftest
 from app.db import (
     RawStatement,
@@ -203,6 +203,30 @@ def api_gap_impact(threshold_pct: float = 3.0):
     anderen - zeigt, ob bereits stark gegappte Ticker ein schlechteres Signal sind.
     Nur mit ENABLE_PRICE_TRACKING befuellt."""
     return analyze_gap_impact(large_gap_threshold_pct=threshold_pct)
+
+
+@app.get("/api/ensemble-status", dependencies=[Depends(require_api_key)])
+def api_ensemble_status():
+    """Trainingsstatus des Ensemble-Modells (#Ensemble-Model, siehe app/ensemble.py):
+    ob genug Daten vorliegen, um es zu aktivieren, und falls ja die Trainingsgroesse.
+    Nur mit ENABLE_ENSEMBLE_MODEL + ENABLE_PRICE_TRACKING befuellt."""
+    if not config.ENABLE_ENSEMBLE_MODEL:
+        return {"enabled": False}
+    model = ensemble.get_model(config.ENSEMBLE_MIN_TRAINING_SAMPLES, config.ENSEMBLE_RETRAIN_SECONDS)
+    if model is None:
+        return {
+            "enabled": True,
+            "trained": False,
+            "min_training_samples": config.ENSEMBLE_MIN_TRAINING_SAMPLES,
+        }
+    return {
+        "enabled": True,
+        "trained": True,
+        "training_samples": model["n"],
+        "hit_docs": model["hit_docs"],
+        "miss_docs": model["miss_docs"],
+        "vocab_size": model["vocab_size"],
+    }
 
 
 @app.get("/api/paper", dependencies=[Depends(require_api_key)])

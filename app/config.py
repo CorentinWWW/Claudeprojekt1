@@ -308,6 +308,35 @@ TECHNICALS_CONVICTION_WEIGHT = _int("TECHNICALS_CONVICTION_WEIGHT", 10)
 # bars aendern sich innerhalb eines Tages kaum, das spart wiederholte Downloads.
 HISTORY_CACHE_TTL_SECONDS = _int("HISTORY_CACHE_TTL_SECONDS", 900)
 
+# --- Ensemble-Modell: klassische, von Claude UNABHAENGIGE Zweitmeinung ---
+# Ein Bag-of-Words-Naive-Bayes-Modell (siehe app/ensemble.py), das aus der EIGENEN
+# bisherigen Erfolgsbilanz (ausgewertete alert_outcomes) lernt, ob Meldungen mit
+# AEHNLICHEM Wortschatz frueher eher zu einem Treffer oder Fehlschlag gefuehrt haben,
+# und daraus je Alert eine geschaetzte Trefferwahrscheinlichkeit liefert - eine echte,
+# von Claude unabhaengige Zweitmeinung (kein zweiter Claude-Call, kein externes
+# ML-Framework). Braucht ENABLE_PRICE_TRACKING (sonst gibt es keine ausgewerteten
+# Ergebnisse zum Trainieren) und mindestens ENSEMBLE_MIN_TRAINING_SAMPLES ausgewertete
+# Alerts BEIDER Klassen (Treffer UND Fehlschlag) - vorher bleibt das Modell inaktiv
+# (kein Effekt, kein Fehler). Standardmaessig AUS wie alle verhaltensaendernden
+# Zustell-Gates.
+ENABLE_ENSEMBLE_MODEL = _bool("ENABLE_ENSEMBLE_MODEL", False)
+# Mindestanzahl ausgewerteter Alerts (insgesamt, beide Klassen), bevor das Modell als
+# belastbar genug gilt - verhindert, dass ein paar Zufallstreffer/-verluste ueber
+# Wortschatz-Zufaelle entscheiden.
+ENSEMBLE_MIN_TRAINING_SAMPLES = _int("ENSEMBLE_MIN_TRAINING_SAMPLES", 30)
+# Wie oft (Sekunden) das Modell hoechstens neu trainiert wird - Training ist billig
+# (reine Wortzaehlung), aber unnoetig bei jedem einzelnen Statement desselben Zyklus.
+ENSEMBLE_RETRAIN_SECONDS = _int("ENSEMBLE_RETRAIN_SECONDS", 900)
+# Optionales hartes Gate: liegt die vom Ensemble-Modell geschaetzte
+# Trefferwahrscheinlichkeit unter diesem Wert (0-1), wird der Alert unterdrueckt statt
+# nur den Score zu senken - "die eigene Wort-Statistik spricht klar dagegen". 0 = aus
+# (nur der Score-Effekt unten wirkt).
+ENSEMBLE_SUPPRESS_BELOW = _float("ENSEMBLE_SUPPRESS_BELOW", 0.0)
+# Maximaler Zu-/Abschlag (Punkte, 0-100) bei 100%/0% geschaetzter Trefferwahrschein-
+# lichkeit; linear skaliert um die 50%-Coinflip-Marke (50% wirkt neutral). 0 = kein
+# Effekt auf den Score (Modell wirkt dann nur ueber ENSEMBLE_SUPPRESS_BELOW).
+ENSEMBLE_CONVICTION_WEIGHT = _int("ENSEMBLE_CONVICTION_WEIGHT", 10)
+
 # --- Paper-Trading (virtuelles Depot, KEIN echtes Geld / kein Broker) ---
 # Wenn aktiv: bei jedem tatsaechlich verschickten Alert wird fuer die handelbaren Ticker
 # eine VIRTUELLE Position eroeffnet (Einstiegskurs gemerkt), laufend zum aktuellen Kurs
@@ -491,6 +520,12 @@ def validate() -> tuple[list[str], list[str]]:
             "Ein Zustell-Gate (MAX_ALERTS_PER_HOUR / MAX_NEWS_AGE_MINUTES / "
             "TICKER_ALERT_COOLDOWN_MINUTES) ist negativ - negativ wird wie 'aus' (0) "
             "behandelt."
+        )
+    if ENABLE_ENSEMBLE_MODEL and not ENABLE_PRICE_TRACKING:
+        warnings.append(
+            "ENABLE_ENSEMBLE_MODEL=true, aber ENABLE_PRICE_TRACKING=false - ohne "
+            "ausgewertete Ergebnisse gibt es keine Trainingsdaten, das Ensemble-Modell "
+            "bleibt dauerhaft inaktiv (kein Effekt)."
         )
 
     return errors, warnings

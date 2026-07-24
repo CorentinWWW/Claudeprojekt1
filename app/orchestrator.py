@@ -21,6 +21,7 @@ from app.config import (
     DIVERGENCE_WARN_PCT,
     ENABLE_BORDERLINE_ESCALATION,
     ENABLE_CONVICTION_SCORE,
+    ENABLE_ENSEMBLE_MODEL,
     ENABLE_HISTORICAL_HITRATE,
     ENABLE_KELLY_SUGGESTION,
     ENABLE_NEWS,
@@ -30,6 +31,10 @@ from app.config import (
     ENABLE_TECHNICALS,
     ENABLE_TRUTH_SOCIAL,
     ENABLE_WEEKLY_DIGEST,
+    ENSEMBLE_CONVICTION_WEIGHT,
+    ENSEMBLE_MIN_TRAINING_SAMPLES,
+    ENSEMBLE_RETRAIN_SECONDS,
+    ENSEMBLE_SUPPRESS_BELOW,
     ESCALATION_BAND,
     ENABLE_GAP_CHASE_EVALUATION,
     ENABLE_GAP_PREDICTION,
@@ -98,7 +103,7 @@ from app.db import (
     ticker_in_cooldown,
     try_claim_meta_key,
 )
-from app import indicators, paper_trading, prices
+from app import ensemble, indicators, paper_trading, prices
 from app.market_hours import (
     current_market_date,
     minutes_since_open,
@@ -189,6 +194,10 @@ def active_gates() -> dict:
         "gap_chase_evaluation": ENABLE_GAP_CHASE_EVALUATION and ENABLE_PRICE_TRACKING,
         "borderline_escalation": ENABLE_BORDERLINE_ESCALATION,
         "weekly_digest": ENABLE_WEEKLY_DIGEST,
+        "ensemble_model": ENABLE_ENSEMBLE_MODEL,
+        "ensemble_suppress_below": (
+            ENSEMBLE_SUPPRESS_BELOW if ENABLE_ENSEMBLE_MODEL and ENSEMBLE_SUPPRESS_BELOW > 0 else None
+        ),
     }
 
 
@@ -1092,6 +1101,38 @@ async def _send_alerts(alert_worthy: list[tuple]):
                         )
                         continue
                     score = _apply_historical_performance(score, hr)
+
+        # Ensemble-Modell (#Ensemble-Model): eine von Claude UNABHAENGIGE, klassische
+        # Zweitmeinung (Bag-of-Words-Naive-Bayes, siehe app/ensemble.py), die aus der
+        # EIGENEN bisherigen Erfolgsbilanz lernt, ob Meldungen mit AEHNLICHEM Wortschatz
+        # frueher eher zu einem Treffer oder Fehlschlag gefuehrt haben. Hebt/senkt den
+        # Ueberzeugungs-Score und kann - falls ENSEMBLE_SUPPRESS_BELOW gesetzt - einen
+        # Alert unterdruecken, dem die eigene Wort-Statistik klar widerspricht. Bleibt
+        # wirkungslos, solange das Modell noch nicht genug Trainingsdaten hat (get_model
+        # liefert dann None).
+        if ENABLE_ENSEMBLE_MODEL:
+            model = ensemble.get_model(ENSEMBLE_MIN_TRAINING_SAMPLES, ENSEMBLE_RETRAIN_SECONDS)
+            if model is not None:
+                p_hit = ensemble.predict_hit_probability(model, raw.text)
+                if p_hit is not None:
+                    suppress = ENSEMBLE_SUPPRESS_BELOW > 0 and p_hit < ENSEMBLE_SUPPRESS_BELOW
+                    if ENSEMBLE_SUPPRESS_BELOW > 0:
+                        log_gate_evaluation(
+                            statement_id, "ensemble_model",
+                            threshold=ENSEMBLE_SUPPRESS_BELOW, actual_value=p_hit, passed=not suppress,
+                            reasoning=f"Bag-of-Words-NB: p_hit={p_hit:.2f} (n={model['n']})",
+                        )
+                    if suppress:
+                        logger.info(
+                            "[%s] Alert unterdrueckt (Ensemble-Modell: geschaetzte "
+                            "Trefferwahrscheinlichkeit %.0f%% < %.0f%%): %s",
+                            raw.source, p_hit * 100, ENSEMBLE_SUPPRESS_BELOW * 100, raw.text[:80],
+                        )
+                        continue
+                    adjust = historical_performance_adjust(
+                        p_hit, model["n"], ENSEMBLE_MIN_TRAINING_SAMPLES, ENSEMBLE_CONVICTION_WEIGHT
+                    )
+                    score = max(0, min(100, round(score + adjust)))
 
         if ALERT_MIN_CONVICTION > 0:
             conviction_passed = score >= ALERT_MIN_CONVICTION
