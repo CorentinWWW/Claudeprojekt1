@@ -409,9 +409,14 @@ ALERT_DIGEST_THRESHOLD = _int("ALERT_DIGEST_THRESHOLD", 3)
 # erst, NACHDEM eine Klassifikation fertig ist - siehe orchestrator.py:
 # _classify_and_store). Bei Werten > 1 koennen zwei fast zeitgleiche Meldungen zum
 # selben Thema (z.B. von zwei verschiedenen Nachrichtenquellen) beide unabhaengig
-# als "neu" durchgehen und beide einen Alert ausloesen. Default bewusst auf 1
-# (seriell) gesetzt, um dieses Duplikat-Risiko auszuschliessen - auf Kosten von
-# etwas laengerer Verarbeitungszeit bei einem ploetzlichen Nachrichtenschub.
+# als "neu" durchgehen und beide einen Alert ausloesen. Code-Default bewusst auf 1
+# (seriell) gesetzt, um dieses Duplikat-Risiko fuer neue/lokale Setups komplett
+# auszuschliessen. Latenz-Hinweis: die serielle Klassifikation ist typischerweise
+# die dominante Zeitquelle eines Poll-Zyklus (mehrere Sekunden je Meldung) - im
+# GitHub-Actions-Workflow ist dieser Wert daher auf Nutzerwunsch auf 2 angehoben
+# (siehe monitor.yml), was die Klassifikations-Phase spuerbar verkuerzt und das
+# Duplikat-Risiko nur geringfuegig erhoeht (die Themen-Duplikaterkennung via
+# Claude-Kontext bleibt fuer alle NICHT gleichzeitig laufenden Meldungen wirksam).
 MAX_CONCURRENT_CLASSIFICATIONS = _int("MAX_CONCURRENT_CLASSIFICATIONS", 1)
 
 # Harter Kostendeckel: mehr als so viele Claude-Klassifikations-Calls finden an einem

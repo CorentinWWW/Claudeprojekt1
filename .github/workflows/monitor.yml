@@ -40,12 +40,13 @@ jobs:
     # ein dritter ueberlappender Trigger wird von GitHub NICHT eingereiht, sondern still
     # verworfen (kein rotes Kreuz, keine Fehler-Mail - der Zyklus faellt einfach lautlos
     # aus, ausgerechnet waehrend eines Nachrichtenschubs). 4 Minuten reichen bei
-    # serieller Klassifikation (MAX_CONCURRENT_CLASSIFICATIONS=1, gedeckelt durch den
-    # Tages-Kostendeckel) und nebenlaeufigem RSS-Abruf (siehe news_rss.py: alle Feeds
-    # gleichzeitig statt nacheinander) fuer einen normalen bis maessig starken
-    # Nachrichtenschub; ein abgebrochener Lauf verliert dank _resend_pending_alerts() in
-    # orchestrator.py ohnehin keine marktrelevante Meldung dauerhaft - der naechste
-    # (puenktlich startende) Lauf holt sie nach.
+    # MAX_CONCURRENT_CLASSIFICATIONS=2 (gedeckelt durch den Tages-Kostendeckel) und
+    # nebenlaeufigem RSS-Abruf (siehe news_rss.py: alle Feeds gleichzeitig statt
+    # nacheinander) fuer einen normalen bis maessig starken Nachrichtenschub - mit noch
+    # mehr Puffer als zuvor bei rein serieller Klassifikation; ein abgebrochener Lauf
+    # verliert dank _resend_pending_alerts() in orchestrator.py ohnehin keine
+    # marktrelevante Meldung dauerhaft - der naechste (puenktlich startende) Lauf holt
+    # sie nach.
     timeout-minutes: 4
     steps:
       - uses: actions/checkout@v4
@@ -74,6 +75,13 @@ jobs:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           TELEGRAM_STARTUP_NOTICE: "false"
+          # Latenz (Nutzerwunsch): serielle Claude-Klassifikation ist die dominante
+          # Zeitquelle eines Poll-Zyklus (mehrere Sekunden je Meldung, oft >80% der
+          # gesamten Zykluszeit). 2 statt 1 (Code-Standard) halbiert diese Phase grob,
+          # bei nur geringfuegig erhoehtem Risiko doppelter Alerts fuer zwei fast
+          # zeitgleiche Meldungen zum selben Thema (siehe app/config.py-Kommentar zu
+          # MAX_CONCURRENT_CLASSIFICATIONS). Per Repo-Variable ueberschreibbar.
+          MAX_CONCURRENT_CLASSIFICATIONS: ${{ vars.MAX_CONCURRENT_CLASSIFICATIONS || '2' }}
           # Praezisions-Schwelle fuer Alerts (siehe app/config.py:
           # ALERT_MIN_TICKER_CONFIDENCE). Optional ueber eine GitHub-Repository-Variable
           # (Settings -> Secrets and variables -> Actions -> Variables) einstellbar, ohne

@@ -232,8 +232,24 @@ konfiguriert sein, sonst laufen die Positionen nur stumm in der DB mit.
 Die Alerts kamen zuletzt teils erst, **als die Bewegung schon lief**. Zwei Gegenmaßnahmen:
 
 - **Häufigeres Polling:** der GitHub-Actions-Cron läuft jetzt alle **5 Minuten** (vorher 15),
-  das Job-Timeout entsprechend unter dem Intervall (4 Min). Für echte Sekunden-Latenz weiter
-  den **Dauerbetrieb** (`main.py`/Docker/systemd) nutzen.
+  das Job-Timeout entsprechend unter dem Intervall (4 Min). **Wichtig:** GitHub garantiert
+  bei Schedule-Trigger-Intervallen unter ~15 Min keinen pünktlichen Start — bei hoher Last
+  auf den öffentlichen Runnern kann sich ein Lauf um Stunden verzögern (beobachtbar in den
+  Actions-Läufen). Für echte, verlässliche Sekunden-Latenz bleibt nur der **Dauerbetrieb**
+  (`main.py`/Docker/systemd/Oracle Cloud Free Tier, siehe unten) — dort läuft der Loop
+  ununterbrochen, unabhängig vom GitHub-Cron.
+- **Parallele Klassifikation** (`MAX_CONCURRENT_CLASSIFICATIONS`, in dieser Vorlage/dem
+  Workflow **2**, Code-Standard 1): die serielle Claude-Klassifikation ist typischerweise
+  die dominante Zeitquelle *innerhalb* eines Zyklus (mehrere Sekunden je Meldung). Bei 2
+  gleichzeitig laufenden Klassifikationen verkürzt sich diese Phase spürbar — auf Kosten
+  eines geringfügig höheren Risikos, dass zwei fast zeitgleiche Meldungen zum selben
+  Thema sich nicht gegenseitig als Duplikat erkennen (der Themen-Kontext wächst erst nach
+  Abschluss einer Klassifikation) und beide einen Alert auslösen. Per Repo-Variable
+  einstellbar, ohne Code zu ändern.
+- **`MAX_NEWS_AGE_MINUTES`** enger fassen (z.B. 15 statt Workflow-Standard 180): filtert
+  Meldungen heraus, die schon länger zurückliegen, bevor überhaupt ein Claude-Call
+  ausgelöst wird — spart Zeit/Kosten für ohnehin meist schon eingepreiste News. Ebenfalls
+  eine Repo-Variable, kein Code nötig.
 - **„Zu spät"-Warnung im Alert:** ist der Kurs am Alarm-Tag bereits stärker als
   `LATE_MOVE_WARN_PCT` (Standard 3 %) **in Signalrichtung** gelaufen, weist der Alert
   ausdrücklich darauf hin, dass die Bewegung evtl. großteils gelaufen ist — so wird ein
