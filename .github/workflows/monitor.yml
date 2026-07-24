@@ -127,6 +127,18 @@ jobs:
           # TECHNICALS_REQUIRE_AGREEMENT - auf Nutzerwunsch hier scharf gestellt.
           ENABLE_TECHNICALS: ${{ vars.ENABLE_TECHNICALS || 'true' }}
           TECHNICALS_REQUIRE_AGREEMENT: ${{ vars.TECHNICALS_REQUIRE_AGREEMENT || 'true' }}
+          # Ensemble-Modell (Bag-of-Words-Naive-Bayes, siehe app/ensemble.py): klassische,
+          # von Claude UNABHAENGIGE Zweitmeinung aus der eigenen bisherigen Erfolgsbilanz.
+          # '|| true' = standardmaessig AN; zum Abschalten Repo-Variable
+          # ENABLE_ENSEMBLE_MODEL=false setzen. Braucht mindestens
+          # ENSEMBLE_MIN_TRAINING_SAMPLES (Code-Standard 30) ausgewertete Alerts BEIDER
+          # Klassen (Treffer UND Fehlschlag), bis dahin bleibt es wirkungslos - das
+          # Einschalten hier ist also gefahrlos, auch wenn die DB noch leer ist.
+          # ENSEMBLE_SUPPRESS_BELOW bewusst NICHT gesetzt (Code-Standard 0.0 = kein hartes
+          # Unterdruecken, nur ein sanfter Zu-/Abschlag auf den Ueberzeugungs-Score) - bei
+          # einem neuen, noch unbewiesenen Signal soll es zunaechst nur mitschwingen statt
+          # gleich Alerts zu blockieren.
+          ENABLE_ENSEMBLE_MODEL: ${{ vars.ENABLE_ENSEMBLE_MODEL || 'true' }}
           MANUAL_TEST_TEXT: ${{ github.event.inputs.test_text }}
           # Playwright/Chromium ist hier bewusst nicht installiert, um Laeufe
           # kurz zu halten - Truth Social nutzt in diesem Modus nur den
