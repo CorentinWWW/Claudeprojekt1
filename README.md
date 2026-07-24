@@ -14,6 +14,16 @@ Trefferquoten-Übersicht.
 **Kein Trading-Signal / keine Finanzberatung.** Die Einschätzungen (inkl. Long/Short)
 sind LLM-generiert und können falsch liegen - eigene Anlageentscheidung auf eigenes Risiko.
 
+> **Branch-Hinweis:** Dieses Repository hat (noch) keinen `main`-Branch. Produktiv -
+> also der Branch, auf dem der GitHub-Actions-Cron (`.github/workflows/monitor.yml`)
+> tatsächlich läuft - ist immer der **Default-Branch** des Repos (aktuell
+> `claude/trump-market-impact-analyzer-dbjvu5`), sichtbar oben links im GitHub-
+> Branch-Dropdown bzw. unter *Settings → Branches*. GitHub-Actions-`schedule`-Trigger
+> feuern ausschließlich auf dem Default-Branch, egal wie viele andere Branches
+> existieren oder wie sie heißen - Änderungen auf anderen Branches (z.B.
+> Review-/Feature-Branches) haben also erst nach einem Merge in den Default-Branch
+> einen Effekt auf den laufenden Bot.
+
 ## Architektur
 
 ```
