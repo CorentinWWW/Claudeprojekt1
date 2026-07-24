@@ -199,6 +199,38 @@ def test_weekly_digest_skips_without_data():
     os.unlink(name)
 
 
+def test_hourly_performance():
+    """Time-of-Day-Tracking (db.get_hourly_performance): Trefferquote/Rendite je
+    Alarm-STUNDE (UTC), aus alert_ts extrahiert."""
+    config, db, orch, name = _fresh()
+
+    def _ts_for_hour(hour):
+        return datetime.datetime(2020, 1, 1, hour, 0, 0, tzinfo=datetime.timezone.utc).timestamp()
+
+    def _seed(sid_suffix, ticker, hour, return_pct, correct):
+        sid = db.insert_statement(
+            db.RawStatement(source="news", source_id=f"hp-{sid_suffix}", text="x"), _relevant(db)
+        )
+        ts = _ts_for_hour(hour)
+        db.record_alert_baseline(sid, ticker, "long", 0.9, ts, 100.0)
+        oid = next(
+            o["id"] for o in db.get_outcomes_awaiting_followup(0)
+            if o["statement_id"] == sid and o["ticker"] == ticker
+        )
+        db.set_outcome_followup(oid, ts + 3600, 100.0 * (1 + return_pct / 100.0), return_pct, correct)
+
+    _seed(1, "AAA", 9, 10.0, True)
+    _seed(2, "BBB", 9, -10.0, False)
+    _seed(3, "CCC", 22, 5.0, True)
+
+    by_hour = {r["hour_utc"]: r for r in db.get_hourly_performance()}
+    check("Stunde 9 hat 2 ausgewertete Alerts", by_hour[9]["n"] == 2)
+    check("Stunde 9: Trefferquote 50%", abs(by_hour[9]["hit_rate"] - 0.5) < 1e-9)
+    check("Stunde 22 hat 1 ausgewerteten Alert mit 100% Trefferquote",
+          by_hour[22]["n"] == 1 and by_hour[22]["hit_rate"] == 1.0)
+    check("nur Stunden mit Daten erscheinen (kein Eintrag fuer Stunde 5)", 5 not in by_hour)
+
+
 def main():
     test_corroboration()
     test_ticker_hitrate()
@@ -208,6 +240,7 @@ def main():
     test_weekly_digest_format()
     test_weekly_digest_trigger()
     test_weekly_digest_skips_without_data()
+    test_hourly_performance()
 
     print()
     if failures:

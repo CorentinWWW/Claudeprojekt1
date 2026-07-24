@@ -464,6 +464,13 @@ def _format_message(
     if tech_line:
         trailing += f"\n{tech_line}"
 
+    # VIX-Marktregime (nur mit ENABLE_VIX_GATE befuellt): marktweiter Angst-Indikator,
+    # unabhaengig vom konkreten Katalysator dieser Meldung.
+    vix = extras.get("vix")
+    if isinstance(vix, dict) and isinstance(vix.get("level"), (int, float)):
+        fear_str = " ⚠️ hohe Marktangst" if vix.get("high_fear") else ""
+        trailing += f"\n📊 VIX {vix['level']:.1f}{fear_str}"
+
     if extras.get("hedged"):
         trailing += "\n🗣 unbestätigt/Gerücht – mit Vorsicht behandeln"
 

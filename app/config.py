@@ -337,6 +337,29 @@ ENSEMBLE_SUPPRESS_BELOW = _float("ENSEMBLE_SUPPRESS_BELOW", 0.0)
 # Effekt auf den Score (Modell wirkt dann nur ueber ENSEMBLE_SUPPRESS_BELOW).
 ENSEMBLE_CONVICTION_WEIGHT = _int("ENSEMBLE_CONVICTION_WEIGHT", 10)
 
+# --- VIX-Marktregime-Gate ---
+# Der VIX (CBOE Volatility Index) misst die implizite Volatilitaet des S&P 500 - ein
+# grober marktweiter "Angst-Indikator", unabhaengig vom einzelnen Katalysator. Ist er
+# sehr hoch (Panik-/Crash-Modus), bewegt sich oft der GESAMTE Markt chaotisch - ein
+# einzelnes direktionales Signal ("Aktie X geht hoch") ist dann unzuverlaessiger, weil
+# Korrelationen ueber Sektoren hinweg steigen und Kursbewegungen eher vom Gesamtmarkt als
+# vom konkreten Katalysator getrieben werden. Dieses Gate daempft/unterdrueckt Alerts bei
+# hohem VIX. Best-effort ueber Stooq (^vix, kostenlos, kein Key), wie das uebrige
+# Preis-Tracking - ist der Kursdienst nicht erreichbar, entfaellt das Gate still (kein
+# Effekt, kein Fehler). Standardmaessig AUS wie alle verhaltensaendernden Zustell-Gates.
+ENABLE_VIX_GATE = _bool("ENABLE_VIX_GATE", False)
+# Ab diesem VIX-Schlusskurs gilt der Markt als "hohe Angst" - historisch deuten Werte
+# > 30 auf ernsthaften Marktstress hin (grobe Faustregel, keine wissenschaftliche
+# Konstante). Ab hier greift der Ueberzeugungs-Score-Abschlag (VIX_CONVICTION_PENALTY).
+VIX_HIGH_THRESHOLD = _float("VIX_HIGH_THRESHOLD", 30.0)
+# Optionales hartes Gate: liegt der VIX >= diesem Wert, wird der Alert unterdrueckt statt
+# nur den Score zu senken - "der Gesamtmarkt ist gerade zu chaotisch fuer ein einzelnes
+# direktionales Signal". 0 = aus (nur der Score-Abschlag unten wirkt).
+VIX_SUPPRESS_ABOVE = _float("VIX_SUPPRESS_ABOVE", 0.0)
+# Punkte-Abschlag (0-100) auf den Ueberzeugungs-Score, wenn der VIX >= VIX_HIGH_THRESHOLD
+# liegt. 0 = kein Score-Effekt (Gate wirkt dann nur ueber VIX_SUPPRESS_ABOVE).
+VIX_CONVICTION_PENALTY = _int("VIX_CONVICTION_PENALTY", 10)
+
 # --- Paper-Trading (virtuelles Depot, KEIN echtes Geld / kein Broker) ---
 # Wenn aktiv: bei jedem tatsaechlich verschickten Alert wird fuer die handelbaren Ticker
 # eine VIRTUELLE Position eroeffnet (Einstiegskurs gemerkt), laufend zum aktuellen Kurs
@@ -360,6 +383,23 @@ PAPER_MIN_STAKE = _float("PAPER_MIN_STAKE", 10.0)
 # Telegram geschickt wird, solange Positionen offen sind. Eroeffnungen und (Stop/Ziel-)
 # Schliessungen werden IMMER sofort gemeldet, unabhaengig davon. 0 = bei jedem Zyklus.
 PAPER_STATUS_INTERVAL_MINUTES = _int("PAPER_STATUS_INTERVAL_MINUTES", 30)
+
+# --- Kapitalerhalt-Modus (dynamisches Paper-Sizing nach Verlustserie) ---
+# Nach mehreren aufeinanderfolgenden Verlust-Trades das Positions-Sizing automatisch
+# verkleinern (Risk-off), statt nach einer Pechstraehne unveraendert weiterzumachen -
+# senkt das Tempo, mit dem eine schlechte Serie das Depot weiter verkleinert, bis sich
+# die Bilanz wieder dreht. Rein sizing-seitig (siehe app/paper_trading.py:
+# position_fraction) - unterdrueckt keine Alerts und aendert nichts an Stop/Ziel.
+# Standardmaessig AN, da rein risikoREDUZIEREND (im Gegensatz zu den verhaltens-
+# aendernden Zustell-Gates oben, die standardmaessig AUS sind).
+PAPER_CAPITAL_PRESERVATION = _bool("PAPER_CAPITAL_PRESERVATION", True)
+# Ab so vielen geschlossenen Verlust-Trades IN FOLGE (vom juengsten rueckwaerts gezaehlt)
+# greift die Reduktion.
+PAPER_LOSS_STREAK_THRESHOLD = _int("PAPER_LOSS_STREAK_THRESHOLD", 3)
+# Faktor, mit dem der normale Positionsanteil bei aktiver Verlustserie multipliziert
+# wird (0.5 = Positionen halbiert). Muss in (0, 1] liegen, um tatsaechlich zu reduzieren.
+PAPER_LOSS_STREAK_SIZE_FACTOR = _float("PAPER_LOSS_STREAK_SIZE_FACTOR", 0.5)
+
 # Ab wie vielen gleichzeitig alarmwuerdigen Statements in EINEM Poll-Zyklus zu einer
 # gebuendelten Sammel-Nachricht gewechselt wird statt einer Einzelnachricht pro Statement
 # (verhindert eine Alert-Flut bei einem ploetzlichen Nachrichtenschub).
@@ -526,6 +566,19 @@ def validate() -> tuple[list[str], list[str]]:
             "ENABLE_ENSEMBLE_MODEL=true, aber ENABLE_PRICE_TRACKING=false - ohne "
             "ausgewertete Ergebnisse gibt es keine Trainingsdaten, das Ensemble-Modell "
             "bleibt dauerhaft inaktiv (kein Effekt)."
+        )
+    if VIX_SUPPRESS_ABOVE > 0 and VIX_SUPPRESS_ABOVE < VIX_HIGH_THRESHOLD:
+        warnings.append(
+            f"VIX_SUPPRESS_ABOVE={VIX_SUPPRESS_ABOVE} liegt UNTER VIX_HIGH_THRESHOLD="
+            f"{VIX_HIGH_THRESHOLD} - Alerts werden dann schon vor dem eigentlichen "
+            "'hohe Marktangst'-Stand hart unterdrueckt statt nur im Score abgewertet."
+        )
+    if not (0.0 < PAPER_LOSS_STREAK_SIZE_FACTOR <= 1.0):
+        warnings.append(
+            f"PAPER_LOSS_STREAK_SIZE_FACTOR={PAPER_LOSS_STREAK_SIZE_FACTOR} liegt "
+            "ausserhalb (0, 1] - der Kapitalerhalt-Modus wuerde die Positionsgroesse "
+            "damit nicht sinnvoll reduzieren (<=0 -> nie ein Trade, >1 -> vergroessern "
+            "statt verkleinern)."
         )
 
     return errors, warnings

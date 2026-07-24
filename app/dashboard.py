@@ -20,6 +20,7 @@ from app.db import (
     get_calibration_stats,
     get_classification_calls_today,
     get_gate_statistics,
+    get_hourly_performance,
     get_kelly_inputs,
     get_outcomes_for_export,
     get_paper_closed_stats,
@@ -194,6 +195,15 @@ def api_pipeline_stats(hours: int = 24):
     Verarbeitungsphase eines Poll-Zyklus der letzten `hours` Stunden - macht
     Bottlenecks sichtbar (z.B. eine langsame Quelle oder viele Claude-Calls)."""
     return get_pipeline_statistics(hours=hours)
+
+
+@app.get("/api/hourly-performance", dependencies=[Depends(require_api_key)])
+def api_hourly_performance():
+    """Datensammlung (#Time-of-Day): Trefferquote/Durchschnittsrendite je Alarm-STUNDE
+    (UTC) - zeigt, ob der Bot zu bestimmten Tageszeiten systematisch besser/schlechter
+    liegt (z.B. weil dort andere Quellen/Themen dominieren). Nur mit
+    ENABLE_PRICE_TRACKING befuellt."""
+    return {"by_hour_utc": get_hourly_performance()}
 
 
 @app.get("/api/gap-impact", dependencies=[Depends(require_api_key)])

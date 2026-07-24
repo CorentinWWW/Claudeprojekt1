@@ -18,6 +18,9 @@ from typing import Optional
 
 from app import prices
 from app.config import (
+    PAPER_CAPITAL_PRESERVATION,
+    PAPER_LOSS_STREAK_SIZE_FACTOR,
+    PAPER_LOSS_STREAK_THRESHOLD,
     PAPER_MAX_POSITIONS,
     PAPER_MIN_STAKE,
     PAPER_STARTING_CAPITAL,
@@ -26,6 +29,7 @@ from app.config import (
 from app.db import (
     close_paper_position,
     count_open_paper_positions,
+    get_consecutive_paper_losses,
     get_meta,
     get_open_paper_position_for_ticker,
     get_open_paper_positions,
@@ -43,20 +47,29 @@ _STATUS_META_KEY = "paper_status_last_sent"
 
 # --- Reine Bausteine (ohne Netz/DB) ------------------------------------------------
 
-def position_fraction(score: Optional[int]) -> float:
+def position_fraction(score: Optional[int], loss_streak: int = 0) -> float:
     """Anteil des Depotwerts, den der Bot je Position einsetzt - abgeleitet aus dem
     Ueberzeugungs-Score (0-100). Das ist die "Taktik, die er selber macht": ueberzeugtere
     Signale bekommen mehr Kapital, schwaechere weniger. Bewusst gedeckelt, damit nie das
-    ganze Depot auf einer Position steht. None (Score aus) -> mittlerer Anteil."""
+    ganze Depot auf einer Position steht. None (Score aus) -> mittlerer Anteil.
+
+    Kapitalerhalt-Modus (#Kapitalerhalt): laeuft eine Verlustserie (loss_streak >=
+    PAPER_LOSS_STREAK_THRESHOLD geschlossene Verlust-Trades IN FOLGE), wird der Anteil
+    zusaetzlich um PAPER_LOSS_STREAK_SIZE_FACTOR verkleinert - Risk-off nach einer
+    Pechstraehne, statt unveraendert weiterzumachen."""
     if score is None:
-        return 0.16
-    if score >= 85:
-        return 0.30
-    if score >= 70:
-        return 0.22
-    if score >= 50:
-        return 0.16
-    return 0.12
+        base = 0.16
+    elif score >= 85:
+        base = 0.30
+    elif score >= 70:
+        base = 0.22
+    elif score >= 50:
+        base = 0.16
+    else:
+        base = 0.12
+    if PAPER_CAPITAL_PRESERVATION and loss_streak >= PAPER_LOSS_STREAK_THRESHOLD:
+        base *= PAPER_LOSS_STREAK_SIZE_FACTOR
+    return base
 
 
 def compute_position(
@@ -67,17 +80,19 @@ def compute_position(
     direction: Optional[str],
     day_high: Optional[float] = None,
     day_low: Optional[float] = None,
+    loss_streak: int = 0,
 ) -> Optional[dict]:
     """Bestimmt Einsatz, Stueckzahl und Stop/Ziel fuer eine neue virtuelle Position.
     account_value = aktueller Depotwert (Basis fuers Sizing), free_cash = freier
     Barbestand (Obergrenze - man kann nicht mehr binden, als frei ist). Gibt None zurueck,
     wenn kein gueltiger Kurs/Richtung vorliegt oder der Einsatz unter PAPER_MIN_STAKE
-    faellt (kein sinnloser Dust-Trade)."""
+    faellt (kein sinnloser Dust-Trade). loss_streak siehe position_fraction
+    (Kapitalerhalt-Modus)."""
     if not isinstance(entry_price, (int, float)) or entry_price <= 0:
         return None
     if direction not in ("long", "short"):
         return None
-    stake = min(free_cash, account_value * position_fraction(score))
+    stake = min(free_cash, account_value * position_fraction(score, loss_streak))
     if stake < PAPER_MIN_STAKE:
         return None
     qty = stake / entry_price
@@ -209,6 +224,11 @@ def format_status_message(summary: dict) -> str:
             f"📊 realisiert {_eur(summary['realized_pnl'])} · "
             f"{wins}/{closed} Trades im Plus"
         )
+    if summary.get("capital_preservation_active"):
+        lines.append(
+            f"🛡 Kapitalerhalt-Modus aktiv ({summary['loss_streak']} Verluste in Folge) "
+            "– Positionsgröße reduziert"
+        )
     return "\n".join(lines)
 
 
@@ -254,6 +274,8 @@ async def open_positions_for_alert(classification, statement_id, score: Optional
     from app.orchestrator import actionable_tickers
     from app.telegram_alert import send_text
 
+    loss_streak = get_consecutive_paper_losses() if PAPER_CAPITAL_PRESERVATION else 0
+
     for tc in actionable_tickers(classification):
         ticker = (tc.get("ticker") or "").upper()
         direction = tc.get("direction")
@@ -281,7 +303,7 @@ async def open_positions_for_alert(classification, statement_id, score: Optional
         snap = account_snapshot()
         plan = compute_position(
             snap["account_value"], snap["free_cash"], score, price, direction,
-            quote.get("high"), quote.get("low"),
+            quote.get("high"), quote.get("low"), loss_streak,
         )
         if plan is None:
             logger.info("[paper] kein Einsatz mehr frei fuer %s (frei %.2f€).",
@@ -353,6 +375,7 @@ async def _maybe_send_status(open_positions: list[dict]) -> None:
     closed = get_paper_closed_stats()
     snap = account_snapshot()
     unreal = sum(p.get("unrealized_pnl") or 0.0 for p in open_positions)
+    loss_streak = get_consecutive_paper_losses() if PAPER_CAPITAL_PRESERVATION else 0
     summary = {
         "starting_capital": PAPER_STARTING_CAPITAL,
         "free_cash": snap["free_cash"],
@@ -361,6 +384,10 @@ async def _maybe_send_status(open_positions: list[dict]) -> None:
         "positions": open_positions,
         "closed": closed["closed"],
         "wins": closed["wins"],
+        "loss_streak": loss_streak,
+        "capital_preservation_active": (
+            PAPER_CAPITAL_PRESERVATION and loss_streak >= PAPER_LOSS_STREAK_THRESHOLD
+        ),
     }
     sent = await send_text(format_status_message(summary))
     if sent:

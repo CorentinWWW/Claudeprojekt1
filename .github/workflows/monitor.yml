@@ -139,6 +139,12 @@ jobs:
           # einem neuen, noch unbewiesenen Signal soll es zunaechst nur mitschwingen statt
           # gleich Alerts zu blockieren.
           ENABLE_ENSEMBLE_MODEL: ${{ vars.ENABLE_ENSEMBLE_MODEL || 'true' }}
+          # VIX-Marktregime-Gate (siehe app/orchestrator.py): marktweiter Angst-Indikator
+          # (Stooq ^vix, kostenlos) - bei hoher Angst wird der Ueberzeugungs-Score
+          # abgewertet. '|| true' = standardmaessig AN; zum Abschalten Repo-Variable
+          # ENABLE_VIX_GATE=false setzen. VIX_SUPPRESS_ABOVE bleibt Code-Standard 0 (kein
+          # hartes Unterdruecken), das Gate wirkt also nur als sanfter Score-Effekt.
+          ENABLE_VIX_GATE: ${{ vars.ENABLE_VIX_GATE || 'true' }}
           MANUAL_TEST_TEXT: ${{ github.event.inputs.test_text }}
           # Playwright/Chromium ist hier bewusst nicht installiert, um Laeufe
           # kurz zu halten - Truth Social nutzt in diesem Modus nur den

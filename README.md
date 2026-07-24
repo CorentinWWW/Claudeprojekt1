@@ -174,6 +174,24 @@ Die Indikator-Mathematik ist mit bekannten Reihen unit-getestet (`tests/test_ind
 Bewusst best-effort: ist die Historie nicht erreichbar, entfällt die Technik still, der
 Alert läuft normal weiter.
 
+## VIX-Marktregime-Gate
+
+Zusätzlich zum einzelnen Ticker-Signal berücksichtigt der Predictor den **Gesamtmarkt**:
+der **VIX** (CBOE Volatility Index, marktweiter „Angst-Indikator") wird über Stooq (`^vix`,
+kostenlos, kein Key) geholt. Aktivieren über `ENABLE_VIX_GATE=true` (im Workflow bereits an).
+
+Bei hoher Marktangst (`VIX_HIGH_THRESHOLD`, Standard 30) bewegt sich oft der **gesamte
+Markt** chaotisch statt entlang des konkreten Katalysators — Korrelationen zwischen
+Sektoren steigen, ein einzelnes direktionales Signal wird unzuverlässiger. Das Gate:
+- senkt den **Überzeugungs-Score** um `VIX_CONVICTION_PENALTY` (Standard 10) — das wirkt
+  auf alle nachgelagerten Gates und die Paper-Trading-Positionsgröße,
+- kann optional (`VIX_SUPPRESS_ABOVE`, Standard 0 = aus) einen Alert bei extrem hohem VIX
+  ganz **unterdrücken**,
+- zeigt den aktuellen VIX-Stand im Alert an (📊).
+
+Best-effort: ist der Kursdienst nicht erreichbar, entfällt das Gate für diesen Zyklus
+einfach (kein Fehler, kein Suppress).
+
 ## Paper-Trading (virtuelles Depot)
 
 Ein **rein virtuelles Depot** (Standard-Startkapital **500 €**, `PAPER_STARTING_CAPITAL`),
@@ -199,6 +217,11 @@ GitHub-Actions-Workflow bereits an, abschaltbar über die Repo-Variable `PAPER_T
   **immer sofort**, unabhängig davon.
 - Der Depot-Zustand (offene/geschlossene Positionen, realisierter Gewinn) liegt in der
   SQLite-DB und **überlebt einzelne GitHub-Actions-Läufe** über den DB-Cache.
+- **Kapitalerhalt-Modus** (`PAPER_CAPITAL_PRESERVATION`, Standard an): laufen
+  `PAPER_LOSS_STREAK_THRESHOLD` (Standard 3) geschlossene Verlust-Trades **in Folge**,
+  wird die Positionsgröße automatisch mit `PAPER_LOSS_STREAK_SIZE_FACTOR` (Standard 0.5 =
+  halbiert) verkleinert — Risk-off nach einer Pechsträhne, statt unverändert
+  weiterzumachen. Der Depot-Status weist aktives Risk-off mit 🛡 aus.
 
 Braucht erreichbare Kursdaten (Stooq, best-effort — wie das Preis-Tracking); ist der
 Kursdienst mal nicht erreichbar, entfällt das Eröffnen/Bewerten still. Telegram muss
@@ -753,6 +776,13 @@ Einschätzung abgleichen).
 | `GET /api/stats` | Aggregierte Statistik | `X-API-Key`, falls `DASHBOARD_API_KEY` gesetzt |
 | `GET /api/calibration` | Trefferquote gesamt / je Konfidenz-Bucket / je Richtung + Schwellen-Empfehlung (`recommendation`), nur mit Preis-Tracking befüllt | `X-API-Key`, falls `DASHBOARD_API_KEY` gesetzt |
 | `GET /api/performance` | Aggregierte Performance + beste/schlechteste Ticker, Trefferquote je Quelle (`by_source`) und Kelly-lite Anteil (nur mit Preis-Tracking befüllt) | `X-API-Key`, falls `DASHBOARD_API_KEY` gesetzt |
+| `GET /api/hourly-performance` | Trefferquote/Durchschnittsrendite je Alarm-**Stunde** (UTC) — zeigt Time-of-Day-Muster, nur mit Preis-Tracking befüllt | `X-API-Key`, falls `DASHBOARD_API_KEY` gesetzt |
+| `GET /api/gate-stats?hours=` | Je Zustell-Gate (u.a. `vix_regime`, `ensemble_model`, `historical_performance`, `conviction_score`) wie oft geprüft/blockiert | `X-API-Key`, falls `DASHBOARD_API_KEY` gesetzt |
+| `GET /api/model-performance` | Trefferquote je verwendetem Claude-Modell (Haiku vs. Sonnet-Eskalation) | `X-API-Key`, falls `DASHBOARD_API_KEY` gesetzt |
+| `GET /api/pipeline-stats?hours=` | Durchschnitts-/Min-/Max-Dauer je Verarbeitungsphase eines Poll-Zyklus | `X-API-Key`, falls `DASHBOARD_API_KEY` gesetzt |
+| `GET /api/gap-impact?threshold_pct=` | Trefferquote stark gegappter Alerts im Vergleich zu allen anderen | `X-API-Key`, falls `DASHBOARD_API_KEY` gesetzt |
+| `GET /api/ensemble-status` | Trainingsstatus des Ensemble-Modells (trainiert? wie viele Samples?) | `X-API-Key`, falls `DASHBOARD_API_KEY` gesetzt |
+| `GET /api/paper` | Paper-Depot-Status (Wert, P&L, offene/geschlossene Positionen, Win-Rate) | `X-API-Key`, falls `DASHBOARD_API_KEY` gesetzt |
 | `GET /api/outcomes.csv` | Alle Ergebnis-Datensätze als CSV für die Offline-Analyse | `X-API-Key`, falls `DASHBOARD_API_KEY` gesetzt |
 | `GET /api/health` | Status pro Quelle (inkl. `prefiltered`/`stale`), Konfigurationsfehler/-warnungen, Uptime, `classification_calls_today`/`_limit`, `alerts_sent_today`, Zyklus-Timing (`last_cycle_seconds`/`avg_cycle_seconds`) und `active_gates` | – (bewusst offen für Uptime-Checks) |
 | `POST /api/test` | Beliebigen Text durch die volle Pipeline schicken (siehe oben), max. 4000 Zeichen | `X-API-Key`, falls `DASHBOARD_API_KEY` gesetzt |

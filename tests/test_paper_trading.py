@@ -276,6 +276,65 @@ def test_late_move_extra():
     check("kein late_move bei Gegenbewegung (long aber -8%)", extras2.get("late_move") is None)
 
 
+def test_capital_preservation_mode():
+    """Kapitalerhalt-Modus: nach genug Verlust-Trades IN FOLGE wird das Sizing kleiner -
+    sowohl in der reinen position_fraction()-Berechnung als auch end-to-end ueber
+    open_positions_for_alert() (das den Streak selbst aus der DB liest)."""
+    _, config, db, prices, pt, orch = _fresh(
+        PAPER_LOSS_STREAK_THRESHOLD="3", PAPER_LOSS_STREAK_SIZE_FACTOR="0.5"
+    )
+
+    check("kein Streak -> normales Sizing", pt.position_fraction(90, loss_streak=0) == 0.30)
+    check("Streak unter Schwelle -> normales Sizing", pt.position_fraction(90, loss_streak=2) == 0.30)
+    check("Streak erreicht Schwelle -> halbiert", pt.position_fraction(90, loss_streak=3) == 0.15)
+    check("Streak ueber Schwelle -> weiterhin halbiert", pt.position_fraction(90, loss_streak=5) == 0.15)
+
+    # get_consecutive_paper_losses: 3 Verluste in Folge, dann ein Gewinn (juenger) -> Streak = 0.
+    now = time.time()
+
+    def _closed_trade(ticker, entry_ts, exit_ts, pnl, reason):
+        pid = db.insert_paper_position(1, ticker, "long", 100.0, entry_ts, 1.0, 100.0, None, None)
+        db.close_paper_position(pid, 100.0 + pnl, exit_ts, pnl, reason)
+
+    _closed_trade("AAA", now - 400, now - 300, -10.0, "stop")
+    _closed_trade("BBB", now - 300, now - 200, -10.0, "stop")
+    _closed_trade("CCC", now - 200, now - 100, -10.0, "stop")
+    check("3 Verluste in Folge -> Streak 3", db.get_consecutive_paper_losses() == 3)
+
+    _closed_trade("DDD", now - 100, now - 50, 10.0, "target")
+    check("nach einem Gewinn -> Streak zurueckgesetzt auf 0", db.get_consecutive_paper_losses() == 0)
+
+    # End-to-end: der aktive Kapitalerhalt-Modus reduziert den tatsaechlichen Einsatz bei
+    # open_positions_for_alert() (Streak mit drei weiteren Verlusten wieder auf 3 bringen).
+    _closed_trade("EEE", now - 50, now - 40, -10.0, "stop")
+    _closed_trade("FFF", now - 40, now - 30, -10.0, "stop")
+    _closed_trade("GGG", now - 30, now - 20, -10.0, "stop")
+    check("erneut 3 Verluste in Folge (letzte 3 Trades)", db.get_consecutive_paper_losses() == 3)
+
+    from app.db import Classification
+    sent = _install_fakes(pt, orch, {
+        "NVDA": {"price": 100.0, "high": 105.0, "low": 95.0, "change_pct": 1.0},
+    })
+    cls = Classification(
+        is_market_relevant=True, sentiment="positive", confidence=0.95,
+        ticker_calls=[{"ticker": "NVDA", "direction": "long", "confidence": 0.95}],
+    )
+    asyncio.run(pt.open_positions_for_alert(cls, statement_id=99, score=90))
+    pos = db.get_open_paper_position_for_ticker("NVDA")
+    # Realisierter Saldo der obigen 7 Trades: -10-10-10+10-10-10-10 = -50 -> Depotwert 450.
+    # Normal waer's 30% von 450 = 135; mit aktivem Kapitalerhalt-Modus 15% = 67.5.
+    check("Einsatz durch Kapitalerhalt-Modus halbiert (~67.5 statt ~135)",
+          abs(pos["stake"] - 67.5) < 1e-6)
+
+
+def test_capital_preservation_disabled():
+    """PAPER_CAPITAL_PRESERVATION=false -> kein Effekt, egal wie lang der Streak."""
+    _, config, db, prices, pt, orch = _fresh(
+        PAPER_CAPITAL_PRESERVATION="false", PAPER_LOSS_STREAK_THRESHOLD="3",
+    )
+    check("deaktiviert: Streak hat keinen Effekt", pt.position_fraction(90, loss_streak=10) == 0.30)
+
+
 def main():
     test_pure_helpers()
     test_account_and_close()
@@ -284,6 +343,8 @@ def main():
     test_manage_closes_on_stop()
     test_status_throttle()
     test_late_move_extra()
+    test_capital_preservation_mode()
+    test_capital_preservation_disabled()
 
     print()
     if failures:

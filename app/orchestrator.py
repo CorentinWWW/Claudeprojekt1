@@ -53,6 +53,7 @@ from app.config import (
     MAX_CLASSIFICATIONS_PER_DAY,
     MAX_CONCURRENT_CLASSIFICATIONS,
     MAX_NEWS_AGE_MINUTES,
+    PAPER_CAPITAL_PRESERVATION,
     PAPER_STARTING_CAPITAL,
     PAPER_TRADING,
     POLL_INTERVAL_SECONDS,
@@ -70,6 +71,10 @@ from app.config import (
     TICKER_UNIVERSE,
     TOPIC_CONTEXT_MAX_ITEMS,
     TOPIC_CONTEXT_WINDOW_HOURS,
+    VIX_CONVICTION_PENALTY,
+    VIX_HIGH_THRESHOLD,
+    VIX_SUPPRESS_ABOVE,
+    ENABLE_VIX_GATE,
     WATCHLIST_SECTORS,
     WATCHLIST_TICKERS,
     WEEKLY_DIGEST_MIN_HOUR,
@@ -198,6 +203,11 @@ def active_gates() -> dict:
         "ensemble_suppress_below": (
             ENSEMBLE_SUPPRESS_BELOW if ENABLE_ENSEMBLE_MODEL and ENSEMBLE_SUPPRESS_BELOW > 0 else None
         ),
+        "vix_gate": ENABLE_VIX_GATE,
+        "vix_suppress_above": (
+            VIX_SUPPRESS_ABOVE if ENABLE_VIX_GATE and VIX_SUPPRESS_ABOVE > 0 else None
+        ),
+        "paper_capital_preservation": PAPER_CAPITAL_PRESERVATION if PAPER_TRADING else None,
     }
 
 
@@ -824,12 +834,14 @@ def _compute_conviction(raw, classification, statement_id) -> tuple[int, int, bo
     return score, corroboration, hedged
 
 
-async def _build_alert_extras(raw, classification, statement_id, score, corroboration, hedged) -> dict:
+async def _build_alert_extras(
+    raw, classification, statement_id, score, corroboration, hedged, vix_price: float | None = None
+) -> dict:
     """Sammelt die Zusatzinfos fuer einen Einzel-Alert: Ueberzeugungs-Score + Positions-
     einordnung (#1/#4), Korroboration (#15), Hedge-Hinweis (#2), heutige Bewegung +
     Stop/Ziel je Ticker (#8/#5, inkl. Baseline-Erfassung fuers Backtesting #2),
-    historische Trefferquote je Ticker (#9) und - bei einer Eskalation - die Themen-
-    Zeitleiste (#5)."""
+    historische Trefferquote je Ticker (#9), VIX-Marktregime (falls ENABLE_VIX_GATE) und
+    - bei einer Eskalation - die Themen-Zeitleiste (#5)."""
     extras: dict = {}
     if ENABLE_CONVICTION_SCORE:
         extras["conviction"] = score
@@ -838,6 +850,8 @@ async def _build_alert_extras(raw, classification, statement_id, score, corrobor
         extras["corroboration"] = corroboration
     if hedged:
         extras["hedged"] = True
+    if vix_price is not None:
+        extras["vix"] = {"level": vix_price, "high_fear": vix_price >= VIX_HIGH_THRESHOLD}
 
     price_ctx = await _fetch_ticker_context(classification, statement_id)
     if price_ctx.get("change"):
@@ -1025,6 +1039,15 @@ async def _send_alerts(alert_worthy: list[tuple]):
     if not alert_worthy:
         return
 
+    # VIX-Marktregime (einmal je Zyklus statt je Meldung geholt - der VIX aendert sich
+    # nicht innerhalb weniger Sekunden und gilt gleichermassen fuer alle Meldungen dieses
+    # Batches). Best-effort: ohne erreichbaren Kursdienst bleibt vix_price None und das
+    # Gate greift fuer diesen Zyklus einfach nicht (kein Fehler).
+    vix_price: float | None = None
+    if ENABLE_VIX_GATE:
+        vix_quote = await prices.get_index_quote("^vix")
+        vix_price = vix_quote.get("price") if vix_quote else None
+
     # Ueberzeugung + Gate-Pruefung (alles billig, ohne Kurs-/Claude-Call), damit die
     # teuren Kursabfragen nur fuer tatsaechlich zuzustellende Alerts anfallen.
     gated: list[tuple] = []
@@ -1134,6 +1157,28 @@ async def _send_alerts(alert_worthy: list[tuple]):
                     )
                     score = max(0, min(100, round(score + adjust)))
 
+        # VIX-Marktregime-Gate: bei hoher marktweiter Angst (VIX >= VIX_HIGH_THRESHOLD)
+        # ist ein einzelnes direktionales Signal unzuverlaessiger (der Gesamtmarkt bewegt
+        # sich chaotisch, unabhaengig vom konkreten Katalysator) - der Score wird dann
+        # abgewertet, optional (VIX_SUPPRESS_ABOVE) wird der Alert ganz unterdrueckt.
+        if ENABLE_VIX_GATE and vix_price is not None:
+            high_fear = vix_price >= VIX_HIGH_THRESHOLD
+            suppress = VIX_SUPPRESS_ABOVE > 0 and vix_price >= VIX_SUPPRESS_ABOVE
+            if VIX_SUPPRESS_ABOVE > 0:
+                log_gate_evaluation(
+                    statement_id, "vix_regime",
+                    threshold=VIX_SUPPRESS_ABOVE, actual_value=vix_price, passed=not suppress,
+                    reasoning=f"VIX={vix_price:.1f} (High-Fear-Schwelle={VIX_HIGH_THRESHOLD:.1f})",
+                )
+            if suppress:
+                logger.info(
+                    "[%s] Alert unterdrueckt (VIX-Marktregime: %.1f >= %.1f): %s",
+                    raw.source, vix_price, VIX_SUPPRESS_ABOVE, raw.text[:80],
+                )
+                continue
+            if high_fear and VIX_CONVICTION_PENALTY > 0:
+                score = max(0, min(100, score - VIX_CONVICTION_PENALTY))
+
         if ALERT_MIN_CONVICTION > 0:
             conviction_passed = score >= ALERT_MIN_CONVICTION
             log_gate_evaluation(
@@ -1223,7 +1268,7 @@ async def _send_alerts(alert_worthy: list[tuple]):
     if len(gated) <= ALERT_DIGEST_THRESHOLD:
         for raw, classification, statement_id, score, corroboration, hedged in gated:
             extras = await _build_alert_extras(
-                raw, classification, statement_id, score, corroboration, hedged
+                raw, classification, statement_id, score, corroboration, hedged, vix_price
             )
             sent = await send_alert(raw, classification, extras=extras)
             if sent:

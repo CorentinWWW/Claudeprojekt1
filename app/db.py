@@ -904,6 +904,52 @@ def get_source_reliability() -> list[dict]:
     ]
 
 
+def get_hourly_performance() -> list[dict]:
+    """Trefferquote je Alarm-STUNDE (UTC, aus alert_ts): zeigt, ob der Bot zu bestimmten
+    Tageszeiten systematisch besser/schlechter liegt (z.B. weil dort andere Quellen/
+    Themen dominieren). Nur Datensaetze mit vorliegender Nachmessung. Analog zu
+    get_source_reliability(), nur nach Stunde statt Quelle gruppiert."""
+    with get_conn() as conn:
+        rows = conn.execute(
+            """
+            SELECT CAST(strftime('%H', alert_ts, 'unixepoch') AS INTEGER) AS hour,
+                   COUNT(*) AS n,
+                   SUM(CASE WHEN correct = 1 THEN 1 ELSE 0 END) AS hits,
+                   AVG(return_pct) AS avg_return
+            FROM alert_outcomes
+            WHERE correct IS NOT NULL
+            GROUP BY hour
+            ORDER BY hour ASC
+            """
+        ).fetchall()
+    return [
+        {"hour_utc": r["hour"], "n": r["n"], "hits": r["hits"],
+         "hit_rate": (r["hits"] / r["n"]) if r["n"] else None,
+         "avg_return_pct": r["avg_return"]}
+        for r in rows
+    ]
+
+
+def get_consecutive_paper_losses(max_check: int = 10) -> int:
+    """Anzahl der ZULETZT geschlossenen Paper-Trades in Folge mit Verlust (pnl < 0), vom
+    juengsten rueckwaerts gezaehlt und beim ersten Gewinn/Nullergebnis gestoppt - Basis
+    fuer den Kapitalerhalt-Modus (dynamisches Sizing, siehe app/paper_trading.py:
+    position_fraction). Prueft hoechstens die letzten max_check geschlossenen Trades."""
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT pnl FROM paper_positions WHERE status = 'closed' AND pnl IS NOT NULL "
+            "ORDER BY exit_ts DESC LIMIT ?",
+            (max_check,),
+        ).fetchall()
+    streak = 0
+    for r in rows:
+        if r["pnl"] < 0:
+            streak += 1
+        else:
+            break
+    return streak
+
+
 def get_kelly_inputs() -> dict:
     """Eingaben fuer den Kelly-lite Positionsanteil (#5): Gesamt-Trefferquote sowie
     mittlerer GEWINN- und VERLUST-Betrag (jeweils |return_pct|) aus den ausgewerteten

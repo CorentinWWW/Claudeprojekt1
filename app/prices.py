@@ -147,15 +147,13 @@ def parse_stooq_csv(text: str) -> Optional[dict]:
     }
 
 
-async def get_quote(ticker: str, client: Optional[httpx.AsyncClient] = None) -> Optional[dict]:
-    """Holt eine Live-Quote fuer einen US-Ticker (best-effort). Gibt bei jedem Problem
-    None zurueck (nie eine Exception nach aussen). Nutzt einen Kurz-Cache
-    (PRICE_CACHE_TTL_SECONDS) und einen Circuit-Breaker (#13), damit ein mehrfach
-    vorkommender Ticker nicht mehrfach abgefragt und ein down/rate-limited Kursdienst
-    nicht bei jedem Ticker erneut angefragt wird."""
-    if not ticker:
-        return None
-    symbol = to_stooq_symbol(ticker)
+async def _fetch_quote_by_symbol(
+    symbol: str, client: Optional[httpx.AsyncClient] = None
+) -> Optional[dict]:
+    """Gemeinsamer Kern von get_quote()/get_index_quote(): holt eine Live-Quote fuer ein
+    BEREITS fertiges Stooq-Symbol (z.B. 'aapl.us' oder '^vix'), best-effort mit Kurz-
+    Cache + Circuit-Breaker (#13). Gibt bei jedem Problem None zurueck (nie eine
+    Exception nach aussen)."""
     now = time.time()
     ttl = config.PRICE_CACHE_TTL_SECONDS
 
@@ -166,7 +164,7 @@ async def get_quote(ticker: str, client: Optional[httpx.AsyncClient] = None) -> 
 
     if now < _breaker["open_until"]:
         # Circuit-Breaker offen: Kursdienst gilt gerade als gestoert, gar nicht anfragen.
-        logger.debug("Kurs-Circuit-Breaker offen, ueberspringe Abfrage fuer %s.", ticker)
+        logger.debug("Kurs-Circuit-Breaker offen, ueberspringe Abfrage fuer %s.", symbol)
         return None
 
     url = _STOOQ_URL.format(symbol=symbol)
@@ -179,7 +177,7 @@ async def get_quote(ticker: str, client: Optional[httpx.AsyncClient] = None) -> 
         resp.raise_for_status()
         quote = parse_stooq_csv(resp.text)
     except Exception:
-        logger.debug("Kursabfrage fuer %s fehlgeschlagen (best-effort).", ticker, exc_info=True)
+        logger.debug("Kursabfrage fuer %s fehlgeschlagen (best-effort).", symbol, exc_info=True)
         _breaker["consecutive_failures"] += 1
         if _breaker["consecutive_failures"] >= _BREAKER_THRESHOLD:
             _breaker["open_until"] = now + _BREAKER_COOLDOWN_SECONDS
@@ -196,6 +194,27 @@ async def get_quote(ticker: str, client: Optional[httpx.AsyncClient] = None) -> 
     if ttl > 0:
         _QUOTE_CACHE[symbol] = (now, quote)
     return quote
+
+
+async def get_quote(ticker: str, client: Optional[httpx.AsyncClient] = None) -> Optional[dict]:
+    """Holt eine Live-Quote fuer einen US-Ticker (best-effort). Gibt bei jedem Problem
+    None zurueck (nie eine Exception nach aussen). Nutzt einen Kurz-Cache
+    (PRICE_CACHE_TTL_SECONDS) und einen Circuit-Breaker (#13), damit ein mehrfach
+    vorkommender Ticker nicht mehrfach abgefragt und ein down/rate-limited Kursdienst
+    nicht bei jedem Ticker erneut angefragt wird."""
+    if not ticker:
+        return None
+    return await _fetch_quote_by_symbol(to_stooq_symbol(ticker), client=client)
+
+
+async def get_index_quote(symbol: str, client: Optional[httpx.AsyncClient] = None) -> Optional[dict]:
+    """Wie get_quote(), aber fuer einen Stooq-INDEX statt eines US-Einzeltitels (z.B.
+    '^vix' fuer den CBOE Volatility Index) - dort wird KEIN '.us'-Suffix angehaengt
+    (siehe to_stooq_symbol), das Symbol wird 1:1 an Stooq durchgereicht. Fuer den
+    VIX-Marktregime-Gate (ENABLE_VIX_GATE, siehe app/orchestrator.py)."""
+    if not symbol:
+        return None
+    return await _fetch_quote_by_symbol(symbol.strip().lower(), client=client)
 
 
 async def get_price(ticker: str, client: Optional[httpx.AsyncClient] = None) -> Optional[float]:
