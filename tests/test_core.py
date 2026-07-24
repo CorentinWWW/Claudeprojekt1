@@ -267,7 +267,7 @@ def test_related_topic_id_validation():
     orig_classify = orch.classify
     orig_insert = orch.insert_statement
     orch.classify = fake_classify
-    orch.insert_statement = lambda raw, cls: 12345
+    orch.insert_statement = lambda raw, cls, **kwargs: 12345
 
     async def run():
         raw = RawStatement(source="test", source_id="halluc-1", text="Testaussage")

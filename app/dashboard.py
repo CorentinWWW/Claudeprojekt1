@@ -14,14 +14,18 @@ from app import config
 from app.classifier import DailyCapExceeded, classify, selftest
 from app.db import (
     RawStatement,
+    analyze_gap_impact,
+    compare_model_performance,
     get_alerts_sent_today,
     get_calibration_stats,
     get_classification_calls_today,
+    get_gate_statistics,
     get_kelly_inputs,
     get_outcomes_for_export,
     get_paper_closed_stats,
     get_paper_realized_pnl,
     get_performance_stats,
+    get_pipeline_statistics,
     get_recent,
     get_source_reliability,
     get_stats,
@@ -165,6 +169,40 @@ def api_performance():
         ),
     }
     return stats
+
+
+@app.get("/api/gate-stats", dependencies=[Depends(require_api_key)])
+def api_gate_stats(hours: int = 24):
+    """Datensammlung (#Gate-Evaluation): je Zustell-Gate (Technik-Uebereinstimmung,
+    historische Performance, Ueberzeugungs-Schwelle, Cooldown, Ruhezeiten,
+    Stunden-Ratelimit) wie oft geprueft und wie oft blockiert in den letzten `hours`
+    Stunden - zeigt, welches Gate den meisten Effekt hat."""
+    return get_gate_statistics(hours=hours)
+
+
+@app.get("/api/model-performance", dependencies=[Depends(require_api_key)])
+def api_model_performance():
+    """Datensammlung (#Claude-Model-Tracking): Trefferquote je verwendetem
+    Claude-Modell (Haiku vs. Sonnet-Eskalation) - belegt, ob die teurere Eskalation
+    tatsaechlich bessere Alerts liefert. Nur mit ENABLE_PRICE_TRACKING befuellt."""
+    return compare_model_performance()
+
+
+@app.get("/api/pipeline-stats", dependencies=[Depends(require_api_key)])
+def api_pipeline_stats(hours: int = 24):
+    """Datensammlung (#Pipeline-Timing): Durchschnitts-/Min-/Max-Dauer je
+    Verarbeitungsphase eines Poll-Zyklus der letzten `hours` Stunden - macht
+    Bottlenecks sichtbar (z.B. eine langsame Quelle oder viele Claude-Calls)."""
+    return get_pipeline_statistics(hours=hours)
+
+
+@app.get("/api/gap-impact", dependencies=[Depends(require_api_key)])
+def api_gap_impact(threshold_pct: float = 3.0):
+    """Datensammlung (#Gap-Tracking): Trefferquote von Alerts mit grossem
+    Uebernacht-/Vorboersen-Gap (|gap_pct| >= threshold_pct) im Vergleich zu allen
+    anderen - zeigt, ob bereits stark gegappte Ticker ein schlechteres Signal sind.
+    Nur mit ENABLE_PRICE_TRACKING befuellt."""
+    return analyze_gap_impact(large_gap_threshold_pct=threshold_pct)
 
 
 @app.get("/api/paper", dependencies=[Depends(require_api_key)])

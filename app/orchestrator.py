@@ -3,6 +3,7 @@ import datetime
 import logging
 import re
 import time
+import uuid
 
 from anthropic import AuthenticationError, NotFoundError, PermissionDeniedError
 
@@ -15,6 +16,7 @@ from app.config import (
     ALERT_MIN_TICKER_CONFIDENCE,
     BLOCKLIST_TICKERS,
     CLAUDE_ESCALATION_MODEL,
+    CLAUDE_MODEL,
     DEDUP_SIMILARITY_THRESHOLD,
     DIVERGENCE_WARN_PCT,
     ENABLE_BORDERLINE_ESCALATION,
@@ -87,6 +89,8 @@ from app.db import (
     get_topic_thread,
     init_db,
     insert_statement,
+    log_gate_evaluation,
+    log_pipeline_timing,
     mark_alert_sent,
     record_alert_baseline,
     record_ticker_alert,
@@ -501,14 +505,24 @@ async def _maybe_escalate(text, recent_context, priority, classification):
 
 async def _classify_and_store(raw, semaphore: asyncio.Semaphore, recent_context: list[dict]):
     priority = is_high_priority(raw)
+    # Datensammlung (#Claude-Model-Tracking): welches Modell die ENDGUELTIGE
+    # Klassifikation geliefert hat. _maybe_escalate() gibt bei erfolgreicher
+    # Eskalation ein NEUES Classification-Objekt zurueck, bei Ausbleiben/Fehlschlag
+    # dasselbe wie eingegeben - die Identitaetspruefung unten erkennt das zuverlaessig,
+    # ohne classify()/_maybe_escalate() selbst um einen Rueckgabewert erweitern zu
+    # muessen.
+    model_used = CLAUDE_MODEL
     async with semaphore:
         try:
             classification = await classify(
                 raw.text, recent_context=recent_context, priority=priority
             )
-            classification = await _maybe_escalate(
+            escalated = await _maybe_escalate(
                 raw.text, recent_context, priority, classification
             )
+            if escalated is not classification:
+                model_used = CLAUDE_ESCALATION_MODEL
+            classification = escalated
         except DailyCapExceeded as exc:
             # Kein logger.exception() (kein Traceback-Spam): sobald das Tages-Limit
             # erreicht ist, trifft das jedes weitere Statement in diesem und allen
@@ -563,7 +577,7 @@ async def _classify_and_store(raw, semaphore: asyncio.Semaphore, recent_context:
         # classification=None hier korrekt als "nicht alarmwuerdig" behandelt.
         return (raw, None, dup_id)
 
-    statement_id = insert_statement(raw, classification)
+    statement_id = insert_statement(raw, classification, claude_model=model_used)
     if statement_id is None:
         logger.warning(
             "[%s] Statement konnte nicht gespeichert werden (source_id-Konflikt "
@@ -607,6 +621,22 @@ async def _classify_and_store(raw, semaphore: asyncio.Semaphore, recent_context:
     return (raw, classification, statement_id)
 
 
+async def _overnight_gap_pct(ticker: str, quote: dict) -> float | None:
+    """Datensammlung (#Gap-Tracking): Uebernacht-/Vorboersen-Gap in % (heutiger
+    Eroeffnungskurs vs. gestriger Schluss) zum Alarm-Zeitpunkt, falls ermittelbar -
+    dieselbe Formel wie _evaluate_gap_chase, hier aber fuer JEDEN Alert mit
+    Preis-Tracking erfasst (nicht nur im kurzen Fenster nach Boersenoeffnung). None bei
+    fehlender Historie/Eroeffnungskurs (nie ein Fehler, best-effort)."""
+    if not quote.get("open"):
+        return None
+    hist = await prices.get_history(ticker)
+    today = current_market_date()
+    prev_close = prices.previous_close(hist, today) if hist and today else None
+    if not prev_close or prev_close <= 0:
+        return None
+    return (quote["open"] - prev_close) / prev_close * 100.0
+
+
 async def _fetch_ticker_context(classification, statement_id) -> dict:
     """Best-effort (#2/#5/#8): fuer die handelbaren Ticker den aktuellen Kurs holen, ihn
     als Ausgangspunkt fuers Backtesting speichern und {'change': {...}, 'risk': {...}}
@@ -624,9 +654,10 @@ async def _fetch_ticker_context(classification, statement_id) -> dict:
         quote = await prices.get_quote(ticker)
         if not quote or quote.get("price") is None:
             continue
+        gap_pct = await _overnight_gap_pct(ticker, quote)
         record_alert_baseline(
             statement_id, ticker, tc.get("direction"), tc.get("confidence"),
-            now, quote.get("price"),
+            now, quote.get("price"), gap_pct,
         )
         if quote.get("change_pct") is not None:
             result["change"][ticker] = quote["change_pct"]
@@ -1004,7 +1035,19 @@ async def _send_alerts(alert_worthy: list[tuple]):
                     (top.get("ticker") or "").upper(), top.get("direction")
                 )
                 if summary is not None:
-                    if TECHNICALS_REQUIRE_AGREEMENT and summary.get("contradicts_strongly"):
+                    blocked = TECHNICALS_REQUIRE_AGREEMENT and summary.get("contradicts_strongly")
+                    # Datensammlung (#Gate-Evaluation): nur bei aktivem
+                    # TECHNICALS_REQUIRE_AGREEMENT kann dieses Gate ueberhaupt blockieren -
+                    # sonst wuerde "passed=True" faelschlich suggerieren, das Gate haette
+                    # etwas geprueft, obwohl es wirkungslos ist.
+                    if TECHNICALS_REQUIRE_AGREEMENT:
+                        log_gate_evaluation(
+                            statement_id, "technical_agreement",
+                            threshold=None, actual_value=None, passed=not blocked,
+                            reasoning=f"label={summary.get('label')} direction={top.get('direction')} "
+                                      f"agrees={summary.get('agrees')}",
+                        )
+                    if blocked:
                         logger.info(
                             "[%s] Alert unterdrueckt (Technik widerspricht klar: %s vs %s): %s",
                             raw.source, summary.get("label"), top.get("direction"),
@@ -1027,11 +1070,19 @@ async def _send_alerts(alert_worthy: list[tuple]):
                 hr = get_ticker_hitrate((top.get("ticker") or "").upper())
                 if hr and (hr.get("n") or 0) >= HISTORICAL_PERFORMANCE_MIN_SAMPLES:
                     hit_rate = hr.get("hit_rate")
-                    if (
+                    suppress = (
                         HISTORICAL_PERFORMANCE_SUPPRESS_BELOW > 0
                         and isinstance(hit_rate, (int, float))
                         and hit_rate < HISTORICAL_PERFORMANCE_SUPPRESS_BELOW
-                    ):
+                    )
+                    if HISTORICAL_PERFORMANCE_SUPPRESS_BELOW > 0:
+                        log_gate_evaluation(
+                            statement_id, "historical_performance",
+                            threshold=HISTORICAL_PERFORMANCE_SUPPRESS_BELOW, actual_value=hit_rate,
+                            passed=not suppress,
+                            reasoning=f"{top.get('ticker')}: hit_rate={hit_rate} n={hr['n']}",
+                        )
+                    if suppress:
                         logger.info(
                             "[%s] Alert unterdrueckt (historische Trefferquote fuer %s: "
                             "%.0f%% < %.0f%%, n=%d): %s",
@@ -1042,20 +1093,47 @@ async def _send_alerts(alert_worthy: list[tuple]):
                         continue
                     score = _apply_historical_performance(score, hr)
 
-        if ALERT_MIN_CONVICTION > 0 and score < ALERT_MIN_CONVICTION:
-            logger.info(
-                "[%s] Alert unter globaler Ueberzeugungs-Schwelle (%d < %d) - "
-                "zurueckgestellt: %s",
-                raw.source, score, ALERT_MIN_CONVICTION, raw.text[:80],
+        if ALERT_MIN_CONVICTION > 0:
+            conviction_passed = score >= ALERT_MIN_CONVICTION
+            log_gate_evaluation(
+                statement_id, "conviction_score",
+                threshold=ALERT_MIN_CONVICTION, actual_value=score, passed=conviction_passed,
+                reasoning=f"score={score} vs min={ALERT_MIN_CONVICTION}",
             )
-            continue
-        if not _passes_cooldown(classification):
+            if not conviction_passed:
+                logger.info(
+                    "[%s] Alert unter globaler Ueberzeugungs-Schwelle (%d < %d) - "
+                    "zurueckgestellt: %s",
+                    raw.source, score, ALERT_MIN_CONVICTION, raw.text[:80],
+                )
+                continue
+        cooldown_ok = _passes_cooldown(classification)
+        if TICKER_ALERT_COOLDOWN_MINUTES > 0:
+            log_gate_evaluation(
+                statement_id, "ticker_cooldown",
+                threshold=TICKER_ALERT_COOLDOWN_MINUTES, actual_value=None, passed=cooldown_ok,
+                reasoning=(
+                    "mind. ein handelbarer Ticker ausserhalb Cooldown" if cooldown_ok
+                    else "alle handelbaren Ticker im Cooldown-Fenster"
+                ),
+            )
+        if not cooldown_ok:
             logger.info(
                 "[%s] Alert unterdrueckt (Ticker-Cooldown aktiv): %s",
                 raw.source, raw.text[:80],
             )
             continue
-        if not _passes_quiet_hours(score):
+        quiet_ok = _passes_quiet_hours(score)
+        if QUIET_HOURS:
+            log_gate_evaluation(
+                statement_id, "quiet_hours",
+                threshold=QUIET_HOURS_MIN_CONVICTION, actual_value=score, passed=quiet_ok,
+                reasoning=(
+                    "ausserhalb Ruhezeit" if not _in_quiet_hours_now()
+                    else f"score={score} vs min={QUIET_HOURS_MIN_CONVICTION}"
+                ),
+            )
+        if not quiet_ok:
             logger.info(
                 "[%s] Alert waehrend Ruhezeit zurueckgestellt (Ueberzeugung %d < %d): %s",
                 raw.source, score, QUIET_HOURS_MIN_CONVICTION, raw.text[:80],
@@ -1073,6 +1151,12 @@ async def _send_alerts(alert_worthy: list[tuple]):
         already = count_alerted_statements_since(time.time() - 3600)
         allowance = MAX_ALERTS_PER_HOUR - already
         if allowance <= 0:
+            for _, _, sid, *_ in gated:
+                log_gate_evaluation(
+                    sid, "max_alerts_per_hour",
+                    threshold=MAX_ALERTS_PER_HOUR, actual_value=already, passed=False,
+                    reasoning=f"Ratelimit erreicht ({already}/{MAX_ALERTS_PER_HOUR} pro Stunde)",
+                )
             logger.info(
                 "Alert-Ratelimit erreicht (%d/Std bereits verschickt) - %d Meldung(en) "
                 "zurueckgestellt, werden spaeter erneut versucht.",
@@ -1081,12 +1165,18 @@ async def _send_alerts(alert_worthy: list[tuple]):
             return
         if len(gated) > allowance:
             gated.sort(key=lambda t: t[3], reverse=True)  # staerkste Ueberzeugung zuerst
-            deferred = len(gated) - allowance
+            deferred_items = gated[allowance:]
             gated = gated[:allowance]
+            for _, _, sid, *_ in deferred_items:
+                log_gate_evaluation(
+                    sid, "max_alerts_per_hour",
+                    threshold=MAX_ALERTS_PER_HOUR, actual_value=already, passed=False,
+                    reasoning=f"Ratelimit: nur die {allowance} ueberzeugendsten Meldung(en) jetzt",
+                )
             logger.info(
                 "Alert-Ratelimit: nur die %d ueberzeugendsten Meldung(en) jetzt, "
                 "%d zurueckgestellt (Resend spaeter).",
-                allowance, deferred,
+                allowance, len(deferred_items),
             )
 
     if len(gated) <= ALERT_DIGEST_THRESHOLD:
@@ -1286,11 +1376,19 @@ async def _maybe_send_daily_depot_update():
 
 
 async def poll_once(sources, semaphore: asyncio.Semaphore):
+    # Datensammlung (#Pipeline-Timing): eine ID pro Poll-Zyklus, unter der alle
+    # Phasen-Dauern dieses Zyklus in pipeline_timings landen (siehe
+    # get_pipeline_statistics()) - macht Bottlenecks (z.B. eine langsame Quelle oder
+    # viele gleichzeitige Claude-Calls) sichtbar, ohne dass man sich durch Logs graben muss.
+    cycle_id = uuid.uuid4().hex
+
+    t_housekeeping = time.time()
     await _resend_pending_alerts()
     await _evaluate_alert_outcomes()
     await _manage_paper_positions()
     await _maybe_send_daily_depot_update()
     await _maybe_send_weekly_digest()
+    log_pipeline_timing(cycle_id, "housekeeping", t_housekeeping, (time.time() - t_housekeeping) * 1000)
 
     # Wird gesetzt, sobald ein permanenter Claude-Konfigurationsfehler (kaputter Key,
     # geloeschtes Modell) auftaucht - erst NACH Abschluss der kompletten Buchhaltung
@@ -1301,6 +1399,7 @@ async def poll_once(sources, semaphore: asyncio.Semaphore):
     for source in sources:
         health = source_health[source.name]
         health["last_poll_at"] = time.time()
+        t_fetch = time.time()
         try:
             raw_statements = await source.poll()
         except Exception as exc:
@@ -1308,6 +1407,10 @@ async def poll_once(sources, semaphore: asyncio.Semaphore):
             health["last_error"] = str(exc)
             health["last_error_at"] = time.time()
             continue
+        finally:
+            log_pipeline_timing(
+                cycle_id, f"poll_source:{source.name}", t_fetch, (time.time() - t_fetch) * 1000
+            )
 
         health["last_success_at"] = time.time()
         health["total_fetched"] += len(raw_statements)
@@ -1361,6 +1464,7 @@ async def poll_once(sources, semaphore: asyncio.Semaphore):
             if not raw_statements:
                 continue
 
+        t_classify = time.time()
         to_classify, duplicate_pairs = _partition_duplicates(raw_statements)
 
         # Wichtige Meldungen zuerst klassifizieren: an einem Tag mit ausgeschoepftem
@@ -1393,7 +1497,11 @@ async def poll_once(sources, semaphore: asyncio.Semaphore):
             if r is not None:
                 results.append(r)
         id_by_source_id = {r[0].source_id: r[2] for r in results}
+        log_pipeline_timing(
+            cycle_id, f"classify:{source.name}", t_classify, (time.time() - t_classify) * 1000
+        )
 
+        t_alert = time.time()
         for dup_raw, primary in duplicate_pairs:
             # primary ist entweder eine DB-Row (dict, hat "id") oder ein RawStatement
             # aus derselben Charge (dessen DB-ID erst jetzt, nach der Klassifikation, bekannt ist).
@@ -1412,6 +1520,9 @@ async def poll_once(sources, semaphore: asyncio.Semaphore):
 
         alert_worthy = [r for r in results if is_alert_worthy(r[1])]
         await _send_alerts(alert_worthy)
+        log_pipeline_timing(
+            cycle_id, f"send_alerts:{source.name}", t_alert, (time.time() - t_alert) * 1000
+        )
 
     if permanent_error is not None:
         # Ein 401/403/404 der Claude-API repariert sich nicht von selbst - nach oben
