@@ -40,12 +40,13 @@ jobs:
     # ein dritter ueberlappender Trigger wird von GitHub NICHT eingereiht, sondern still
     # verworfen (kein rotes Kreuz, keine Fehler-Mail - der Zyklus faellt einfach lautlos
     # aus, ausgerechnet waehrend eines Nachrichtenschubs). 4 Minuten reichen bei
-    # serieller Klassifikation (MAX_CONCURRENT_CLASSIFICATIONS=1, gedeckelt durch den
-    # Tages-Kostendeckel) und nebenlaeufigem RSS-Abruf (siehe news_rss.py: alle Feeds
-    # gleichzeitig statt nacheinander) fuer einen normalen bis maessig starken
-    # Nachrichtenschub; ein abgebrochener Lauf verliert dank _resend_pending_alerts() in
-    # orchestrator.py ohnehin keine marktrelevante Meldung dauerhaft - der naechste
-    # (puenktlich startende) Lauf holt sie nach.
+    # MAX_CONCURRENT_CLASSIFICATIONS=2 (gedeckelt durch den Tages-Kostendeckel) und
+    # nebenlaeufigem RSS-Abruf (siehe news_rss.py: alle Feeds gleichzeitig statt
+    # nacheinander) fuer einen normalen bis maessig starken Nachrichtenschub - mit noch
+    # mehr Puffer als zuvor bei rein serieller Klassifikation; ein abgebrochener Lauf
+    # verliert dank _resend_pending_alerts() in orchestrator.py ohnehin keine
+    # marktrelevante Meldung dauerhaft - der naechste (puenktlich startende) Lauf holt
+    # sie nach.
     timeout-minutes: 4
     steps:
       - uses: actions/checkout@v4
@@ -74,6 +75,13 @@ jobs:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           TELEGRAM_STARTUP_NOTICE: "false"
+          # Latenz (Nutzerwunsch): serielle Claude-Klassifikation ist die dominante
+          # Zeitquelle eines Poll-Zyklus (mehrere Sekunden je Meldung, oft >80% der
+          # gesamten Zykluszeit). 2 statt 1 (Code-Standard) halbiert diese Phase grob,
+          # bei nur geringfuegig erhoehtem Risiko doppelter Alerts fuer zwei fast
+          # zeitgleiche Meldungen zum selben Thema (siehe app/config.py-Kommentar zu
+          # MAX_CONCURRENT_CLASSIFICATIONS). Per Repo-Variable ueberschreibbar.
+          MAX_CONCURRENT_CLASSIFICATIONS: ${{ vars.MAX_CONCURRENT_CLASSIFICATIONS || '2' }}
           # Praezisions-Schwelle fuer Alerts (siehe app/config.py:
           # ALERT_MIN_TICKER_CONFIDENCE). Optional ueber eine GitHub-Repository-Variable
           # (Settings -> Secrets and variables -> Actions -> Variables) einstellbar, ohne
@@ -81,6 +89,23 @@ jobs:
           # leeren String, den config.py wie "nicht gesetzt" behandelt -> es gilt dann der
           # Standard 0.90 aus dem Code.
           ALERT_MIN_TICKER_CONFIDENCE: ${{ vars.ALERT_MIN_TICKER_CONFIDENCE }}
+          # Zustell-Gates: alle standardmaessig aus im Code, hier auf Nutzerwunsch scharf
+          # gestellt (per Repo-Variable ueberschreibbar). ACHTUNG (siehe Commit-Message/
+          # Chat): viele dieser Gates gleichzeitig koennen Alerts stark ausduennen, weil
+          # eine Meldung durch ALLE Schwellen gleichzeitig muss.
+          MAX_NEWS_AGE_MINUTES: ${{ vars.MAX_NEWS_AGE_MINUTES || '180' }}
+          TICKER_ALERT_COOLDOWN_MINUTES: ${{ vars.TICKER_ALERT_COOLDOWN_MINUTES || '60' }}
+          ALERT_MIN_CONVICTION: ${{ vars.ALERT_MIN_CONVICTION || '70' }}
+          MAX_ALERTS_PER_HOUR: ${{ vars.MAX_ALERTS_PER_HOUR || '5' }}
+          ALERT_MIN_EXPECTED_MOVE_PCT: ${{ vars.ALERT_MIN_EXPECTED_MOVE_PCT || '2.0' }}
+          # Historische-Performance-Feedback: Ticker lernt aus eigener Bilanz, inkl. hartem
+          # Unterdrueckungs-Gate ab < 40% Trefferquote (erst aussagekraeftig, sobald genug
+          # ausgewertete Alerts vorliegen, siehe HISTORICAL_PERFORMANCE_MIN_SAMPLES).
+          ENABLE_HISTORICAL_PERFORMANCE_GATE: ${{ vars.ENABLE_HISTORICAL_PERFORMANCE_GATE || 'true' }}
+          HISTORICAL_PERFORMANCE_SUPPRESS_BELOW: ${{ vars.HISTORICAL_PERFORMANCE_SUPPRESS_BELOW || '0.4' }}
+          # Zweitmeinung fuer Grenzfaelle: kostet einen Extra-Call (Sonnet) pro Grenzfall,
+          # zaehlt gegen das Tages-Limit.
+          ENABLE_BORDERLINE_ESCALATION: ${{ vars.ENABLE_BORDERLINE_ESCALATION || 'true' }}
           # Preis-Tracking / Backtesting: nach jedem Alert wird der Kurs der handelbaren
           # Ticker erfasst und nach PRICE_OUTCOME_HORIZON_MINUTES erneut gemessen - so
           # entsteht ueber die Laeufe hinweg eine ECHTE Trefferquote (Dashboard
@@ -107,11 +132,28 @@ jobs:
           # der Kurshistorie (Stooq), als Bestaetigung/Widerspruch zum Nachrichtensignal.
           # '|| true' = standardmaessig AN; zum Abschalten Repo-Variable ENABLE_TECHNICALS=false.
           # Optionales hartes Gate (nur bei klarem Widerspruch unterdruecken) ueber
-          # TECHNICALS_REQUIRE_AGREEMENT=true (Repo-Variable), standardmaessig aus.
+          # TECHNICALS_REQUIRE_AGREEMENT - auf Nutzerwunsch hier scharf gestellt.
           ENABLE_TECHNICALS: ${{ vars.ENABLE_TECHNICALS || 'true' }}
-          TECHNICALS_REQUIRE_AGREEMENT: ${{ vars.TECHNICALS_REQUIRE_AGREEMENT }}
+          TECHNICALS_REQUIRE_AGREEMENT: ${{ vars.TECHNICALS_REQUIRE_AGREEMENT || 'true' }}
+          # Ensemble-Modell (Bag-of-Words-Naive-Bayes, siehe app/ensemble.py): klassische,
+          # von Claude UNABHAENGIGE Zweitmeinung aus der eigenen bisherigen Erfolgsbilanz.
+          # '|| true' = standardmaessig AN; zum Abschalten Repo-Variable
+          # ENABLE_ENSEMBLE_MODEL=false setzen. Braucht mindestens
+          # ENSEMBLE_MIN_TRAINING_SAMPLES (Code-Standard 30) ausgewertete Alerts BEIDER
+          # Klassen (Treffer UND Fehlschlag), bis dahin bleibt es wirkungslos - das
+          # Einschalten hier ist also gefahrlos, auch wenn die DB noch leer ist.
+          # ENSEMBLE_SUPPRESS_BELOW bewusst NICHT gesetzt (Code-Standard 0.0 = kein hartes
+          # Unterdruecken, nur ein sanfter Zu-/Abschlag auf den Ueberzeugungs-Score) - bei
+          # einem neuen, noch unbewiesenen Signal soll es zunaechst nur mitschwingen statt
+          # gleich Alerts zu blockieren.
+          ENABLE_ENSEMBLE_MODEL: ${{ vars.ENABLE_ENSEMBLE_MODEL || 'true' }}
+          # VIX-Marktregime-Gate (siehe app/orchestrator.py): marktweiter Angst-Indikator
+          # (Stooq ^vix, kostenlos) - bei hoher Angst wird der Ueberzeugungs-Score
+          # abgewertet. '|| true' = standardmaessig AN; zum Abschalten Repo-Variable
+          # ENABLE_VIX_GATE=false setzen. VIX_SUPPRESS_ABOVE bleibt Code-Standard 0 (kein
+          # hartes Unterdruecken), das Gate wirkt also nur als sanfter Score-Effekt.
+          ENABLE_VIX_GATE: ${{ vars.ENABLE_VIX_GATE || 'true' }}
           MANUAL_TEST_TEXT: ${{ github.event.inputs.test_text }}
-          ENABLE_LIVE_AUDIO: "false"
           # Playwright/Chromium ist hier bewusst nicht installiert, um Laeufe
           # kurz zu halten - Truth Social nutzt in diesem Modus nur den
           # direkten (leichten) API-Call, ohne Browser-Fallback.

@@ -4,7 +4,7 @@
 Zentralbank-/Fed-Entscheidungen, Politiker- und CEO-Statements, Quartalszahlen,
 Fusionen/Übernahmen, geopolitische Ereignisse und mehr, aus Nachrichtenfeeds
 (GDELT/RSS), optional ergänzt um Original-Quellen-Posts (z.B. ein bestimmter
-Truth-Social-Account) und Live-Reden. Lässt Claude für jede Meldung einschätzen,
+Truth-Social-Account). Lässt Claude für jede Meldung einschätzen,
 ob sie marktrelevant ist (positiv/negativ/neutral, betroffene Ticker mit
 Long/Short-Einschätzung je Aktie) und schickt bei Relevanz einen Telegram-Alert -
 aber nur einmal pro Thema pro Tag, außer die Lage eskaliert wirklich. Ein
@@ -17,7 +17,7 @@ sind LLM-generiert und können falsch liegen - eigene Anlageentscheidung auf eig
 ## Architektur
 
 ```
-Quellen (News/Truth Social/Live-Audio) --poll()--> Orchestrator (Supervisor, Concurrency)
+Quellen (News/Truth Social) --poll()--> Orchestrator (Supervisor, Concurrency)
                                                         |
                                     Tier 1: Text-Duplikat-Check (difflib, 24h,
                                             auch INNERHALB einer Charge)
@@ -95,10 +95,8 @@ Direkt nach dem Start:
 | Nachrichten (GDELT) | `app/sources/news_gdelt.py` | Stabil, kostenlos, kein Key nötig | ~15 Min |
 | Nachrichten (RSS) | `app/sources/news_rss.py` | Stabil, kostenlos | Minuten |
 | Truth Social | `app/sources/truth_social.py` | Best-Effort: direkter API-Call, mit Browser-Fallback | Sekunden-Minuten |
-| Live-Audio (Reden) | `app/sources/live_audio.py` | Experimentell, optionale Deps, nur Dauerbetrieb | ~20s Latenz |
 
-Quellen einzeln an/aus schalten über `.env` (`ENABLE_NEWS`, `ENABLE_TRUTH_SOCIAL`,
-`ENABLE_LIVE_AUDIO`).
+Quellen einzeln an/aus schalten über `.env` (`ENABLE_NEWS`, `ENABLE_TRUTH_SOCIAL`).
 
 **Allgemeine Abdeckung, nicht auf eine Person eingeschränkt:** GDELT und RSS filtern
 bewusst NICHT auf ein bestimmtes Thema/eine bestimmte Person, sondern decken alle
@@ -132,47 +130,6 @@ Testen nicht verifizieren (Netzwerk-Policy blockiert ausgehende Verbindungen zu
 diesem Host). Beide Codepfade wurden mechanisch getestet (Chromium startet,
 navigiert, Fehlerbehandlung greift), aber die tatsächliche Erfolgsrate auf einem
 Server mit echtem Internetzugang lässt sich erst nach dem Deployment verifizieren.
-
-### Live-Audio im Detail
-
-Braucht zusätzlich `pip install yt-dlp faster-whisper` sowie `ffmpeg` im System.
-Es gibt **keine automatische Erkennung**, wann eine relevante Person live spricht —
-Stream-URLs müssen manuell in `LIVE_AUDIO_STREAM_URLS` gepflegt werden (z.B. Link zu
-einem angekündigten Event, einer Pressekonferenz oder einem 24/7-Nachrichtensender).
-
-**Hört kontinuierlich zu, solange der Prozess läuft** (nicht nur ein Snapshot pro
-Poll-Zyklus): pro Stream läuft ein Hintergrund-Task, der den Stream durchgehend liest.
-`ffmpeg` schneidet dabei per Segment-Muxer rollierende Haeppchen
-(`LIVE_AUDIO_CHUNK_SECONDS`, Standard 20s) **ohne Lücken dazwischen** heraus - jedes
-fertige Häppchen wird sofort transkribiert (faster-whisper, mit VAD-Filter gegen
-Halluzinationen bei Stille/Musik) und in eine Warteschlange gelegt, die der
-Poll-Zyklus dann nur noch ausliest. Stirbt der Stream (Ende, abgelaufene signierte
-URL) oder läuft ein Segment-Fenster ab (proaktiver Refresh nach 1h, bevor die
-URL abläuft), wird mit exponentiellem Backoff neu verbunden. Nahezu identische,
-unmittelbar aufeinanderfolgende Transkript-Häppchen (typisches Whisper-Verhalten bei
-Stille - immer dieselbe Standardphrase) werden verworfen.
-
-**Funktioniert deshalb nur im Dauerbetrieb** (`main.py` + Docker/systemd/
-`run_forever`, siehe Abschnitt Deployment) — **nicht** im GitHub-Actions-Cron-Modus
-(`run_once.py`): dort beendet sich der Prozess nach einem einzigen Poll-Zyklus sofort
-wieder, die Hintergrund-Aufnahme kommt also nie über die ersten paar Sekunden
-Stream-Extraktion hinaus. `run_once.py` warnt entsprechend im Log und ruft
-`aclose()` auf, damit keine `ffmpeg`-Prozesse verwaist zurückbleiben, aber im
-Cron-Modus liefert die Quelle im Ergebnis nichts.
-
-`LIVE_AUDIO_LANGUAGE` (Standard `en`) auf leer setzen für automatische
-Spracherkennung pro Häppchen, falls die überwachten Streams nicht durchgehend in
-derselben Sprache sind (z.B. deutschsprachige Pressekonferenzen).
-
-**Automatisches GitHub Actions Workflow-Triggering**: wenn `GITHUB_TOKEN` und
-`GITHUB_REPO` gesetzt sind, wird bei jeder neu erkannten Rede (= nicht-wiederholter
-Transkript-Text) automatisch ein GitHub Actions Workflow via `repository_dispatch`
-ausgelöst (siehe `.github/workflows/speech-detected.yml`). Dies ermöglicht
-ereignisgesteuerte Datenverarbeitung statt festem Poll-Rhythmus: z.B. kann ein
-dedizierter, schnellerer Analyse-Workflow **sofort** nach Sprach-Erkennung starten,
-ohne auf den nächsten 15-Minuten-Cron zu warten. Der Token braucht `repo` Scope
-(Lese-/Schreibzugriff auf Code). Optional; ohne diesen Setup laufen Live-Audio und
-die reguläre Klassifikations-Pipeline weiterhin normal.
 
 ### Sonstige Einschränkungen
 
@@ -217,6 +174,24 @@ Die Indikator-Mathematik ist mit bekannten Reihen unit-getestet (`tests/test_ind
 Bewusst best-effort: ist die Historie nicht erreichbar, entfällt die Technik still, der
 Alert läuft normal weiter.
 
+## VIX-Marktregime-Gate
+
+Zusätzlich zum einzelnen Ticker-Signal berücksichtigt der Predictor den **Gesamtmarkt**:
+der **VIX** (CBOE Volatility Index, marktweiter „Angst-Indikator") wird über Stooq (`^vix`,
+kostenlos, kein Key) geholt. Aktivieren über `ENABLE_VIX_GATE=true` (im Workflow bereits an).
+
+Bei hoher Marktangst (`VIX_HIGH_THRESHOLD`, Standard 30) bewegt sich oft der **gesamte
+Markt** chaotisch statt entlang des konkreten Katalysators — Korrelationen zwischen
+Sektoren steigen, ein einzelnes direktionales Signal wird unzuverlässiger. Das Gate:
+- senkt den **Überzeugungs-Score** um `VIX_CONVICTION_PENALTY` (Standard 10) — das wirkt
+  auf alle nachgelagerten Gates und die Paper-Trading-Positionsgröße,
+- kann optional (`VIX_SUPPRESS_ABOVE`, Standard 0 = aus) einen Alert bei extrem hohem VIX
+  ganz **unterdrücken**,
+- zeigt den aktuellen VIX-Stand im Alert an (📊).
+
+Best-effort: ist der Kursdienst nicht erreichbar, entfällt das Gate für diesen Zyklus
+einfach (kein Fehler, kein Suppress).
+
 ## Paper-Trading (virtuelles Depot)
 
 Ein **rein virtuelles Depot** (Standard-Startkapital **500 €**, `PAPER_STARTING_CAPITAL`),
@@ -242,6 +217,11 @@ GitHub-Actions-Workflow bereits an, abschaltbar über die Repo-Variable `PAPER_T
   **immer sofort**, unabhängig davon.
 - Der Depot-Zustand (offene/geschlossene Positionen, realisierter Gewinn) liegt in der
   SQLite-DB und **überlebt einzelne GitHub-Actions-Läufe** über den DB-Cache.
+- **Kapitalerhalt-Modus** (`PAPER_CAPITAL_PRESERVATION`, Standard an): laufen
+  `PAPER_LOSS_STREAK_THRESHOLD` (Standard 3) geschlossene Verlust-Trades **in Folge**,
+  wird die Positionsgröße automatisch mit `PAPER_LOSS_STREAK_SIZE_FACTOR` (Standard 0.5 =
+  halbiert) verkleinert — Risk-off nach einer Pechsträhne, statt unverändert
+  weiterzumachen. Der Depot-Status weist aktives Risk-off mit 🛡 aus.
 
 Braucht erreichbare Kursdaten (Stooq, best-effort — wie das Preis-Tracking); ist der
 Kursdienst mal nicht erreichbar, entfällt das Eröffnen/Bewerten still. Telegram muss
@@ -252,9 +232,24 @@ konfiguriert sein, sonst laufen die Positionen nur stumm in der DB mit.
 Die Alerts kamen zuletzt teils erst, **als die Bewegung schon lief**. Zwei Gegenmaßnahmen:
 
 - **Häufigeres Polling:** der GitHub-Actions-Cron läuft jetzt alle **5 Minuten** (vorher 15),
-  das Job-Timeout entsprechend unter dem Intervall (4 Min). Für echte Sekunden-Latenz weiter
-  den **Dauerbetrieb** (`main.py`/Docker/systemd) bzw. die **Live-Audio → repository_dispatch**-
-  Kette nutzen, die eine Rede direkt hört, statt auf die mediale Meldung zu warten.
+  das Job-Timeout entsprechend unter dem Intervall (4 Min). **Wichtig:** GitHub garantiert
+  bei Schedule-Trigger-Intervallen unter ~15 Min keinen pünktlichen Start — bei hoher Last
+  auf den öffentlichen Runnern kann sich ein Lauf um Stunden verzögern (beobachtbar in den
+  Actions-Läufen). Für echte, verlässliche Sekunden-Latenz bleibt nur der **Dauerbetrieb**
+  (`main.py`/Docker/systemd/Oracle Cloud Free Tier, siehe unten) — dort läuft der Loop
+  ununterbrochen, unabhängig vom GitHub-Cron.
+- **Parallele Klassifikation** (`MAX_CONCURRENT_CLASSIFICATIONS`, in dieser Vorlage/dem
+  Workflow **2**, Code-Standard 1): die serielle Claude-Klassifikation ist typischerweise
+  die dominante Zeitquelle *innerhalb* eines Zyklus (mehrere Sekunden je Meldung). Bei 2
+  gleichzeitig laufenden Klassifikationen verkürzt sich diese Phase spürbar — auf Kosten
+  eines geringfügig höheren Risikos, dass zwei fast zeitgleiche Meldungen zum selben
+  Thema sich nicht gegenseitig als Duplikat erkennen (der Themen-Kontext wächst erst nach
+  Abschluss einer Klassifikation) und beide einen Alert auslösen. Per Repo-Variable
+  einstellbar, ohne Code zu ändern.
+- **`MAX_NEWS_AGE_MINUTES`** enger fassen (z.B. 15 statt Workflow-Standard 180): filtert
+  Meldungen heraus, die schon länger zurückliegen, bevor überhaupt ein Claude-Call
+  ausgelöst wird — spart Zeit/Kosten für ohnehin meist schon eingepreiste News. Ebenfalls
+  eine Repo-Variable, kein Code nötig.
 - **„Zu spät"-Warnung im Alert:** ist der Kurs am Alarm-Tag bereits stärker als
   `LATE_MOVE_WARN_PCT` (Standard 3 %) **in Signalrichtung** gelaufen, weist der Alert
   ausdrücklich darauf hin, dass die Bewegung evtl. großteils gelaufen ist — so wird ein
@@ -269,6 +264,18 @@ Die Alerts kamen zuletzt teils erst, **als die Bewegung schon lief**. Zwei Gegen
   ausdrücklich: „🚀 Mögliche Übernacht-Rallye … Einstieg jetzt, **bevor** der Kurs zum
   nächsten Open hochgappt". Ist die Session bereits **vorbörslich**, wird stattdessen
   gewarnt, dass der Gap evtl. schon läuft. Rein zeit-/richtungsbasiert, kein Extra-Call.
+- **Gap-Chase-Bewertung** (`ENABLE_GAP_CHASE_EVALUATION`, Standard an, braucht
+  Preis-Tracking): das Gegenstück zur Antizipation oben — der Gap ist bereits passiert
+  (Markt war zu, jetzt zur Börsenöffnung entsprechend extrem hoch/niedrig). Kurz **nach**
+  der Eröffnung (`GAP_CHASE_WINDOW_MINUTES`, Standard 30 min) vergleicht der Bot den
+  tatsächlichen Gap (heutiger Eröffnungskurs vs. gestriger Schluss, aus der
+  Kurshistorie) mit Claudes geschätzter Gesamtbewegung: hat der Gap bereits
+  `GAP_CHASE_TOO_LATE_RATIO` (Standard 80 %) davon aufgebraucht (ohne Schätzung:
+  `GAP_CHASE_TOO_LATE_ABS_PCT`, Standard 6 %), rät der Alert vom (Nach-)Kauf ab
+  („⏭ … riskant, Gap-Fade-Gefahr“); ist noch Luft, heißt es „🎯 … kann sich noch lohnen“
+  samt einem groben Ausstiegs-Kursziel (aus der verbleibenden geschätzten Bewegung, sonst
+  aus derselben Tagesspannen-Logik wie die normalen Stop-/Ziel-Vorschläge). Nur relevant,
+  wenn der Gap überhaupt `GAP_CHASE_MIN_GAP_PCT` (Standard 3 %) erreicht.
 
 ## Robustheit / Reife dieser Version
 
@@ -410,6 +417,20 @@ Die Alerts kamen zuletzt teils erst, **als die Bewegung schon lief**. Zwei Gegen
   12. **Aktive-Gates-Übersicht** – Startup-Log und `/api/health` (`active_gates`) zeigen
       auf einen Blick, welche optionalen Gates gerade Alerts beeinflussen.
   Auch hier: alles Analyse-Hilfen, **keine Anlageberatung**.
+- **Historische-Performance-Feedback** (`ENABLE_HISTORICAL_PERFORMANCE_GATE`, Standard
+  **aus**): `ENABLE_HISTORICAL_HITRATE` zeigt die historische Pro-Ticker-Trefferquote
+  bisher nur im Alert an - sie floss NICHT in die Entscheidung selbst ein, ein Ticker
+  mit belegt schlechter Bilanz wurde also genauso behandelt wie einer mit durchweg
+  guter. Dieses Gate schließt die Lücke: der stärkste handelbare Ticker eines Alerts
+  wird anhand SEINER EIGENEN historischen Trefferquote (aus den ausgewerteten
+  `alert_outcomes`, braucht `ENABLE_PRICE_TRACKING`) im Überzeugungs-Score hoch-/
+  heruntergestuft (`HISTORICAL_PERFORMANCE_WEIGHT`, linear um die 50%-Coinflip-Marke) -
+  der Bot lernt so aus seinen eigenen vergangenen Alerts für genau diesen Ticker, statt
+  jede neue Meldung unabhängig davon gleich zu bewerten. Erst ab
+  `HISTORICAL_PERFORMANCE_MIN_SAMPLES` ausgewerteten Alerts für diesen Ticker wirksam,
+  damit nicht 1-2 Zufallstreffer den Score verzerren. Optional
+  (`HISTORICAL_PERFORMANCE_SUPPRESS_BELOW`) wird ein Alert für einen Ticker mit belegt
+  schlechter Trefferquote sogar komplett unterdrückt statt nur den Score zu senken.
 - **Echte Nachrichtenzeit + Alter im Alert**: statt eines bloßen „gerade erfasst"-
   Zeitstempels liest jede Quelle jetzt die **tatsächliche Veröffentlichungszeit** aus
   (GDELT `seendate`, RSS `published_parsed`, Truth Social `created_at`; Fallback auf
@@ -553,8 +574,7 @@ Die Alerts kamen zuletzt teils erst, **als die Bewegung schon lief**. Zwei Gegen
   dekodiert, GDELT/RSS wiederholen bei transienten Verbindungsfehlern automatisch
   (nicht bei permanenten Blocks wie 403), ein einzelner kaputter RSS-Eintrag kostet
   nicht mehr den ganzen Feed, der Truth-Social-Browser-Fallback hat einen
-  Gesamt-Timeout, Live-Audio-Temp-Dateien werden auch bei fehlgeschlagener
-  Transkription zuverlässig aufgeräumt.
+  Gesamt-Timeout.
 - **Weitere Härtung nach systematischem Bug-Hunt** (5 parallele Review-Durchläufe
   über den gesamten Code):
   - Batch-Queries statt Query-pro-Statement bei der Duplikatprüfung
@@ -586,8 +606,8 @@ Es gibt zwei grundsätzlich verschiedene Betriebsarten:
 
 - **Einfachster Weg - GitHub Actions** (kein Account/Server/Kreditkarte nötig,
   nur Telegram-Alerts, kein Dashboard, Polling alle 15 Min statt 60s)
-- **Voller Funktionsumfang** - Dashboard, 60s-Polling, Truth-Social-Browser-Fallback,
-  Live-Audio - braucht einen (kostenlosen) Server (z.B. Oracle Cloud Free Tier)
+- **Voller Funktionsumfang** - Dashboard, 60s-Polling, Truth-Social-Browser-Fallback -
+  braucht einen (kostenlosen) Server (z.B. Oracle Cloud Free Tier)
 
 ### Einfachster Weg: GitHub Actions (empfohlen zum Ausprobieren)
 
@@ -612,8 +632,8 @@ Bedarf im Workflow auf `*/15` verkürzen, wenn das Repo öffentlich ist oder gen
 Freiminuten übrig sind.
 
 Kein Dashboard in diesem Modus - Telegram ist der Alert-Kanal, `Actions`-Tab das Log.
-Live-Audio und der Truth-Social-Browser-Fallback sind hier bewusst deaktiviert (siehe
-`monitor.yml`), damit jeder Lauf kurz und günstig bleibt.
+Der Truth-Social-Browser-Fallback ist hier bewusst deaktiviert (siehe `monitor.yml`),
+damit jeder Lauf kurz und günstig bleibt.
 
 ### Voller Funktionsumfang: eigener (kostenloser) Server
 
@@ -729,6 +749,8 @@ Siehe `.env.example` für alle Variablen. Wichtige zusätzliche Stellschrauben:
 | `ALERT_MIN_EXPECTED_MOVE_PCT` | Nur alarmieren, wenn Claudes grobe erwartete Bewegung ≥ diesem % ist (`0` = aus) |
 | `ENABLE_HISTORICAL_HITRATE` | Historische Pro-Ticker-Trefferquote im Alert (braucht Preis-Tracking zum Befüllen) |
 | `ENABLE_RISK_LEVELS` | Vorgeschlagene Stop-/Take-Profit-Marken aus der Tagesspanne (nur mit Preis-Tracking) |
+| `ENABLE_HISTORICAL_PERFORMANCE_GATE` / `HISTORICAL_PERFORMANCE_MIN_SAMPLES` / `_WEIGHT` / `_SUPPRESS_BELOW` | Der staerkste handelbare Ticker "lernt" aus seiner EIGENEN historischen Trefferquote (braucht Preis-Tracking): hebt/senkt den Ueberzeugungs-Score, optional harte Unterdrueckung bei belegt schlechter Bilanz. Standard **aus** |
+| `ENABLE_GAP_CHASE_EVALUATION` / `GAP_CHASE_WINDOW_MINUTES` / `_MIN_GAP_PCT` / `_TOO_LATE_RATIO` / `_TOO_LATE_ABS_PCT` | Gegenstueck zur Uebernacht-Gap-Antizipation: der Gap ist schon passiert (Markt war zu, jetzt zur Boersenoeffnung extrem hoch/niedrig) - lohnt sich ein Einstieg noch, und falls ja, wann verkaufen? Braucht Preis-Tracking. Standard **an** |
 | `ENABLE_BORDERLINE_ESCALATION` / `CLAUDE_ESCALATION_MODEL` / `ESCALATION_BAND` | Grenzfälle nahe der Schwelle mit stärkerem Modell zweitprüfen (Standard **aus**, kostet Extra-Calls) (#4) |
 | `ENABLE_PRICE_TRACKING` / `PRICE_OUTCOME_HORIZON_MINUTES` | Kurs-Feedback/Backtesting + heutige Bewegung im Alert, best-effort über Stooq. Im ausgelieferten Workflow/`.env.example` **an** (Code-Standard aus); Repo-Variable `ENABLE_PRICE_TRACKING=false` schaltet ab (#2/#3/#8) |
 | `PRICE_CACHE_TTL_SECONDS` | Kurz-Cache für Live-Kursabfragen (gleiche Quote nicht doppelt holen); `0` = aus |
@@ -770,6 +792,13 @@ Einschätzung abgleichen).
 | `GET /api/stats` | Aggregierte Statistik | `X-API-Key`, falls `DASHBOARD_API_KEY` gesetzt |
 | `GET /api/calibration` | Trefferquote gesamt / je Konfidenz-Bucket / je Richtung + Schwellen-Empfehlung (`recommendation`), nur mit Preis-Tracking befüllt | `X-API-Key`, falls `DASHBOARD_API_KEY` gesetzt |
 | `GET /api/performance` | Aggregierte Performance + beste/schlechteste Ticker, Trefferquote je Quelle (`by_source`) und Kelly-lite Anteil (nur mit Preis-Tracking befüllt) | `X-API-Key`, falls `DASHBOARD_API_KEY` gesetzt |
+| `GET /api/hourly-performance` | Trefferquote/Durchschnittsrendite je Alarm-**Stunde** (UTC) — zeigt Time-of-Day-Muster, nur mit Preis-Tracking befüllt | `X-API-Key`, falls `DASHBOARD_API_KEY` gesetzt |
+| `GET /api/gate-stats?hours=` | Je Zustell-Gate (u.a. `vix_regime`, `ensemble_model`, `historical_performance`, `conviction_score`) wie oft geprüft/blockiert | `X-API-Key`, falls `DASHBOARD_API_KEY` gesetzt |
+| `GET /api/model-performance` | Trefferquote je verwendetem Claude-Modell (Haiku vs. Sonnet-Eskalation) | `X-API-Key`, falls `DASHBOARD_API_KEY` gesetzt |
+| `GET /api/pipeline-stats?hours=` | Durchschnitts-/Min-/Max-Dauer je Verarbeitungsphase eines Poll-Zyklus | `X-API-Key`, falls `DASHBOARD_API_KEY` gesetzt |
+| `GET /api/gap-impact?threshold_pct=` | Trefferquote stark gegappter Alerts im Vergleich zu allen anderen | `X-API-Key`, falls `DASHBOARD_API_KEY` gesetzt |
+| `GET /api/ensemble-status` | Trainingsstatus des Ensemble-Modells (trainiert? wie viele Samples?) | `X-API-Key`, falls `DASHBOARD_API_KEY` gesetzt |
+| `GET /api/paper` | Paper-Depot-Status (Wert, P&L, offene/geschlossene Positionen, Win-Rate) | `X-API-Key`, falls `DASHBOARD_API_KEY` gesetzt |
 | `GET /api/outcomes.csv` | Alle Ergebnis-Datensätze als CSV für die Offline-Analyse | `X-API-Key`, falls `DASHBOARD_API_KEY` gesetzt |
 | `GET /api/health` | Status pro Quelle (inkl. `prefiltered`/`stale`), Konfigurationsfehler/-warnungen, Uptime, `classification_calls_today`/`_limit`, `alerts_sent_today`, Zyklus-Timing (`last_cycle_seconds`/`avg_cycle_seconds`) und `active_gates` | – (bewusst offen für Uptime-Checks) |
 | `POST /api/test` | Beliebigen Text durch die volle Pipeline schicken (siehe oben), max. 4000 Zeichen | `X-API-Key`, falls `DASHBOARD_API_KEY` gesetzt |

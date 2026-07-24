@@ -98,7 +98,32 @@ def test_performance_stats():
     check("Trefferquote 2/3", abs(stats["hit_rate"] - 2 / 3) < 1e-9)
     check("bester Ticker ist NVDA (hoechste Ø-Rendite)",
           stats["best_tickers"][0]["ticker"] == "NVDA")
-    check("schlechtester Ticker ist INTC", stats["worst_tickers"][0]["ticker"] == "INTC")
+    # Mit nur 2 Tickern insgesamt (< limit=5) sind BEIDE bereits in best_tickers
+    # enthalten - worst_tickers darf sie dann nicht nochmal (ueberlappend) zeigen.
+    check("weniger Ticker als Limit -> worst_tickers leer (kein Overlap mit best_tickers)",
+          stats["worst_tickers"] == [])
+    os.unlink(name)
+
+
+def test_performance_stats_best_worst_no_overlap():
+    """Bei MEHR Tickern als dem Limit (Standard 5) duerfen sich best_tickers und
+    worst_tickers nicht ueberschneiden - vorher tauchte derselbe Ticker (Rang genau am
+    Limit) gleichzeitig als 'bester' und 'schlechtester' auf."""
+    config, db, orch, name = _fresh()
+    returns = {
+        "NVDA": 10.0, "AAPL": 8.0, "MSFT": 6.0, "GOOG": 4.0, "AMZN": 2.0,
+        "TSLA": -1.0, "META": -3.0,
+    }
+    for i, (ticker, ret) in enumerate(returns.items(), start=1):
+        _evaluate(db, i, ticker, "long", return_pct=ret, correct=ret > 0)
+
+    stats = db.get_performance_stats()
+    best = [t["ticker"] for t in stats["best_tickers"]]
+    worst = [t["ticker"] for t in stats["worst_tickers"]]
+    check("best_tickers = Top 5 nach Rendite", best == ["NVDA", "AAPL", "MSFT", "GOOG", "AMZN"])
+    check("worst_tickers = die 2 verbleibenden, schlechtestes zuerst", worst == ["META", "TSLA"])
+    check("keine Ueberschneidung zwischen best_tickers und worst_tickers",
+          not (set(best) & set(worst)))
     os.unlink(name)
 
 
@@ -174,14 +199,48 @@ def test_weekly_digest_skips_without_data():
     os.unlink(name)
 
 
+def test_hourly_performance():
+    """Time-of-Day-Tracking (db.get_hourly_performance): Trefferquote/Rendite je
+    Alarm-STUNDE (UTC), aus alert_ts extrahiert."""
+    config, db, orch, name = _fresh()
+
+    def _ts_for_hour(hour):
+        return datetime.datetime(2020, 1, 1, hour, 0, 0, tzinfo=datetime.timezone.utc).timestamp()
+
+    def _seed(sid_suffix, ticker, hour, return_pct, correct):
+        sid = db.insert_statement(
+            db.RawStatement(source="news", source_id=f"hp-{sid_suffix}", text="x"), _relevant(db)
+        )
+        ts = _ts_for_hour(hour)
+        db.record_alert_baseline(sid, ticker, "long", 0.9, ts, 100.0)
+        oid = next(
+            o["id"] for o in db.get_outcomes_awaiting_followup(0)
+            if o["statement_id"] == sid and o["ticker"] == ticker
+        )
+        db.set_outcome_followup(oid, ts + 3600, 100.0 * (1 + return_pct / 100.0), return_pct, correct)
+
+    _seed(1, "AAA", 9, 10.0, True)
+    _seed(2, "BBB", 9, -10.0, False)
+    _seed(3, "CCC", 22, 5.0, True)
+
+    by_hour = {r["hour_utc"]: r for r in db.get_hourly_performance()}
+    check("Stunde 9 hat 2 ausgewertete Alerts", by_hour[9]["n"] == 2)
+    check("Stunde 9: Trefferquote 50%", abs(by_hour[9]["hit_rate"] - 0.5) < 1e-9)
+    check("Stunde 22 hat 1 ausgewerteten Alert mit 100% Trefferquote",
+          by_hour[22]["n"] == 1 and by_hour[22]["hit_rate"] == 1.0)
+    check("nur Stunden mit Daten erscheinen (kein Eintrag fuer Stunde 5)", 5 not in by_hour)
+
+
 def main():
     test_corroboration()
     test_ticker_hitrate()
     test_performance_stats()
+    test_performance_stats_best_worst_no_overlap()
     test_alerts_today_metric()
     test_weekly_digest_format()
     test_weekly_digest_trigger()
     test_weekly_digest_skips_without_data()
+    test_hourly_performance()
 
     print()
     if failures:

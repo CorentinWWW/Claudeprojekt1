@@ -173,6 +173,31 @@ GAP_NEAR_CLOSE_MINUTES = _int("GAP_NEAR_CLOSE_MINUTES", 45)
 # keinen Gap-Hinweis ausloesen. 0 = aus (jeder klar gerichtete Alert im Fenster zaehlt).
 GAP_MIN_EXPECTED_MOVE_PCT = _float("GAP_MIN_EXPECTED_MOVE_PCT", 0.0)
 
+# --- Gap-Chase-Bewertung (Gegenstueck: der Gap ist schon passiert) ---
+# Nutzerwunsch: wurde ein Ticker bereits UEBER NACHT/VORBOERSLICH stark gepusht (Markt
+# war zu) und steht zur Boersenoeffnung entsprechend extrem hoch/niedrig - lohnt sich ein
+# Einstieg dann ueberhaupt noch, und falls ja, wann sollte man wieder verkaufen? Prueft
+# kurz NACH der Eroeffnung (siehe GAP_CHASE_WINDOW_MINUTES) den tatsaechlichen Gap
+# (heutiger Eroeffnungskurs vs. gestriger Schluss, aus der Kurshistorie) gegen Claudes
+# erwartete Bewegung: ist der Groteil davon schon gelaufen, wird vom Nachkaufen
+# abgeraten (Gap-Fade-Risiko); ist noch Luft, wird ein grobes Ausstiegs-Kursziel
+# genannt. Braucht ENABLE_PRICE_TRACKING (Kurs + Historie). Standardmaessig AN wie die
+# uebrigen reinen Anreicherungs-Funktionen (ENABLE_HISTORICAL_HITRATE/ENABLE_RISK_LEVELS)
+# - aendert nie, OB alarmiert wird, nur was im Alert dazu steht.
+ENABLE_GAP_CHASE_EVALUATION = _bool("ENABLE_GAP_CHASE_EVALUATION", True)
+# Nur innerhalb so vieler Minuten NACH Boersenoeffnung relevant - danach ist "der Markt
+# war zu" nicht mehr die Erklaerung fuer eine grosse Kursbewegung.
+GAP_CHASE_WINDOW_MINUTES = _int("GAP_CHASE_WINDOW_MINUTES", 30)
+# Ab welcher (richtungsbereinigten) Gap-Groesse (%) die Bewertung ueberhaupt erst
+# auftaucht - ein normaler kleiner Sprung zur Eroeffnung ist kein "extrem hoch/tief".
+GAP_CHASE_MIN_GAP_PCT = _float("GAP_CHASE_MIN_GAP_PCT", 3.0)
+# Liegt Claudes Erwartungswert vor: "zu spaet", wenn der Gap bereits >= diesem Anteil
+# (0-1) der erwarteten Gesamtbewegung ausgemacht hat.
+GAP_CHASE_TOO_LATE_RATIO = _float("GAP_CHASE_TOO_LATE_RATIO", 0.8)
+# Ohne Erwartungswert (Claude liefert nicht immer eine Schaetzung): grobe Ersatzschwelle
+# in % - ab dieser Gap-Groesse allein gilt es als "zu spaet", unabhaengig vom Kontext.
+GAP_CHASE_TOO_LATE_ABS_PCT = _float("GAP_CHASE_TOO_LATE_ABS_PCT", 6.0)
+
 # Kelly-lite Positionsanteil (#5): aus der historischen Trefferquote + mittlerem Gewinn/
 # Verlust einen groben, ausdruecklich unverbindlichen Bankroll-Anteil (Half-Kelly,
 # gedeckelt) ableiten und im Alert anzeigen. Braucht ausgewertete Ergebnisse
@@ -195,6 +220,30 @@ ENABLE_HISTORICAL_HITRATE = _bool("ENABLE_HISTORICAL_HITRATE", True)
 # Vorgeschlagene Stop-Loss-/Take-Profit-Marken aus der heutigen Tagesspanne (#5) -
 # nur wirksam mit ENABLE_PRICE_TRACKING (braucht einen Live-Kurs).
 ENABLE_RISK_LEVELS = _bool("ENABLE_RISK_LEVELS", True)
+
+# --- Historische-Performance-Feedback (Ticker "lernt" aus eigenen vergangenen Alerts) ---
+# ENABLE_HISTORICAL_HITRATE (oben) zeigt die historische Pro-Ticker-Trefferquote nur an -
+# sie fliesst NICHT in die Alarm-Entscheidung ein, ein Ticker mit belegt schlechter Bilanz
+# wird also genauso behandelt wie einer mit durchweg guter. Dieses Gate schliesst die
+# Luecke: der staerkste handelbare Ticker eines Alerts wird anhand SEINER eigenen
+# historischen Trefferquote (aus den ausgewerteten alert_outcomes) im Ueberzeugungs-Score
+# hoch-/heruntergestuft - dieselbe Meldung wirkt also je nachdem, ob der Bot bei GENAU
+# diesem Ticker bisher meist richtig oder meist falsch lag. Braucht ENABLE_PRICE_TRACKING,
+# um ueberhaupt Daten zu haben (sonst keine Wirkung). Standardmaessig AUS wie alle
+# verhaltensaendernden Zustell-Gates.
+ENABLE_HISTORICAL_PERFORMANCE_GATE = _bool("ENABLE_HISTORICAL_PERFORMANCE_GATE", False)
+# Mindestanzahl ausgewerteter Alerts fuer GENAU diesen Ticker, bevor seine Trefferquote als
+# belastbar genug gilt, um den Score zu beeinflussen - verhindert, dass 1-2 Zufallstreffer/
+# -verluste den Score verzerren.
+HISTORICAL_PERFORMANCE_MIN_SAMPLES = _int("HISTORICAL_PERFORMANCE_MIN_SAMPLES", 5)
+# Maximaler Zu-/Abschlag (Punkte, 0-100) bei 100%/0% historischer Trefferquote; linear
+# skaliert um die 50%-Coinflip-Marke (50% Trefferquote wirkt neutral). 0 = kein Effekt.
+HISTORICAL_PERFORMANCE_WEIGHT = _int("HISTORICAL_PERFORMANCE_WEIGHT", 15)
+# Optionales hartes Gate: faellt die historische Trefferquote eines Tickers (bei
+# ausreichend Samples, siehe MIN_SAMPLES) unter diesen Wert (0-1), wird der Alert
+# unterdrueckt statt nur den Score zu senken - "bei diesem Ticker hat es bisher meistens
+# nicht gestimmt, hier aufhoeren". 0 = aus (nur der Score-Effekt oben wirkt).
+HISTORICAL_PERFORMANCE_SUPPRESS_BELOW = _float("HISTORICAL_PERFORMANCE_SUPPRESS_BELOW", 0.0)
 
 # Woechentlicher Performance-Digest per Telegram (#10): einmal pro Woche (am
 # WEEKLY_DIGEST_WEEKDAY, 0=Montag .. 6=Sonntag, ab WEEKLY_DIGEST_MIN_HOUR UTC) eine
@@ -259,6 +308,58 @@ TECHNICALS_CONVICTION_WEIGHT = _int("TECHNICALS_CONVICTION_WEIGHT", 10)
 # bars aendern sich innerhalb eines Tages kaum, das spart wiederholte Downloads.
 HISTORY_CACHE_TTL_SECONDS = _int("HISTORY_CACHE_TTL_SECONDS", 900)
 
+# --- Ensemble-Modell: klassische, von Claude UNABHAENGIGE Zweitmeinung ---
+# Ein Bag-of-Words-Naive-Bayes-Modell (siehe app/ensemble.py), das aus der EIGENEN
+# bisherigen Erfolgsbilanz (ausgewertete alert_outcomes) lernt, ob Meldungen mit
+# AEHNLICHEM Wortschatz frueher eher zu einem Treffer oder Fehlschlag gefuehrt haben,
+# und daraus je Alert eine geschaetzte Trefferwahrscheinlichkeit liefert - eine echte,
+# von Claude unabhaengige Zweitmeinung (kein zweiter Claude-Call, kein externes
+# ML-Framework). Braucht ENABLE_PRICE_TRACKING (sonst gibt es keine ausgewerteten
+# Ergebnisse zum Trainieren) und mindestens ENSEMBLE_MIN_TRAINING_SAMPLES ausgewertete
+# Alerts BEIDER Klassen (Treffer UND Fehlschlag) - vorher bleibt das Modell inaktiv
+# (kein Effekt, kein Fehler). Standardmaessig AUS wie alle verhaltensaendernden
+# Zustell-Gates.
+ENABLE_ENSEMBLE_MODEL = _bool("ENABLE_ENSEMBLE_MODEL", False)
+# Mindestanzahl ausgewerteter Alerts (insgesamt, beide Klassen), bevor das Modell als
+# belastbar genug gilt - verhindert, dass ein paar Zufallstreffer/-verluste ueber
+# Wortschatz-Zufaelle entscheiden.
+ENSEMBLE_MIN_TRAINING_SAMPLES = _int("ENSEMBLE_MIN_TRAINING_SAMPLES", 30)
+# Wie oft (Sekunden) das Modell hoechstens neu trainiert wird - Training ist billig
+# (reine Wortzaehlung), aber unnoetig bei jedem einzelnen Statement desselben Zyklus.
+ENSEMBLE_RETRAIN_SECONDS = _int("ENSEMBLE_RETRAIN_SECONDS", 900)
+# Optionales hartes Gate: liegt die vom Ensemble-Modell geschaetzte
+# Trefferwahrscheinlichkeit unter diesem Wert (0-1), wird der Alert unterdrueckt statt
+# nur den Score zu senken - "die eigene Wort-Statistik spricht klar dagegen". 0 = aus
+# (nur der Score-Effekt unten wirkt).
+ENSEMBLE_SUPPRESS_BELOW = _float("ENSEMBLE_SUPPRESS_BELOW", 0.0)
+# Maximaler Zu-/Abschlag (Punkte, 0-100) bei 100%/0% geschaetzter Trefferwahrschein-
+# lichkeit; linear skaliert um die 50%-Coinflip-Marke (50% wirkt neutral). 0 = kein
+# Effekt auf den Score (Modell wirkt dann nur ueber ENSEMBLE_SUPPRESS_BELOW).
+ENSEMBLE_CONVICTION_WEIGHT = _int("ENSEMBLE_CONVICTION_WEIGHT", 10)
+
+# --- VIX-Marktregime-Gate ---
+# Der VIX (CBOE Volatility Index) misst die implizite Volatilitaet des S&P 500 - ein
+# grober marktweiter "Angst-Indikator", unabhaengig vom einzelnen Katalysator. Ist er
+# sehr hoch (Panik-/Crash-Modus), bewegt sich oft der GESAMTE Markt chaotisch - ein
+# einzelnes direktionales Signal ("Aktie X geht hoch") ist dann unzuverlaessiger, weil
+# Korrelationen ueber Sektoren hinweg steigen und Kursbewegungen eher vom Gesamtmarkt als
+# vom konkreten Katalysator getrieben werden. Dieses Gate daempft/unterdrueckt Alerts bei
+# hohem VIX. Best-effort ueber Stooq (^vix, kostenlos, kein Key), wie das uebrige
+# Preis-Tracking - ist der Kursdienst nicht erreichbar, entfaellt das Gate still (kein
+# Effekt, kein Fehler). Standardmaessig AUS wie alle verhaltensaendernden Zustell-Gates.
+ENABLE_VIX_GATE = _bool("ENABLE_VIX_GATE", False)
+# Ab diesem VIX-Schlusskurs gilt der Markt als "hohe Angst" - historisch deuten Werte
+# > 30 auf ernsthaften Marktstress hin (grobe Faustregel, keine wissenschaftliche
+# Konstante). Ab hier greift der Ueberzeugungs-Score-Abschlag (VIX_CONVICTION_PENALTY).
+VIX_HIGH_THRESHOLD = _float("VIX_HIGH_THRESHOLD", 30.0)
+# Optionales hartes Gate: liegt der VIX >= diesem Wert, wird der Alert unterdrueckt statt
+# nur den Score zu senken - "der Gesamtmarkt ist gerade zu chaotisch fuer ein einzelnes
+# direktionales Signal". 0 = aus (nur der Score-Abschlag unten wirkt).
+VIX_SUPPRESS_ABOVE = _float("VIX_SUPPRESS_ABOVE", 0.0)
+# Punkte-Abschlag (0-100) auf den Ueberzeugungs-Score, wenn der VIX >= VIX_HIGH_THRESHOLD
+# liegt. 0 = kein Score-Effekt (Gate wirkt dann nur ueber VIX_SUPPRESS_ABOVE).
+VIX_CONVICTION_PENALTY = _int("VIX_CONVICTION_PENALTY", 10)
+
 # --- Paper-Trading (virtuelles Depot, KEIN echtes Geld / kein Broker) ---
 # Wenn aktiv: bei jedem tatsaechlich verschickten Alert wird fuer die handelbaren Ticker
 # eine VIRTUELLE Position eroeffnet (Einstiegskurs gemerkt), laufend zum aktuellen Kurs
@@ -282,6 +383,23 @@ PAPER_MIN_STAKE = _float("PAPER_MIN_STAKE", 10.0)
 # Telegram geschickt wird, solange Positionen offen sind. Eroeffnungen und (Stop/Ziel-)
 # Schliessungen werden IMMER sofort gemeldet, unabhaengig davon. 0 = bei jedem Zyklus.
 PAPER_STATUS_INTERVAL_MINUTES = _int("PAPER_STATUS_INTERVAL_MINUTES", 30)
+
+# --- Kapitalerhalt-Modus (dynamisches Paper-Sizing nach Verlustserie) ---
+# Nach mehreren aufeinanderfolgenden Verlust-Trades das Positions-Sizing automatisch
+# verkleinern (Risk-off), statt nach einer Pechstraehne unveraendert weiterzumachen -
+# senkt das Tempo, mit dem eine schlechte Serie das Depot weiter verkleinert, bis sich
+# die Bilanz wieder dreht. Rein sizing-seitig (siehe app/paper_trading.py:
+# position_fraction) - unterdrueckt keine Alerts und aendert nichts an Stop/Ziel.
+# Standardmaessig AN, da rein risikoREDUZIEREND (im Gegensatz zu den verhaltens-
+# aendernden Zustell-Gates oben, die standardmaessig AUS sind).
+PAPER_CAPITAL_PRESERVATION = _bool("PAPER_CAPITAL_PRESERVATION", True)
+# Ab so vielen geschlossenen Verlust-Trades IN FOLGE (vom juengsten rueckwaerts gezaehlt)
+# greift die Reduktion.
+PAPER_LOSS_STREAK_THRESHOLD = _int("PAPER_LOSS_STREAK_THRESHOLD", 3)
+# Faktor, mit dem der normale Positionsanteil bei aktiver Verlustserie multipliziert
+# wird (0.5 = Positionen halbiert). Muss in (0, 1] liegen, um tatsaechlich zu reduzieren.
+PAPER_LOSS_STREAK_SIZE_FACTOR = _float("PAPER_LOSS_STREAK_SIZE_FACTOR", 0.5)
+
 # Ab wie vielen gleichzeitig alarmwuerdigen Statements in EINEM Poll-Zyklus zu einer
 # gebuendelten Sammel-Nachricht gewechselt wird statt einer Einzelnachricht pro Statement
 # (verhindert eine Alert-Flut bei einem ploetzlichen Nachrichtenschub).
@@ -291,9 +409,14 @@ ALERT_DIGEST_THRESHOLD = _int("ALERT_DIGEST_THRESHOLD", 3)
 # erst, NACHDEM eine Klassifikation fertig ist - siehe orchestrator.py:
 # _classify_and_store). Bei Werten > 1 koennen zwei fast zeitgleiche Meldungen zum
 # selben Thema (z.B. von zwei verschiedenen Nachrichtenquellen) beide unabhaengig
-# als "neu" durchgehen und beide einen Alert ausloesen. Default bewusst auf 1
-# (seriell) gesetzt, um dieses Duplikat-Risiko auszuschliessen - auf Kosten von
-# etwas laengerer Verarbeitungszeit bei einem ploetzlichen Nachrichtenschub.
+# als "neu" durchgehen und beide einen Alert ausloesen. Code-Default bewusst auf 1
+# (seriell) gesetzt, um dieses Duplikat-Risiko fuer neue/lokale Setups komplett
+# auszuschliessen. Latenz-Hinweis: die serielle Klassifikation ist typischerweise
+# die dominante Zeitquelle eines Poll-Zyklus (mehrere Sekunden je Meldung) - im
+# GitHub-Actions-Workflow ist dieser Wert daher auf Nutzerwunsch auf 2 angehoben
+# (siehe monitor.yml), was die Klassifikations-Phase spuerbar verkuerzt und das
+# Duplikat-Risiko nur geringfuegig erhoeht (die Themen-Duplikaterkennung via
+# Claude-Kontext bleibt fuer alle NICHT gleichzeitig laufenden Meldungen wirksam).
 MAX_CONCURRENT_CLASSIFICATIONS = _int("MAX_CONCURRENT_CLASSIFICATIONS", 1)
 
 # Harter Kostendeckel: mehr als so viele Claude-Klassifikations-Calls finden an einem
@@ -336,7 +459,6 @@ TOPIC_CONTEXT_MAX_ITEMS = _int("TOPIC_CONTEXT_MAX_ITEMS", 20)
 
 ENABLE_NEWS = _bool("ENABLE_NEWS", True)
 ENABLE_TRUTH_SOCIAL = _bool("ENABLE_TRUTH_SOCIAL", True)
-ENABLE_LIVE_AUDIO = _bool("ENABLE_LIVE_AUDIO", False)
 
 # Welcher Truth-Social-Account beobachtet wird, falls ENABLE_TRUTH_SOCIAL aktiv ist -
 # frei konfigurierbar, nicht hart auf eine Person festgelegt. Diese Quelle ist eine von
@@ -358,20 +480,6 @@ TRUTH_SOCIAL_BROWSER_FALLBACK_MIN_INTERVAL = _int(
     "TRUTH_SOCIAL_BROWSER_FALLBACK_MIN_INTERVAL", 300
 )
 
-LIVE_AUDIO_STREAM_URLS = [
-    u.strip() for u in os.getenv("LIVE_AUDIO_STREAM_URLS", "").split(",") if u.strip()
-]
-WHISPER_MODEL_SIZE = os.getenv("WHISPER_MODEL_SIZE", "base")
-# Laenge der rollierenden Audio-Haeppchen in Sekunden, die ffmpeg kontinuierlich aus
-# dem Stream schneidet und die einzeln transkribiert werden. Kuerzer = niedrigere
-# Latenz, aber mehr Transkriptions-Overhead pro Sekunde Audio; laenger = effizienter,
-# aber Meldungen kommen entsprechend spaeter an.
-LIVE_AUDIO_CHUNK_SECONDS = _int("LIVE_AUDIO_CHUNK_SECONDS", 20)
-# Sprache fuer die Whisper-Transkription (ISO-639-1, z.B. "en", "de"). Leer =
-# automatische Spracherkennung pro Haeppchen (etwas langsamer, aber sinnvoll, wenn die
-# ueberwachten Streams nicht durchgehend in derselben Sprache sind).
-LIVE_AUDIO_LANGUAGE = _str("LIVE_AUDIO_LANGUAGE", "en")
-
 DASHBOARD_PORT = _int("DASHBOARD_PORT", 8000)
 # Falls gesetzt, verlangen alle /api/*-Endpunkte einen passenden "X-API-Key"-Header.
 # Ohne das waere z.B. /api/test (kostet einen echten Claude-Call + kann einen echten
@@ -379,16 +487,6 @@ DASHBOARD_PORT = _int("DASHBOARD_PORT", 8000)
 # relevant, weil die README-Anleitung fuer die Oracle-Cloud-Variante explizit dazu
 # anleitet, Port 8000 fuer 0.0.0.0/0 zu oeffnen.
 DASHBOARD_API_KEY = _str("DASHBOARD_API_KEY")
-
-# GitHub-Authentifizierung fuer repository_dispatch-Events (Speech-Detection Triggering).
-# Wenn gesetzt und ENABLE_LIVE_AUDIO aktiv: bei neu erkannten Reden wird automatisch
-# ein GitHub Actions Workflow via repository_dispatch ausgeloest. Der Token braucht
-# "repo" Scope. Leer/ungesetzt = keine automatischen Workflow-Triggers (Live-Audio
-# laeuft trotzdem, Statements landen aber nur in der DB/Telegram).
-GITHUB_TOKEN = _str("GITHUB_TOKEN")
-# GitHub-Repository im Format "owner/repo" (z.B. "CorentinWWW/Claudeprojekt1") -
-# fuer repository_dispatch-Targets. Wird nur benoetigt, falls GITHUB_TOKEN gesetzt ist.
-GITHUB_REPO = _str("GITHUB_REPO")
 
 DB_PATH = os.getenv("DB_PATH", "trump_monitor.db")
 
@@ -414,31 +512,14 @@ def validate() -> tuple[list[str], list[str]]:
             "Telegram-Alerts verschickt, Statements werden nur in der DB erfasst."
         )
 
-    if not ENABLE_NEWS and not ENABLE_TRUTH_SOCIAL and not ENABLE_LIVE_AUDIO:
-        errors.append("Alle Quellen sind deaktiviert (ENABLE_NEWS/TRUTH_SOCIAL/LIVE_AUDIO=false).")
-
-    if ENABLE_LIVE_AUDIO and not LIVE_AUDIO_STREAM_URLS:
-        warnings.append(
-            "ENABLE_LIVE_AUDIO=true aber LIVE_AUDIO_STREAM_URLS ist leer - "
-            "Live-Audio-Quelle liefert dadurch nie Ergebnisse."
-        )
+    if not ENABLE_NEWS and not ENABLE_TRUTH_SOCIAL:
+        errors.append("Alle Quellen sind deaktiviert (ENABLE_NEWS/TRUTH_SOCIAL=false).")
 
     if PAPER_TRADING and (not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID):
         warnings.append(
             "PAPER_TRADING=true aber Telegram ist nicht konfiguriert - die virtuellen "
             "Positionen werden zwar in der DB gefuehrt, aber es gibt keine Depot-/Trade-"
             "Meldungen (TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID setzen)."
-        )
-
-    if GITHUB_TOKEN and not GITHUB_REPO:
-        warnings.append(
-            "GITHUB_TOKEN ist gesetzt, aber GITHUB_REPO fehlt - "
-            "repository_dispatch-Triggers zum Starten von Workflows werden nicht funktionieren."
-        )
-    if GITHUB_REPO and not GITHUB_TOKEN:
-        warnings.append(
-            "GITHUB_REPO ist gesetzt, aber GITHUB_TOKEN fehlt - "
-            "repository_dispatch-Triggers zum Starten von Workflows werden nicht funktionieren."
         )
 
     if not DASHBOARD_API_KEY:
@@ -484,6 +565,25 @@ def validate() -> tuple[list[str], list[str]]:
             "Ein Zustell-Gate (MAX_ALERTS_PER_HOUR / MAX_NEWS_AGE_MINUTES / "
             "TICKER_ALERT_COOLDOWN_MINUTES) ist negativ - negativ wird wie 'aus' (0) "
             "behandelt."
+        )
+    if ENABLE_ENSEMBLE_MODEL and not ENABLE_PRICE_TRACKING:
+        warnings.append(
+            "ENABLE_ENSEMBLE_MODEL=true, aber ENABLE_PRICE_TRACKING=false - ohne "
+            "ausgewertete Ergebnisse gibt es keine Trainingsdaten, das Ensemble-Modell "
+            "bleibt dauerhaft inaktiv (kein Effekt)."
+        )
+    if VIX_SUPPRESS_ABOVE > 0 and VIX_SUPPRESS_ABOVE < VIX_HIGH_THRESHOLD:
+        warnings.append(
+            f"VIX_SUPPRESS_ABOVE={VIX_SUPPRESS_ABOVE} liegt UNTER VIX_HIGH_THRESHOLD="
+            f"{VIX_HIGH_THRESHOLD} - Alerts werden dann schon vor dem eigentlichen "
+            "'hohe Marktangst'-Stand hart unterdrueckt statt nur im Score abgewertet."
+        )
+    if not (0.0 < PAPER_LOSS_STREAK_SIZE_FACTOR <= 1.0):
+        warnings.append(
+            f"PAPER_LOSS_STREAK_SIZE_FACTOR={PAPER_LOSS_STREAK_SIZE_FACTOR} liegt "
+            "ausserhalb (0, 1] - der Kapitalerhalt-Modus wuerde die Positionsgroesse "
+            "damit nicht sinnvoll reduzieren (<=0 -> nie ein Trade, >1 -> vergroessern "
+            "statt verkleinern)."
         )
 
     return errors, warnings

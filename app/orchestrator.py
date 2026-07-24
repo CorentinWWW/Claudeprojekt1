@@ -3,6 +3,7 @@ import datetime
 import logging
 import re
 import time
+import uuid
 
 from anthropic import AuthenticationError, NotFoundError, PermissionDeniedError
 
@@ -15,13 +16,14 @@ from app.config import (
     ALERT_MIN_TICKER_CONFIDENCE,
     BLOCKLIST_TICKERS,
     CLAUDE_ESCALATION_MODEL,
+    CLAUDE_MODEL,
     DEDUP_SIMILARITY_THRESHOLD,
     DIVERGENCE_WARN_PCT,
     ENABLE_BORDERLINE_ESCALATION,
     ENABLE_CONVICTION_SCORE,
+    ENABLE_ENSEMBLE_MODEL,
     ENABLE_HISTORICAL_HITRATE,
     ENABLE_KELLY_SUGGESTION,
-    ENABLE_LIVE_AUDIO,
     ENABLE_NEWS,
     ENABLE_PREFILTER,
     ENABLE_PRICE_TRACKING,
@@ -29,20 +31,30 @@ from app.config import (
     ENABLE_TECHNICALS,
     ENABLE_TRUTH_SOCIAL,
     ENABLE_WEEKLY_DIGEST,
+    ENSEMBLE_CONVICTION_WEIGHT,
+    ENSEMBLE_MIN_TRAINING_SAMPLES,
+    ENSEMBLE_RETRAIN_SECONDS,
+    ENSEMBLE_SUPPRESS_BELOW,
     ESCALATION_BAND,
+    ENABLE_GAP_CHASE_EVALUATION,
     ENABLE_GAP_PREDICTION,
+    ENABLE_HISTORICAL_PERFORMANCE_GATE,
+    GAP_CHASE_MIN_GAP_PCT,
+    GAP_CHASE_TOO_LATE_ABS_PCT,
+    GAP_CHASE_TOO_LATE_RATIO,
+    GAP_CHASE_WINDOW_MINUTES,
     GAP_MIN_EXPECTED_MOVE_PCT,
     GAP_NEAR_CLOSE_MINUTES,
-    GITHUB_REPO,
-    GITHUB_TOKEN,
+    HISTORICAL_PERFORMANCE_MIN_SAMPLES,
+    HISTORICAL_PERFORMANCE_SUPPRESS_BELOW,
+    HISTORICAL_PERFORMANCE_WEIGHT,
     LATE_MOVE_WARN_PCT,
-    LIVE_AUDIO_CHUNK_SECONDS,
-    LIVE_AUDIO_LANGUAGE,
-    LIVE_AUDIO_STREAM_URLS,
     MAX_ALERTS_PER_HOUR,
     MAX_CLASSIFICATIONS_PER_DAY,
     MAX_CONCURRENT_CLASSIFICATIONS,
     MAX_NEWS_AGE_MINUTES,
+    PAPER_CAPITAL_PRESERVATION,
+    PAPER_STARTING_CAPITAL,
     PAPER_TRADING,
     POLL_INTERVAL_SECONDS,
     PRICE_OUTCOME_HORIZON_MINUTES,
@@ -59,11 +71,14 @@ from app.config import (
     TICKER_UNIVERSE,
     TOPIC_CONTEXT_MAX_ITEMS,
     TOPIC_CONTEXT_WINDOW_HOURS,
+    VIX_CONVICTION_PENALTY,
+    VIX_HIGH_THRESHOLD,
+    VIX_SUPPRESS_ABOVE,
+    ENABLE_VIX_GATE,
     WATCHLIST_SECTORS,
     WATCHLIST_TICKERS,
     WEEKLY_DIGEST_MIN_HOUR,
     WEEKLY_DIGEST_WEEKDAY,
-    WHISPER_MODEL_SIZE,
 )
 from app.db import (
     Classification,
@@ -75,6 +90,7 @@ from app.db import (
     get_known_source_ids,
     get_last_alert_direction,
     get_outcomes_awaiting_followup,
+    get_paper_closed_stats,
     get_pending_alerts,
     get_performance_stats,
     get_recent_alerted,
@@ -83,6 +99,8 @@ from app.db import (
     get_topic_thread,
     init_db,
     insert_statement,
+    log_gate_evaluation,
+    log_pipeline_timing,
     mark_alert_sent,
     record_alert_baseline,
     record_ticker_alert,
@@ -90,20 +108,26 @@ from app.db import (
     ticker_in_cooldown,
     try_claim_meta_key,
 )
-from app import indicators, paper_trading, prices
-from app.market_hours import minutes_until_close, us_market_session
+from app import ensemble, indicators, paper_trading, prices
+from app.market_hours import (
+    current_market_date,
+    minutes_since_open,
+    minutes_until_close,
+    us_market_session,
+)
 from app.prefilter import looks_market_relevant
 from app.scoring import (
     conviction_score,
+    evaluate_gap_chase,
     has_hedge_language,
     high_volatility_text,
+    historical_performance_adjust,
     hour_in_window,
     kelly_fraction,
     parse_hour_window,
     position_tier,
     predict_gap,
 )
-from app.sources.live_audio import LiveAudioSource
 from app.sources.news_gdelt import GdeltNewsSource
 from app.sources.news_rss import RssNewsSource
 from app.sources.truth_social import TruthSocialSource
@@ -164,10 +188,26 @@ def active_gates() -> dict:
         "paper_trading": PAPER_TRADING,
         "technicals": ENABLE_TECHNICALS,
         "technicals_require_agreement": TECHNICALS_REQUIRE_AGREEMENT if ENABLE_TECHNICALS else None,
+        "historical_performance_gate": ENABLE_HISTORICAL_PERFORMANCE_GATE,
+        "historical_performance_suppress_below": (
+            HISTORICAL_PERFORMANCE_SUPPRESS_BELOW
+            if ENABLE_HISTORICAL_PERFORMANCE_GATE and HISTORICAL_PERFORMANCE_SUPPRESS_BELOW > 0
+            else None
+        ),
         "late_move_warn_pct": LATE_MOVE_WARN_PCT or None,
         "gap_prediction": ENABLE_GAP_PREDICTION,
+        "gap_chase_evaluation": ENABLE_GAP_CHASE_EVALUATION and ENABLE_PRICE_TRACKING,
         "borderline_escalation": ENABLE_BORDERLINE_ESCALATION,
         "weekly_digest": ENABLE_WEEKLY_DIGEST,
+        "ensemble_model": ENABLE_ENSEMBLE_MODEL,
+        "ensemble_suppress_below": (
+            ENSEMBLE_SUPPRESS_BELOW if ENABLE_ENSEMBLE_MODEL and ENSEMBLE_SUPPRESS_BELOW > 0 else None
+        ),
+        "vix_gate": ENABLE_VIX_GATE,
+        "vix_suppress_above": (
+            VIX_SUPPRESS_ABOVE if ENABLE_VIX_GATE and VIX_SUPPRESS_ABOVE > 0 else None
+        ),
+        "paper_capital_preservation": PAPER_CAPITAL_PRESERVATION if PAPER_TRADING else None,
     }
 
 
@@ -308,17 +348,6 @@ def build_sources():
         sources.append(RssNewsSource())
     if ENABLE_TRUTH_SOCIAL:
         sources.append(TruthSocialSource())
-    if ENABLE_LIVE_AUDIO:
-        sources.append(
-            LiveAudioSource(
-                LIVE_AUDIO_STREAM_URLS,
-                chunk_seconds=LIVE_AUDIO_CHUNK_SECONDS,
-                model_size=WHISPER_MODEL_SIZE,
-                language=LIVE_AUDIO_LANGUAGE,
-                github_token=GITHUB_TOKEN,
-                github_repo=GITHUB_REPO,
-            )
-        )
     for s in sources:
         source_health.setdefault(
             s.name,
@@ -495,14 +524,24 @@ async def _maybe_escalate(text, recent_context, priority, classification):
 
 async def _classify_and_store(raw, semaphore: asyncio.Semaphore, recent_context: list[dict]):
     priority = is_high_priority(raw)
+    # Datensammlung (#Claude-Model-Tracking): welches Modell die ENDGUELTIGE
+    # Klassifikation geliefert hat. _maybe_escalate() gibt bei erfolgreicher
+    # Eskalation ein NEUES Classification-Objekt zurueck, bei Ausbleiben/Fehlschlag
+    # dasselbe wie eingegeben - die Identitaetspruefung unten erkennt das zuverlaessig,
+    # ohne classify()/_maybe_escalate() selbst um einen Rueckgabewert erweitern zu
+    # muessen.
+    model_used = CLAUDE_MODEL
     async with semaphore:
         try:
             classification = await classify(
                 raw.text, recent_context=recent_context, priority=priority
             )
-            classification = await _maybe_escalate(
+            escalated = await _maybe_escalate(
                 raw.text, recent_context, priority, classification
             )
+            if escalated is not classification:
+                model_used = CLAUDE_ESCALATION_MODEL
+            classification = escalated
         except DailyCapExceeded as exc:
             # Kein logger.exception() (kein Traceback-Spam): sobald das Tages-Limit
             # erreicht ist, trifft das jedes weitere Statement in diesem und allen
@@ -557,7 +596,7 @@ async def _classify_and_store(raw, semaphore: asyncio.Semaphore, recent_context:
         # classification=None hier korrekt als "nicht alarmwuerdig" behandelt.
         return (raw, None, dup_id)
 
-    statement_id = insert_statement(raw, classification)
+    statement_id = insert_statement(raw, classification, claude_model=model_used)
     if statement_id is None:
         logger.warning(
             "[%s] Statement konnte nicht gespeichert werden (source_id-Konflikt "
@@ -601,6 +640,22 @@ async def _classify_and_store(raw, semaphore: asyncio.Semaphore, recent_context:
     return (raw, classification, statement_id)
 
 
+async def _overnight_gap_pct(ticker: str, quote: dict) -> float | None:
+    """Datensammlung (#Gap-Tracking): Uebernacht-/Vorboersen-Gap in % (heutiger
+    Eroeffnungskurs vs. gestriger Schluss) zum Alarm-Zeitpunkt, falls ermittelbar -
+    dieselbe Formel wie _evaluate_gap_chase, hier aber fuer JEDEN Alert mit
+    Preis-Tracking erfasst (nicht nur im kurzen Fenster nach Boersenoeffnung). None bei
+    fehlender Historie/Eroeffnungskurs (nie ein Fehler, best-effort)."""
+    if not quote.get("open"):
+        return None
+    hist = await prices.get_history(ticker)
+    today = current_market_date()
+    prev_close = prices.previous_close(hist, today) if hist and today else None
+    if not prev_close or prev_close <= 0:
+        return None
+    return (quote["open"] - prev_close) / prev_close * 100.0
+
+
 async def _fetch_ticker_context(classification, statement_id) -> dict:
     """Best-effort (#2/#5/#8): fuer die handelbaren Ticker den aktuellen Kurs holen, ihn
     als Ausgangspunkt fuers Backtesting speichern und {'change': {...}, 'risk': {...}}
@@ -618,9 +673,10 @@ async def _fetch_ticker_context(classification, statement_id) -> dict:
         quote = await prices.get_quote(ticker)
         if not quote or quote.get("price") is None:
             continue
+        gap_pct = await _overnight_gap_pct(ticker, quote)
         record_alert_baseline(
             statement_id, ticker, tc.get("direction"), tc.get("confidence"),
-            now, quote.get("price"),
+            now, quote.get("price"), gap_pct,
         )
         if quote.get("change_pct") is not None:
             result["change"][ticker] = quote["change_pct"]
@@ -666,6 +722,59 @@ async def _fetch_technicals(classification) -> dict:
     return {t: r for t, r in zip(tickers, results) if r is not None}
 
 
+async def _evaluate_gap_chase(ticker: str, direction: str | None, expected_move_pct) -> dict | None:
+    """Best-effort Gegenstueck zur Uebernacht-Gap-Antizipation: prueft kurz NACH
+    Boersenoeffnung (siehe GAP_CHASE_WINDOW_MINUTES), ob dieser Ticker bereits ueber
+    Nacht/vorboerslich stark in Signalrichtung gegappt ist (heutiger Eroeffnungskurs vs.
+    gestriger Schluss, aus der Kurshistorie), und falls ja, ob sich ein Einstieg jetzt
+    noch lohnt (siehe scoring.evaluate_gap_chase). None ausserhalb des Zeitfensters, bei
+    zu kleinem Gap, oder wenn Kursdaten fehlen (nie ein Fehler)."""
+    minutes_open = minutes_since_open()
+    if minutes_open is None or minutes_open > GAP_CHASE_WINDOW_MINUTES:
+        return None
+    quote = await prices.get_quote(ticker)
+    if not quote or not quote.get("open") or not quote.get("price"):
+        return None
+    hist = await prices.get_history(ticker)
+    today = current_market_date()
+    prev_close = prices.previous_close(hist, today) if hist and today else None
+    if not prev_close or prev_close <= 0:
+        return None
+
+    gap_pct = (quote["open"] - prev_close) / prev_close * 100.0
+    verdict = evaluate_gap_chase(
+        direction, gap_pct, expected_move_pct=expected_move_pct,
+        too_late_ratio=GAP_CHASE_TOO_LATE_RATIO, too_late_abs_pct=GAP_CHASE_TOO_LATE_ABS_PCT,
+    )
+    if verdict is None or abs(verdict["gap_pct"]) < GAP_CHASE_MIN_GAP_PCT:
+        return None
+
+    if not verdict["too_late"]:
+        # Nur fuer den "lohnt sich noch"-Fall ein Ausstiegs-Kursziel angeben - fuer
+        # "zu spaet" wird ja gerade vom (Nach-)Kauf abgeraten. Mit Erwartungswert: aus der
+        # verbleibenden geschaetzten Bewegung; sonst dieselbe Tagesspannen-Logik wie die
+        # normalen Stop-/Ziel-Vorschlaege (#5).
+        price = quote["price"]
+        remaining = verdict.get("remaining_pct")
+        if isinstance(remaining, (int, float)) and remaining > 0:
+            # WICHTIG: expected_move_pct ist (wie gap_pct/remaining_pct) relativ zu
+            # prev_close definiert, nicht relativ zum aktuellen (bereits gegappten)
+            # Kurs - deshalb hier auf prev_close aufsetzen statt auf price, sonst
+            # wuerden sich Gap- und Rest-Bewegung fehlerhaft multiplikativ statt
+            # additiv aufaddieren (Ziel systematisch verzerrt, staerker je groesser
+            # der Gap).
+            target = (
+                prev_close * (1 + expected_move_pct / 100.0) if direction == "long"
+                else prev_close * (1 - expected_move_pct / 100.0)
+            )
+            verdict["target_price"] = round(target, 2)
+        else:
+            levels = prices.suggest_risk_levels(price, direction, quote.get("high"), quote.get("low"))
+            if levels:
+                verdict["target_price"] = levels.get("target")
+    return verdict
+
+
 def _apply_technical_conviction(score: int, summary: dict | None) -> int:
     """Hebt/senkt den Ueberzeugungs-Score, je nachdem ob die Technik das Signal
     bestaetigt (agrees True) oder ihm widerspricht (agrees False). Gewicht ueber
@@ -678,6 +787,24 @@ def _apply_technical_conviction(score: int, summary: dict | None) -> int:
     if agrees is False:
         return max(0, score - TECHNICALS_CONVICTION_WEIGHT)
     return score
+
+
+def _apply_historical_performance(score: int, hitrate: dict | None) -> int:
+    """Hebt/senkt den Ueberzeugungs-Score anhand der HISTORISCHEN Trefferquote des
+    staerksten handelbaren Tickers (siehe scoring.historical_performance_adjust) - macht
+    die eigene bisherige Erfolgsbilanz fuer diesen Ticker zu einem Signal fuer NEUE
+    Alerts, statt sie nur informativ anzuzeigen (das leistet bereits
+    ENABLE_HISTORICAL_HITRATE im Alert-Text, ohne Rueckwirkung auf die Entscheidung).
+    Gewicht ueber HISTORICAL_PERFORMANCE_WEIGHT; Ergebnis bleibt in [0,100]."""
+    if not hitrate:
+        return score
+    adjust = historical_performance_adjust(
+        hitrate.get("hit_rate"), hitrate.get("n") or 0,
+        HISTORICAL_PERFORMANCE_MIN_SAMPLES, HISTORICAL_PERFORMANCE_WEIGHT,
+    )
+    if not adjust:
+        return score
+    return max(0, min(100, round(score + adjust)))
 
 
 def _freshness_minutes(published_at) -> float | None:
@@ -707,12 +834,14 @@ def _compute_conviction(raw, classification, statement_id) -> tuple[int, int, bo
     return score, corroboration, hedged
 
 
-async def _build_alert_extras(raw, classification, statement_id, score, corroboration, hedged) -> dict:
+async def _build_alert_extras(
+    raw, classification, statement_id, score, corroboration, hedged, vix_price: float | None = None
+) -> dict:
     """Sammelt die Zusatzinfos fuer einen Einzel-Alert: Ueberzeugungs-Score + Positions-
     einordnung (#1/#4), Korroboration (#15), Hedge-Hinweis (#2), heutige Bewegung +
     Stop/Ziel je Ticker (#8/#5, inkl. Baseline-Erfassung fuers Backtesting #2),
-    historische Trefferquote je Ticker (#9) und - bei einer Eskalation - die Themen-
-    Zeitleiste (#5)."""
+    historische Trefferquote je Ticker (#9), VIX-Marktregime (falls ENABLE_VIX_GATE) und
+    - bei einer Eskalation - die Themen-Zeitleiste (#5)."""
     extras: dict = {}
     if ENABLE_CONVICTION_SCORE:
         extras["conviction"] = score
@@ -721,6 +850,8 @@ async def _build_alert_extras(raw, classification, statement_id, score, corrobor
         extras["corroboration"] = corroboration
     if hedged:
         extras["hedged"] = True
+    if vix_price is not None:
+        extras["vix"] = {"level": vix_price, "high_fear": vix_price >= VIX_HIGH_THRESHOLD}
 
     price_ctx = await _fetch_ticker_context(classification, statement_id)
     if price_ctx.get("change"):
@@ -810,6 +941,19 @@ async def _build_alert_extras(raw, classification, statement_id, score, corrobor
             gap = {**gap, "ticker": (top.get("ticker") or "").upper()}
             extras["overnight_gap"] = gap
 
+    # Gap-Chase-Bewertung: Gegenstueck zur obigen Antizipation - der Gap ist bereits
+    # passiert (Markt war zu, jetzt zur Boersenoeffnung extrem hoch/niedrig). Lohnt sich
+    # ein Einstieg noch, und falls ja, wann verkaufen? Nur kurz nach der Eroeffnung
+    # relevant (siehe _evaluate_gap_chase), braucht ENABLE_PRICE_TRACKING fuer Kurs+Historie.
+    if ENABLE_GAP_CHASE_EVALUATION and ENABLE_PRICE_TRACKING and actionable:
+        top = max(actionable, key=lambda tc: tc.get("confidence") or 0.0)
+        chase = await _evaluate_gap_chase(
+            (top.get("ticker") or "").upper(), top.get("direction"),
+            classification.expected_move_pct if classification else None,
+        )
+        if chase:
+            extras["gap_chase"] = {**chase, "ticker": (top.get("ticker") or "").upper()}
+
     # Kelly-lite Positionsanteil (#5): global aus der bisherigen Trefferquote/Gewinn/
     # Verlust. Erst ab genuegend ausgewerteten Ergebnissen, damit die Zahl nicht auf
     # zwei Zufallstreffern beruht.
@@ -895,6 +1039,15 @@ async def _send_alerts(alert_worthy: list[tuple]):
     if not alert_worthy:
         return
 
+    # VIX-Marktregime (einmal je Zyklus statt je Meldung geholt - der VIX aendert sich
+    # nicht innerhalb weniger Sekunden und gilt gleichermassen fuer alle Meldungen dieses
+    # Batches). Best-effort: ohne erreichbaren Kursdienst bleibt vix_price None und das
+    # Gate greift fuer diesen Zyklus einfach nicht (kein Fehler).
+    vix_price: float | None = None
+    if ENABLE_VIX_GATE:
+        vix_quote = await prices.get_index_quote("^vix")
+        vix_price = vix_quote.get("price") if vix_quote else None
+
     # Ueberzeugung + Gate-Pruefung (alles billig, ohne Kurs-/Claude-Call), damit die
     # teuren Kursabfragen nur fuer tatsaechlich zuzustellende Alerts anfallen.
     gated: list[tuple] = []
@@ -914,7 +1067,19 @@ async def _send_alerts(alert_worthy: list[tuple]):
                     (top.get("ticker") or "").upper(), top.get("direction")
                 )
                 if summary is not None:
-                    if TECHNICALS_REQUIRE_AGREEMENT and summary.get("contradicts_strongly"):
+                    blocked = TECHNICALS_REQUIRE_AGREEMENT and summary.get("contradicts_strongly")
+                    # Datensammlung (#Gate-Evaluation): nur bei aktivem
+                    # TECHNICALS_REQUIRE_AGREEMENT kann dieses Gate ueberhaupt blockieren -
+                    # sonst wuerde "passed=True" faelschlich suggerieren, das Gate haette
+                    # etwas geprueft, obwohl es wirkungslos ist.
+                    if TECHNICALS_REQUIRE_AGREEMENT:
+                        log_gate_evaluation(
+                            statement_id, "technical_agreement",
+                            threshold=None, actual_value=None, passed=not blocked,
+                            reasoning=f"label={summary.get('label')} direction={top.get('direction')} "
+                                      f"agrees={summary.get('agrees')}",
+                        )
+                    if blocked:
                         logger.info(
                             "[%s] Alert unterdrueckt (Technik widerspricht klar: %s vs %s): %s",
                             raw.source, summary.get("label"), top.get("direction"),
@@ -923,20 +1088,138 @@ async def _send_alerts(alert_worthy: list[tuple]):
                         continue
                     score = _apply_technical_conviction(score, summary)
 
-        if ALERT_MIN_CONVICTION > 0 and score < ALERT_MIN_CONVICTION:
-            logger.info(
-                "[%s] Alert unter globaler Ueberzeugungs-Schwelle (%d < %d) - "
-                "zurueckgestellt: %s",
-                raw.source, score, ALERT_MIN_CONVICTION, raw.text[:80],
+        # Historische-Performance-Feedback: der staerkste handelbare Ticker "lernt" aus
+        # seiner EIGENEN bisherigen Erfolgsbilanz (siehe scoring.historical_performance_adjust)
+        # - hebt/senkt den Ueberzeugungs-Score und kann - falls
+        # HISTORICAL_PERFORMANCE_SUPPRESS_BELOW gesetzt - einen Alert fuer einen Ticker mit
+        # belegt schlechter historischer Trefferquote unterdruecken. Braucht
+        # ENABLE_PRICE_TRACKING, um ueberhaupt Daten zu haben; ohne welche liefert
+        # get_ticker_hitrate None und es passiert nichts.
+        if ENABLE_HISTORICAL_PERFORMANCE_GATE:
+            actionable = actionable_tickers(classification)
+            if actionable:
+                top = max(actionable, key=lambda tc: tc.get("confidence") or 0.0)
+                hr = get_ticker_hitrate((top.get("ticker") or "").upper())
+                if hr and (hr.get("n") or 0) >= HISTORICAL_PERFORMANCE_MIN_SAMPLES:
+                    hit_rate = hr.get("hit_rate")
+                    suppress = (
+                        HISTORICAL_PERFORMANCE_SUPPRESS_BELOW > 0
+                        and isinstance(hit_rate, (int, float))
+                        and hit_rate < HISTORICAL_PERFORMANCE_SUPPRESS_BELOW
+                    )
+                    if HISTORICAL_PERFORMANCE_SUPPRESS_BELOW > 0:
+                        log_gate_evaluation(
+                            statement_id, "historical_performance",
+                            threshold=HISTORICAL_PERFORMANCE_SUPPRESS_BELOW, actual_value=hit_rate,
+                            passed=not suppress,
+                            reasoning=f"{top.get('ticker')}: hit_rate={hit_rate} n={hr['n']}",
+                        )
+                    if suppress:
+                        logger.info(
+                            "[%s] Alert unterdrueckt (historische Trefferquote fuer %s: "
+                            "%.0f%% < %.0f%%, n=%d): %s",
+                            raw.source, top.get("ticker"), hit_rate * 100,
+                            HISTORICAL_PERFORMANCE_SUPPRESS_BELOW * 100, hr["n"],
+                            raw.text[:80],
+                        )
+                        continue
+                    score = _apply_historical_performance(score, hr)
+
+        # Ensemble-Modell (#Ensemble-Model): eine von Claude UNABHAENGIGE, klassische
+        # Zweitmeinung (Bag-of-Words-Naive-Bayes, siehe app/ensemble.py), die aus der
+        # EIGENEN bisherigen Erfolgsbilanz lernt, ob Meldungen mit AEHNLICHEM Wortschatz
+        # frueher eher zu einem Treffer oder Fehlschlag gefuehrt haben. Hebt/senkt den
+        # Ueberzeugungs-Score und kann - falls ENSEMBLE_SUPPRESS_BELOW gesetzt - einen
+        # Alert unterdruecken, dem die eigene Wort-Statistik klar widerspricht. Bleibt
+        # wirkungslos, solange das Modell noch nicht genug Trainingsdaten hat (get_model
+        # liefert dann None).
+        if ENABLE_ENSEMBLE_MODEL:
+            model = ensemble.get_model(ENSEMBLE_MIN_TRAINING_SAMPLES, ENSEMBLE_RETRAIN_SECONDS)
+            if model is not None:
+                p_hit = ensemble.predict_hit_probability(model, raw.text)
+                if p_hit is not None:
+                    suppress = ENSEMBLE_SUPPRESS_BELOW > 0 and p_hit < ENSEMBLE_SUPPRESS_BELOW
+                    if ENSEMBLE_SUPPRESS_BELOW > 0:
+                        log_gate_evaluation(
+                            statement_id, "ensemble_model",
+                            threshold=ENSEMBLE_SUPPRESS_BELOW, actual_value=p_hit, passed=not suppress,
+                            reasoning=f"Bag-of-Words-NB: p_hit={p_hit:.2f} (n={model['n']})",
+                        )
+                    if suppress:
+                        logger.info(
+                            "[%s] Alert unterdrueckt (Ensemble-Modell: geschaetzte "
+                            "Trefferwahrscheinlichkeit %.0f%% < %.0f%%): %s",
+                            raw.source, p_hit * 100, ENSEMBLE_SUPPRESS_BELOW * 100, raw.text[:80],
+                        )
+                        continue
+                    adjust = historical_performance_adjust(
+                        p_hit, model["n"], ENSEMBLE_MIN_TRAINING_SAMPLES, ENSEMBLE_CONVICTION_WEIGHT
+                    )
+                    score = max(0, min(100, round(score + adjust)))
+
+        # VIX-Marktregime-Gate: bei hoher marktweiter Angst (VIX >= VIX_HIGH_THRESHOLD)
+        # ist ein einzelnes direktionales Signal unzuverlaessiger (der Gesamtmarkt bewegt
+        # sich chaotisch, unabhaengig vom konkreten Katalysator) - der Score wird dann
+        # abgewertet, optional (VIX_SUPPRESS_ABOVE) wird der Alert ganz unterdrueckt.
+        if ENABLE_VIX_GATE and vix_price is not None:
+            high_fear = vix_price >= VIX_HIGH_THRESHOLD
+            suppress = VIX_SUPPRESS_ABOVE > 0 and vix_price >= VIX_SUPPRESS_ABOVE
+            if VIX_SUPPRESS_ABOVE > 0:
+                log_gate_evaluation(
+                    statement_id, "vix_regime",
+                    threshold=VIX_SUPPRESS_ABOVE, actual_value=vix_price, passed=not suppress,
+                    reasoning=f"VIX={vix_price:.1f} (High-Fear-Schwelle={VIX_HIGH_THRESHOLD:.1f})",
+                )
+            if suppress:
+                logger.info(
+                    "[%s] Alert unterdrueckt (VIX-Marktregime: %.1f >= %.1f): %s",
+                    raw.source, vix_price, VIX_SUPPRESS_ABOVE, raw.text[:80],
+                )
+                continue
+            if high_fear and VIX_CONVICTION_PENALTY > 0:
+                score = max(0, min(100, score - VIX_CONVICTION_PENALTY))
+
+        if ALERT_MIN_CONVICTION > 0:
+            conviction_passed = score >= ALERT_MIN_CONVICTION
+            log_gate_evaluation(
+                statement_id, "conviction_score",
+                threshold=ALERT_MIN_CONVICTION, actual_value=score, passed=conviction_passed,
+                reasoning=f"score={score} vs min={ALERT_MIN_CONVICTION}",
             )
-            continue
-        if not _passes_cooldown(classification):
+            if not conviction_passed:
+                logger.info(
+                    "[%s] Alert unter globaler Ueberzeugungs-Schwelle (%d < %d) - "
+                    "zurueckgestellt: %s",
+                    raw.source, score, ALERT_MIN_CONVICTION, raw.text[:80],
+                )
+                continue
+        cooldown_ok = _passes_cooldown(classification)
+        if TICKER_ALERT_COOLDOWN_MINUTES > 0:
+            log_gate_evaluation(
+                statement_id, "ticker_cooldown",
+                threshold=TICKER_ALERT_COOLDOWN_MINUTES, actual_value=None, passed=cooldown_ok,
+                reasoning=(
+                    "mind. ein handelbarer Ticker ausserhalb Cooldown" if cooldown_ok
+                    else "alle handelbaren Ticker im Cooldown-Fenster"
+                ),
+            )
+        if not cooldown_ok:
             logger.info(
                 "[%s] Alert unterdrueckt (Ticker-Cooldown aktiv): %s",
                 raw.source, raw.text[:80],
             )
             continue
-        if not _passes_quiet_hours(score):
+        quiet_ok = _passes_quiet_hours(score)
+        if QUIET_HOURS:
+            log_gate_evaluation(
+                statement_id, "quiet_hours",
+                threshold=QUIET_HOURS_MIN_CONVICTION, actual_value=score, passed=quiet_ok,
+                reasoning=(
+                    "ausserhalb Ruhezeit" if not _in_quiet_hours_now()
+                    else f"score={score} vs min={QUIET_HOURS_MIN_CONVICTION}"
+                ),
+            )
+        if not quiet_ok:
             logger.info(
                 "[%s] Alert waehrend Ruhezeit zurueckgestellt (Ueberzeugung %d < %d): %s",
                 raw.source, score, QUIET_HOURS_MIN_CONVICTION, raw.text[:80],
@@ -954,6 +1237,12 @@ async def _send_alerts(alert_worthy: list[tuple]):
         already = count_alerted_statements_since(time.time() - 3600)
         allowance = MAX_ALERTS_PER_HOUR - already
         if allowance <= 0:
+            for _, _, sid, *_ in gated:
+                log_gate_evaluation(
+                    sid, "max_alerts_per_hour",
+                    threshold=MAX_ALERTS_PER_HOUR, actual_value=already, passed=False,
+                    reasoning=f"Ratelimit erreicht ({already}/{MAX_ALERTS_PER_HOUR} pro Stunde)",
+                )
             logger.info(
                 "Alert-Ratelimit erreicht (%d/Std bereits verschickt) - %d Meldung(en) "
                 "zurueckgestellt, werden spaeter erneut versucht.",
@@ -962,18 +1251,24 @@ async def _send_alerts(alert_worthy: list[tuple]):
             return
         if len(gated) > allowance:
             gated.sort(key=lambda t: t[3], reverse=True)  # staerkste Ueberzeugung zuerst
-            deferred = len(gated) - allowance
+            deferred_items = gated[allowance:]
             gated = gated[:allowance]
+            for _, _, sid, *_ in deferred_items:
+                log_gate_evaluation(
+                    sid, "max_alerts_per_hour",
+                    threshold=MAX_ALERTS_PER_HOUR, actual_value=already, passed=False,
+                    reasoning=f"Ratelimit: nur die {allowance} ueberzeugendsten Meldung(en) jetzt",
+                )
             logger.info(
                 "Alert-Ratelimit: nur die %d ueberzeugendsten Meldung(en) jetzt, "
                 "%d zurueckgestellt (Resend spaeter).",
-                allowance, deferred,
+                allowance, len(deferred_items),
             )
 
     if len(gated) <= ALERT_DIGEST_THRESHOLD:
         for raw, classification, statement_id, score, corroboration, hedged in gated:
             extras = await _build_alert_extras(
-                raw, classification, statement_id, score, corroboration, hedged
+                raw, classification, statement_id, score, corroboration, hedged, vix_price
             )
             sent = await send_alert(raw, classification, extras=extras)
             if sent:
@@ -1131,11 +1426,55 @@ async def _maybe_send_weekly_digest():
     await send_weekly_digest(stats)
 
 
+async def _maybe_send_daily_depot_update():
+    """Taegliches Depot-Update (morgens 08:00 UTC + abends 20:00 UTC), nur wenn
+    PAPER_TRADING aktiv ist. Zeigt Wert, P&L, offene/geschlossene Positionen, Win-Rate."""
+    if not PAPER_TRADING:
+        return
+    now = datetime.datetime.now(datetime.timezone.utc)
+    # Morgens 08 UTC oder abends 20 UTC, aber nur einmal pro 6-Stunden-Fenster
+    if now.hour not in (8, 20):
+        return
+    day_hour = f"{now.year}-{now.month:02d}-{now.day:02d}_{now.hour:02d}h"
+    if not try_claim_meta_key(f"depot_update_{day_hour}"):
+        return
+
+    snap = paper_trading.account_snapshot()
+    closed = get_paper_closed_stats()
+    start_capital = PAPER_STARTING_CAPITAL
+    pnl = snap["realized_pnl"]
+    total_return_pct = (snap["account_value"] - start_capital) / start_capital * 100.0 if start_capital else 0.0
+
+    from app.telegram_alert import send_text
+    time_label = "☀️ Morgen" if now.hour == 8 else "🌙 Abend"
+    lines = [
+        f"{time_label} <b>Paper-Depot Update</b>",
+        f"💼 Wert {snap['account_value']:.2f}€ (Start {start_capital:.0f}€)",
+        f"📈 Gewinn/Verlust {pnl:+.2f}€ ({total_return_pct:+.1f}%)",
+        f"💰 Frei {snap['free_cash']:.2f}€ · gebunden {snap['open_stake']:.2f}€",
+    ]
+    if closed["closed"] > 0:
+        lines.append(f"✅ {closed['wins']}/{closed['closed']} geschlossene Trades ({closed['wins']/closed['closed']*100:.0f}%)")
+    else:
+        lines.append("📭 Keine geschlossenen Trades")
+
+    await send_text("\n".join(lines))
+
+
 async def poll_once(sources, semaphore: asyncio.Semaphore):
+    # Datensammlung (#Pipeline-Timing): eine ID pro Poll-Zyklus, unter der alle
+    # Phasen-Dauern dieses Zyklus in pipeline_timings landen (siehe
+    # get_pipeline_statistics()) - macht Bottlenecks (z.B. eine langsame Quelle oder
+    # viele gleichzeitige Claude-Calls) sichtbar, ohne dass man sich durch Logs graben muss.
+    cycle_id = uuid.uuid4().hex
+
+    t_housekeeping = time.time()
     await _resend_pending_alerts()
     await _evaluate_alert_outcomes()
     await _manage_paper_positions()
+    await _maybe_send_daily_depot_update()
     await _maybe_send_weekly_digest()
+    log_pipeline_timing(cycle_id, "housekeeping", t_housekeeping, (time.time() - t_housekeeping) * 1000)
 
     # Wird gesetzt, sobald ein permanenter Claude-Konfigurationsfehler (kaputter Key,
     # geloeschtes Modell) auftaucht - erst NACH Abschluss der kompletten Buchhaltung
@@ -1146,6 +1485,7 @@ async def poll_once(sources, semaphore: asyncio.Semaphore):
     for source in sources:
         health = source_health[source.name]
         health["last_poll_at"] = time.time()
+        t_fetch = time.time()
         try:
             raw_statements = await source.poll()
         except Exception as exc:
@@ -1153,6 +1493,10 @@ async def poll_once(sources, semaphore: asyncio.Semaphore):
             health["last_error"] = str(exc)
             health["last_error_at"] = time.time()
             continue
+        finally:
+            log_pipeline_timing(
+                cycle_id, f"poll_source:{source.name}", t_fetch, (time.time() - t_fetch) * 1000
+            )
 
         health["last_success_at"] = time.time()
         health["total_fetched"] += len(raw_statements)
@@ -1206,6 +1550,7 @@ async def poll_once(sources, semaphore: asyncio.Semaphore):
             if not raw_statements:
                 continue
 
+        t_classify = time.time()
         to_classify, duplicate_pairs = _partition_duplicates(raw_statements)
 
         # Wichtige Meldungen zuerst klassifizieren: an einem Tag mit ausgeschoepftem
@@ -1238,7 +1583,11 @@ async def poll_once(sources, semaphore: asyncio.Semaphore):
             if r is not None:
                 results.append(r)
         id_by_source_id = {r[0].source_id: r[2] for r in results}
+        log_pipeline_timing(
+            cycle_id, f"classify:{source.name}", t_classify, (time.time() - t_classify) * 1000
+        )
 
+        t_alert = time.time()
         for dup_raw, primary in duplicate_pairs:
             # primary ist entweder eine DB-Row (dict, hat "id") oder ein RawStatement
             # aus derselben Charge (dessen DB-ID erst jetzt, nach der Klassifikation, bekannt ist).
@@ -1257,6 +1606,9 @@ async def poll_once(sources, semaphore: asyncio.Semaphore):
 
         alert_worthy = [r for r in results if is_alert_worthy(r[1])]
         await _send_alerts(alert_worthy)
+        log_pipeline_timing(
+            cycle_id, f"send_alerts:{source.name}", t_alert, (time.time() - t_alert) * 1000
+        )
 
     if permanent_error is not None:
         # Ein 401/403/404 der Claude-API repariert sich nicht von selbst - nach oben

@@ -1,5 +1,6 @@
 import datetime
 import json
+import logging
 import sqlite3
 import time
 from contextlib import contextmanager
@@ -8,6 +9,8 @@ from typing import Optional
 
 from app.config import DB_PATH, DEDUP_SIMILARITY_THRESHOLD, DEDUP_WINDOW_SECONDS
 from app.util import text_similarity
+
+logger = logging.getLogger(__name__)
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS statements (
@@ -73,6 +76,11 @@ CREATE TABLE IF NOT EXISTS alert_outcomes (
 );
 CREATE INDEX IF NOT EXISTS idx_alert_outcomes_pending
     ON alert_outcomes(followup_price, alert_ts);
+-- get_ticker_hitrate() wird pro Alert-Zyklus einmal pro handelbarem Ticker
+-- ausgefuehrt (Extras-Anzeige + Historische-Performance-Gate) - ohne Index waere das
+-- ein Full-Table-Scan, der mit wachsender alert_outcomes-Tabelle immer teurer wird.
+CREATE INDEX IF NOT EXISTS idx_alert_outcomes_ticker
+    ON alert_outcomes(ticker, correct);
 
 -- Leichtgewichtiges Protokoll jedes tatsaechlich verschickten Alerts pro handelbarem
 -- Ticker+Richtung - UNABHAENGIG vom Preis-Tracking (alert_outcomes wird nur mit
@@ -113,6 +121,38 @@ CREATE TABLE IF NOT EXISTS paper_positions (
 CREATE INDEX IF NOT EXISTS idx_paper_positions_status ON paper_positions(status);
 CREATE INDEX IF NOT EXISTS idx_paper_positions_open_ticker
     ON paper_positions(ticker, status);
+
+-- Datensammlung (#Gate-Transparenz): ein Datensatz pro tatsaechlich ausgewertetem
+-- Zustell-Gate (Technik-Uebereinstimmung, historische Performance, Ueberzeugungs-
+-- Schwelle, Cooldown, Ruhezeiten, Stunden-Ratelimit) - unabhaengig davon, ob das Gate
+-- bestanden oder der Alert dadurch unterdrueckt wurde. Beantwortet "welches Gate
+-- blockiert wie viel?", ohne das im Log muehsam auszaehlen zu muessen.
+CREATE TABLE IF NOT EXISTS gate_evaluations (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    statement_id INTEGER,
+    gate_name TEXT NOT NULL,
+    evaluated_at REAL NOT NULL,
+    threshold REAL,
+    actual_value REAL,
+    passed INTEGER NOT NULL,
+    reasoning TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_gate_evaluations_gate
+    ON gate_evaluations(gate_name, evaluated_at);
+
+-- Datensammlung (#Pipeline-Timing): Dauer je Verarbeitungsphase eines Poll-Zyklus
+-- (siehe orchestrator.poll_once), gruppiert ueber poll_cycle_id. Macht Bottlenecks
+-- (z.B. eine langsame Quelle oder viele Claude-Calls) sichtbar, ohne dass man sich
+-- durch die Logs graben muss.
+CREATE TABLE IF NOT EXISTS pipeline_timings (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    poll_cycle_id TEXT NOT NULL,
+    phase TEXT NOT NULL,
+    started_at REAL NOT NULL,
+    duration_ms REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_pipeline_timings_phase
+    ON pipeline_timings(phase, started_at);
 """
 
 # Fuer DBs, die vor der Einfuehrung von related_topic_id/is_major_escalation angelegt
@@ -126,6 +166,21 @@ _MIGRATION_COLUMNS = {
     # ladbar bleiben (get_recent/get_pending_alerts nutzen row.get()).
     "expected_move_pct": "ALTER TABLE statements ADD COLUMN expected_move_pct REAL",
     "expected_horizon": "ALTER TABLE statements ADD COLUMN expected_horizon TEXT",
+    # Datensammlung (#Claude-Model-Tracking): welches Modell (Haiku/Sonnet-Eskalation)
+    # diese Klassifikation tatsaechlich geliefert hat - fuer den Hit-Rate-Vergleich
+    # zwischen Modellen (siehe compare_model_performance()).
+    "claude_model": "ALTER TABLE statements ADD COLUMN claude_model TEXT",
+}
+
+# Analog zu _MIGRATION_COLUMNS, aber fuer alert_outcomes statt statements (siehe
+# init_db()). Getrennt gehalten, weil beide Tabellen unabhaengig voneinander schon vor
+# Einfuehrung dieser Spalten existiert haben koennen.
+_MIGRATION_COLUMNS_ALERT_OUTCOMES = {
+    # Datensammlung (#Gap-Tracking): Uebernacht-/Vorboersen-Gap in % (heutiger Open vs.
+    # gestriger Schluss) zum Alarm-Zeitpunkt - fuer den Hit-Rate-Vergleich mit/ohne
+    # grossen Gap (siehe analyze_gap_impact()). Nullable: nicht fuer jeden Alert
+    # ermittelbar (fehlende Historie, ausserhalb der Handelszeit etc.).
+    "gap_pct": "ALTER TABLE alert_outcomes ADD COLUMN gap_pct REAL",
 }
 
 
@@ -184,6 +239,29 @@ def init_db():
         for col_name, alter_sql in _MIGRATION_COLUMNS.items():
             if col_name not in existing_cols:
                 conn.execute(alter_sql)
+        existing_outcome_cols = {
+            row["name"] for row in conn.execute("PRAGMA table_info(alert_outcomes)").fetchall()
+        }
+        for col_name, alter_sql in _MIGRATION_COLUMNS_ALERT_OUTCOMES.items():
+            if col_name not in existing_outcome_cols:
+                conn.execute(alter_sql)
+
+
+def checkpoint_wal() -> None:
+    """Schreibt den WAL-Journal (siehe get_conn: journal_mode=WAL) vollstaendig in die
+    Hauptdatenbankdatei zurueck und leert ihn (TRUNCATE). In GitHub Actions cached
+    'actions/cache' NUR 'trump_monitor.db' (siehe monitor.yml), nicht die WAL-/SHM-
+    Begleitdateien - ohne diesen expliziten Checkpoint am Lauf-Ende koennten zuletzt
+    committete Daten (z.B. 'Alert wurde verschickt') ausschliesslich in der (nicht
+    gecachten) WAL-Datei stehen und beim naechsten Lauf durch die Cache-Restore
+    scheinbar wieder verschwunden sein - mit dem Risiko eines doppelt verschickten
+    Telegram-Alerts. Best-effort: ein Fehlschlag hier soll den Poll-Zyklus nicht zum
+    Scheitern bringen."""
+    try:
+        with get_conn() as conn:
+            conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    except sqlite3.Error:
+        logger.warning("WAL-Checkpoint fehlgeschlagen (best-effort).", exc_info=True)
 
 
 def _utc_day_start_epoch() -> float:
@@ -320,6 +398,7 @@ def insert_statement(
     raw: RawStatement,
     classification: Optional[Classification],
     duplicate_of_id: Optional[int] = None,
+    claude_model: Optional[str] = None,
 ) -> Optional[int]:
     with get_conn() as conn:
         cur = conn.execute(
@@ -328,8 +407,8 @@ def insert_statement(
                 (source, source_id, text, url, published_at, ingested_at,
                  is_market_relevant, sentiment, confidence, tickers, sectors, reasoning,
                  duplicate_of_id, related_topic_id, is_major_escalation,
-                 expected_move_pct, expected_horizon)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 expected_move_pct, expected_horizon, claude_model)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 raw.source,
@@ -349,6 +428,7 @@ def insert_statement(
                 int(classification.is_major_escalation) if classification else 0,
                 classification.expected_move_pct if classification else None,
                 classification.expected_horizon if classification else None,
+                claude_model,
             ),
         )
         if cur.rowcount == 0:
@@ -518,18 +598,21 @@ def record_alert_baseline(
     confidence: Optional[float],
     alert_ts: float,
     alert_price: Optional[float],
+    gap_pct: Optional[float] = None,
 ) -> None:
     """Legt zum Alarm-Zeitpunkt den Ausgangskurs eines handelbaren Tickers ab (#2).
     INSERT OR IGNORE ueber UNIQUE(statement_id, ticker): ein erneuter Versuch (z.B.
-    Resend) legt nicht doppelt an und ueberschreibt den urspruenglichen Kurs nicht."""
+    Resend) legt nicht doppelt an und ueberschreibt den urspruenglichen Kurs nicht.
+    gap_pct (Datensammlung #Gap-Tracking): Uebernacht-/Vorboersen-Gap in % zum
+    Alarm-Zeitpunkt, falls ermittelbar - siehe analyze_gap_impact()."""
     with get_conn() as conn:
         conn.execute(
             """
             INSERT OR IGNORE INTO alert_outcomes
-                (statement_id, ticker, direction, confidence, alert_ts, alert_price)
-            VALUES (?, ?, ?, ?, ?, ?)
+                (statement_id, ticker, direction, confidence, alert_ts, alert_price, gap_pct)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
             """,
-            (statement_id, ticker, direction, confidence, alert_ts, alert_price),
+            (statement_id, ticker, direction, confidence, alert_ts, alert_price, gap_pct),
         )
 
 
@@ -744,7 +827,11 @@ def get_performance_stats(limit: int = 5) -> dict:
         "hit_rate": (hits / n) if n else None,
         "avg_return_pct": overall["avg_return"],
         "best_tickers": by_ticker[:limit],
-        "worst_tickers": list(reversed(by_ticker[-limit:])) if by_ticker else [],
+        # Von hinten aus dem REST (nicht schon in best_tickers enthaltenen) Bereich
+        # nehmen - sonst ueberlappen sich beide Listen, sobald es weniger als
+        # 2*limit unterschiedliche Ticker gibt (derselbe Ticker erschiene dann
+        # gleichzeitig als "bester" und "schlechtester").
+        "worst_tickers": list(reversed(by_ticker[limit:][-limit:])) if len(by_ticker) > limit else [],
     }
 
 
@@ -815,6 +902,52 @@ def get_source_reliability() -> list[dict]:
          "avg_return_pct": r["avg_return"]}
         for r in rows
     ]
+
+
+def get_hourly_performance() -> list[dict]:
+    """Trefferquote je Alarm-STUNDE (UTC, aus alert_ts): zeigt, ob der Bot zu bestimmten
+    Tageszeiten systematisch besser/schlechter liegt (z.B. weil dort andere Quellen/
+    Themen dominieren). Nur Datensaetze mit vorliegender Nachmessung. Analog zu
+    get_source_reliability(), nur nach Stunde statt Quelle gruppiert."""
+    with get_conn() as conn:
+        rows = conn.execute(
+            """
+            SELECT CAST(strftime('%H', alert_ts, 'unixepoch') AS INTEGER) AS hour,
+                   COUNT(*) AS n,
+                   SUM(CASE WHEN correct = 1 THEN 1 ELSE 0 END) AS hits,
+                   AVG(return_pct) AS avg_return
+            FROM alert_outcomes
+            WHERE correct IS NOT NULL
+            GROUP BY hour
+            ORDER BY hour ASC
+            """
+        ).fetchall()
+    return [
+        {"hour_utc": r["hour"], "n": r["n"], "hits": r["hits"],
+         "hit_rate": (r["hits"] / r["n"]) if r["n"] else None,
+         "avg_return_pct": r["avg_return"]}
+        for r in rows
+    ]
+
+
+def get_consecutive_paper_losses(max_check: int = 10) -> int:
+    """Anzahl der ZULETZT geschlossenen Paper-Trades in Folge mit Verlust (pnl < 0), vom
+    juengsten rueckwaerts gezaehlt und beim ersten Gewinn/Nullergebnis gestoppt - Basis
+    fuer den Kapitalerhalt-Modus (dynamisches Sizing, siehe app/paper_trading.py:
+    position_fraction). Prueft hoechstens die letzten max_check geschlossenen Trades."""
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT pnl FROM paper_positions WHERE status = 'closed' AND pnl IS NOT NULL "
+            "ORDER BY exit_ts DESC LIMIT ?",
+            (max_check,),
+        ).fetchall()
+    streak = 0
+    for r in rows:
+        if r["pnl"] < 0:
+            streak += 1
+        else:
+            break
+    return streak
 
 
 def get_kelly_inputs() -> dict:
@@ -998,4 +1131,169 @@ def get_stats() -> dict:
         "alerts_sent": alerts_sent,
         "sentiment_breakdown": {r["sentiment"]: r["c"] for r in sentiment_rows},
         "by_source": {r["source"]: r["c"] for r in by_source_rows},
+    }
+
+
+def log_gate_evaluation(
+    statement_id: Optional[int],
+    gate_name: str,
+    threshold: Optional[float],
+    actual_value: Optional[float],
+    passed: bool,
+    reasoning: str = "",
+) -> None:
+    """Protokolliert einen einzelnen Zustell-Gate-Check (bestanden oder blockiert) -
+    Datensammlung, damit sich hinterher auswerten laesst, welches Gate wie viel
+    blockiert (siehe get_gate_statistics()). Best-effort in dem Sinn, dass ein
+    fehlender statement_id (z.B. Sammel-Digest-Pfad) nicht verhindert wird - NULL ist
+    hier ein gueltiger Wert."""
+    with get_conn() as conn:
+        conn.execute(
+            """
+            INSERT INTO gate_evaluations
+                (statement_id, gate_name, evaluated_at, threshold, actual_value, passed, reasoning)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (statement_id, gate_name, time.time(), threshold, actual_value, int(passed), reasoning),
+        )
+
+
+def get_gate_statistics(hours: int = 24) -> dict:
+    """Je Gate: wie oft geprueft, wie oft bestanden/blockiert in den letzten `hours`
+    Stunden - beantwortet 'welches Gate blockiert am meisten?' (Datensammlung)."""
+    cutoff = time.time() - hours * 3600
+    with get_conn() as conn:
+        rows = conn.execute(
+            """
+            SELECT gate_name,
+                   COUNT(*) AS checks,
+                   SUM(CASE WHEN passed = 1 THEN 1 ELSE 0 END) AS passed,
+                   SUM(CASE WHEN passed = 0 THEN 1 ELSE 0 END) AS blocked
+            FROM gate_evaluations
+            WHERE evaluated_at >= ?
+            GROUP BY gate_name
+            ORDER BY blocked DESC
+            """,
+            (cutoff,),
+        ).fetchall()
+    return {
+        row["gate_name"]: {
+            "checks": row["checks"],
+            "passed": row["passed"],
+            "blocked": row["blocked"],
+            "block_rate": (row["blocked"] / row["checks"]) if row["checks"] else 0,
+        }
+        for row in rows
+    }
+
+
+def compare_model_performance() -> dict:
+    """Trefferquote je verwendetem Claude-Modell (Haiku vs. Sonnet-Eskalation,
+    siehe statements.claude_model) - Datensammlung, um zu belegen, ob die teurere
+    Eskalation tatsaechlich bessere Alerts liefert. Nur Statements mit ausgewertetem
+    Ergebnis (alert_outcomes.correct IS NOT NULL) zaehlen."""
+    with get_conn() as conn:
+        rows = conn.execute(
+            """
+            SELECT s.claude_model AS claude_model,
+                   COUNT(o.id) AS n,
+                   SUM(CASE WHEN o.correct = 1 THEN 1 ELSE 0 END) AS hits
+            FROM alert_outcomes o
+            JOIN statements s ON o.statement_id = s.id
+            WHERE s.claude_model IS NOT NULL AND o.correct IS NOT NULL
+            GROUP BY s.claude_model
+            """
+        ).fetchall()
+    return {
+        row["claude_model"]: {
+            "n": row["n"],
+            "hits": row["hits"],
+            "hit_rate": (row["hits"] / row["n"]) if row["n"] else None,
+        }
+        for row in rows
+    }
+
+
+def log_pipeline_timing(poll_cycle_id: str, phase: str, started_at: float, duration_ms: float) -> None:
+    """Protokolliert die Dauer einer Verarbeitungsphase eines Poll-Zyklus (Datensammlung
+    #Pipeline-Timing) - Basis fuer get_pipeline_statistics(), um Bottlenecks (z.B. eine
+    langsame Quelle) sichtbar zu machen."""
+    with get_conn() as conn:
+        conn.execute(
+            """
+            INSERT INTO pipeline_timings (poll_cycle_id, phase, started_at, duration_ms)
+            VALUES (?, ?, ?, ?)
+            """,
+            (poll_cycle_id, phase, started_at, duration_ms),
+        )
+        # Aufraeumen bei der Gelegenheit statt eines eigenen Wartungsjobs - aeltere
+        # Zeitmessungen sind fuer die aktuelle Bottleneck-Analyse irrelevant.
+        conn.execute(
+            "DELETE FROM pipeline_timings WHERE started_at < ?", (started_at - 7 * 86400,)
+        )
+
+
+def get_pipeline_statistics(hours: int = 24) -> dict:
+    """Durchschnitts-/Min-/Max-Dauer je Pipeline-Phase der letzten `hours` Stunden
+    (Datensammlung #Pipeline-Timing) - macht sichtbar, welche Phase am laengsten
+    dauert (z.B. Claude-Klassifikation vs. Quellen-Abruf)."""
+    cutoff = time.time() - hours * 3600
+    with get_conn() as conn:
+        rows = conn.execute(
+            """
+            SELECT phase,
+                   COUNT(*) AS count,
+                   AVG(duration_ms) AS avg_ms,
+                   MIN(duration_ms) AS min_ms,
+                   MAX(duration_ms) AS max_ms
+            FROM pipeline_timings
+            WHERE started_at >= ?
+            GROUP BY phase
+            ORDER BY avg_ms DESC
+            """,
+            (cutoff,),
+        ).fetchall()
+    return {
+        row["phase"]: {
+            "count": row["count"],
+            "avg_ms": round(row["avg_ms"], 1) if row["avg_ms"] is not None else None,
+            "min_ms": round(row["min_ms"], 1) if row["min_ms"] is not None else None,
+            "max_ms": round(row["max_ms"], 1) if row["max_ms"] is not None else None,
+        }
+        for row in rows
+    }
+
+
+def analyze_gap_impact(large_gap_threshold_pct: float = 3.0) -> dict:
+    """Vergleicht die Trefferquote von Alerts mit grossem Uebernacht-Gap (|gap_pct| >=
+    Schwelle) gegen alle anderen (Datensammlung #Gap-Tracking) - zeigt, ob bereits
+    stark gegappte Ticker ein schlechteres Signal sind. Nur ausgewertete Ergebnisse
+    zaehlen."""
+    with get_conn() as conn:
+        with_gap = conn.execute(
+            """
+            SELECT COUNT(*) AS n, SUM(CASE WHEN correct = 1 THEN 1 ELSE 0 END) AS hits
+            FROM alert_outcomes
+            WHERE gap_pct IS NOT NULL AND correct IS NOT NULL AND ABS(gap_pct) >= ?
+            """,
+            (large_gap_threshold_pct,),
+        ).fetchone()
+        without_gap = conn.execute(
+            """
+            SELECT COUNT(*) AS n, SUM(CASE WHEN correct = 1 THEN 1 ELSE 0 END) AS hits
+            FROM alert_outcomes
+            WHERE correct IS NOT NULL AND (gap_pct IS NULL OR ABS(gap_pct) < ?)
+            """,
+            (large_gap_threshold_pct,),
+        ).fetchone()
+
+    def _bucket(row) -> dict:
+        n = row["n"] or 0
+        hits = row["hits"] or 0
+        return {"n": n, "hits": hits, "hit_rate": (hits / n) if n else None}
+
+    return {
+        "large_gap_threshold_pct": large_gap_threshold_pct,
+        "with_large_gap": _bucket(with_gap),
+        "without_large_gap": _bucket(without_gap),
     }

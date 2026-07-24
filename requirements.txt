@@ -15,7 +15,3 @@ pydantic==2.13.4
 # Truth-Social Browser-Fallback (empfohlen; TRUTH_SOCIAL_BROWSER_FALLBACK=false zum Abschalten).
 # Nach "pip install" zusaetzlich einmalig ausfuehren: playwright install chromium
 playwright==1.61.0
-
-# Optional: only needed if ENABLE_LIVE_AUDIO=true
-# yt-dlp>=2024.8.6
-# faster-whisper>=1.0.3

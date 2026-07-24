@@ -10,16 +10,23 @@ from fastapi.responses import FileResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from app import config
+from app import config, ensemble
 from app.classifier import DailyCapExceeded, classify, selftest
 from app.db import (
     RawStatement,
+    analyze_gap_impact,
+    compare_model_performance,
     get_alerts_sent_today,
     get_calibration_stats,
     get_classification_calls_today,
+    get_gate_statistics,
+    get_hourly_performance,
     get_kelly_inputs,
     get_outcomes_for_export,
+    get_paper_closed_stats,
+    get_paper_realized_pnl,
     get_performance_stats,
+    get_pipeline_statistics,
     get_recent,
     get_source_reliability,
     get_stats,
@@ -28,6 +35,7 @@ from app.db import (
     mark_alert_sent,
 )
 from app.orchestrator import active_gates, is_alert_worthy, run_forever, run_health, source_health
+from app.paper_trading import account_snapshot
 from app.scoring import kelly_fraction
 from app.telegram_alert import send_alert
 
@@ -162,6 +170,95 @@ def api_performance():
         ),
     }
     return stats
+
+
+@app.get("/api/gate-stats", dependencies=[Depends(require_api_key)])
+def api_gate_stats(hours: int = 24):
+    """Datensammlung (#Gate-Evaluation): je Zustell-Gate (Technik-Uebereinstimmung,
+    historische Performance, Ueberzeugungs-Schwelle, Cooldown, Ruhezeiten,
+    Stunden-Ratelimit) wie oft geprueft und wie oft blockiert in den letzten `hours`
+    Stunden - zeigt, welches Gate den meisten Effekt hat."""
+    return get_gate_statistics(hours=hours)
+
+
+@app.get("/api/model-performance", dependencies=[Depends(require_api_key)])
+def api_model_performance():
+    """Datensammlung (#Claude-Model-Tracking): Trefferquote je verwendetem
+    Claude-Modell (Haiku vs. Sonnet-Eskalation) - belegt, ob die teurere Eskalation
+    tatsaechlich bessere Alerts liefert. Nur mit ENABLE_PRICE_TRACKING befuellt."""
+    return compare_model_performance()
+
+
+@app.get("/api/pipeline-stats", dependencies=[Depends(require_api_key)])
+def api_pipeline_stats(hours: int = 24):
+    """Datensammlung (#Pipeline-Timing): Durchschnitts-/Min-/Max-Dauer je
+    Verarbeitungsphase eines Poll-Zyklus der letzten `hours` Stunden - macht
+    Bottlenecks sichtbar (z.B. eine langsame Quelle oder viele Claude-Calls)."""
+    return get_pipeline_statistics(hours=hours)
+
+
+@app.get("/api/hourly-performance", dependencies=[Depends(require_api_key)])
+def api_hourly_performance():
+    """Datensammlung (#Time-of-Day): Trefferquote/Durchschnittsrendite je Alarm-STUNDE
+    (UTC) - zeigt, ob der Bot zu bestimmten Tageszeiten systematisch besser/schlechter
+    liegt (z.B. weil dort andere Quellen/Themen dominieren). Nur mit
+    ENABLE_PRICE_TRACKING befuellt."""
+    return {"by_hour_utc": get_hourly_performance()}
+
+
+@app.get("/api/gap-impact", dependencies=[Depends(require_api_key)])
+def api_gap_impact(threshold_pct: float = 3.0):
+    """Datensammlung (#Gap-Tracking): Trefferquote von Alerts mit grossem
+    Uebernacht-/Vorboersen-Gap (|gap_pct| >= threshold_pct) im Vergleich zu allen
+    anderen - zeigt, ob bereits stark gegappte Ticker ein schlechteres Signal sind.
+    Nur mit ENABLE_PRICE_TRACKING befuellt."""
+    return analyze_gap_impact(large_gap_threshold_pct=threshold_pct)
+
+
+@app.get("/api/ensemble-status", dependencies=[Depends(require_api_key)])
+def api_ensemble_status():
+    """Trainingsstatus des Ensemble-Modells (#Ensemble-Model, siehe app/ensemble.py):
+    ob genug Daten vorliegen, um es zu aktivieren, und falls ja die Trainingsgroesse.
+    Nur mit ENABLE_ENSEMBLE_MODEL + ENABLE_PRICE_TRACKING befuellt."""
+    if not config.ENABLE_ENSEMBLE_MODEL:
+        return {"enabled": False}
+    model = ensemble.get_model(config.ENSEMBLE_MIN_TRAINING_SAMPLES, config.ENSEMBLE_RETRAIN_SECONDS)
+    if model is None:
+        return {
+            "enabled": True,
+            "trained": False,
+            "min_training_samples": config.ENSEMBLE_MIN_TRAINING_SAMPLES,
+        }
+    return {
+        "enabled": True,
+        "trained": True,
+        "training_samples": model["n"],
+        "hit_docs": model["hit_docs"],
+        "miss_docs": model["miss_docs"],
+        "vocab_size": model["vocab_size"],
+    }
+
+
+@app.get("/api/paper", dependencies=[Depends(require_api_key)])
+def api_paper():
+    """Paper-Trading Depot-Status: aktueller Wert, Gewinn/Verlust, Anzahl offener und
+    geschlossener Positionen, Win-Rate. Nur mit PAPER_TRADING befuellt."""
+    if not config.PAPER_TRADING:
+        return {"error": "Paper-Trading ist nicht aktiviert", "enabled": False}
+    snap = account_snapshot()
+    closed = get_paper_closed_stats()
+    return {
+        "enabled": True,
+        "starting_capital": config.PAPER_STARTING_CAPITAL,
+        "account_value": snap["account_value"],
+        "free_cash": snap["free_cash"],
+        "open_stake": snap["open_stake"],
+        "realized_pnl": snap["realized_pnl"],
+        "closed_trades": closed["closed"],
+        "wins": closed["wins"],
+        "win_rate": closed["wins"] / closed["closed"] if closed["closed"] else None,
+        "total_return_pct": (snap["account_value"] - config.PAPER_STARTING_CAPITAL) / config.PAPER_STARTING_CAPITAL * 100.0 if config.PAPER_STARTING_CAPITAL else 0.0,
+    }
 
 
 @app.get("/api/outcomes.csv", dependencies=[Depends(require_api_key)])

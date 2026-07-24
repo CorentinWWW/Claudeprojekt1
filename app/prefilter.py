@@ -26,9 +26,17 @@ _NOISE_PATTERN = re.compile(
     # Listicles: "5 stocks to watch", "3 ways to", "7 charts", "10 things"
     r"\b\d+\s+(?:stocks?|things|ways|reasons|tips|charts|etfs?|funds?|moves?|"
     r"lessons|mistakes|dividend stocks?)\b"
-    # Ratgeber / How-to / Erklaerstuecke
-    r"|\bhow to\b|\bwhat to know\b|\bwhat to watch\b|\bhere(?:'?s| is) (?:why|how|what)\b"
-    r"|\bshould you\b|\bis it time to\b|\bexplainer\b|\bexplained\b|\bguide to\b"
+    # Ratgeber / How-to / Erklaerstuecke. Bewusst OHNE "here's why/how/what",
+    # "what to know", "explainer"/"explained" und "credit card": diese Phrasen sind
+    # ohne eigenes Themen-Anker auch der STANDARD-Schlagzeilenstil echter, zeitnaher
+    # Finanznachrichten selbst (z.B. "Here's why Tesla stock plunged today", "Visa
+    # hikes credit card fees, shares jump") - als Denylist-Muster ohne Themenbezug
+    # haetten sie genau die Meldungen verworfen, die dieser Filter laut Docstring
+    # niemals verwerfen darf. Die verbleibenden, spezifischeren Muster (z.B. "how to",
+    # "401k", "retirement planning", "best N") fangen die zugehoerigen Nicht-Ereignis-
+    # Beispiele weiterhin ab.
+    r"|\bhow to\b|\bwhat to watch\b"
+    r"|\bshould you\b|\bis it time to\b|\bguide to\b"
     r"|\ba beginner'?s guide\b|\beverything you need to know\b|\b401\(?k\)?\b|\broth ira\b"
     # Kauf-Empfehlungs-/Anlage-Clickbait der einschlaegigen Portale
     r"|\bmotley fool\b|\bzacks\b|\bstocks? to buy\b|\bstocks? to watch\b"
@@ -38,7 +46,7 @@ _NOISE_PATTERN = re.compile(
     r"|\bop-ed\b"
     # Werbung / Promo / Personal Finance / Lifestyle
     r"|\bprime day\b|\bblack friday\b|\bcyber monday\b|\bcoupon\b|\bpromo code\b"
-    r"|\bdiscount code\b|\bpersonal finance\b|\bcredit card\b|\bbudgeting\b"
+    r"|\bdiscount code\b|\bpersonal finance\b|\bbudgeting\b"
     r"|\bretirement (?:tips|savings|planning|account)\b|\bhoroscope\b|\brecipe\b"
     r"|\bhow much (?:you|to) (?:save|need)\b"
     r")",

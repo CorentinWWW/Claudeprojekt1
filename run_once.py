@@ -16,8 +16,8 @@ import sys
 import time
 
 from app.classifier import DailyCapExceeded, classify
-from app.config import ENABLE_LIVE_AUDIO, MAX_CONCURRENT_CLASSIFICATIONS, validate
-from app.db import RawStatement, init_db, insert_statement, mark_alert_sent
+from app.config import MAX_CONCURRENT_CLASSIFICATIONS, validate
+from app.db import RawStatement, checkpoint_wal, init_db, insert_statement, mark_alert_sent
 from app.orchestrator import build_sources, is_alert_worthy, poll_once
 from app.telegram_alert import send_alert
 
@@ -40,72 +40,60 @@ async def main() -> int:
     init_db()
     sources = build_sources()
     logger.info("Aktive Quellen: %s", [s.name for s in sources])
-    if ENABLE_LIVE_AUDIO:
-        # Live-Audio hoert kontinuierlich im Hintergrund zu, solange der Prozess lebt -
-        # in diesem Einzellauf-Modus (ein poll()-Aufruf, dann sofort Prozessende)
-        # bleiben fuer eine echte Transkription praktisch keine paar Sekunden Zeit.
-        # Fuer eine funktionierende Live-Audio-Ueberwachung den Dauerbetrieb nutzen
-        # (README: main.py + Docker/systemd/run_forever statt GitHub-Actions-Cron).
-        logger.warning(
-            "ENABLE_LIVE_AUDIO ist aktiv, aber run_once.py beendet sich nach einem "
-            "Zyklus - Live-Audio braucht Dauerbetrieb (main.py/Docker/systemd) um "
-            "tatsaechlich etwas zu transkribieren."
-        )
 
-    semaphore = asyncio.Semaphore(MAX_CONCURRENT_CLASSIFICATIONS)
+    # Ab hier in try/finally: checkpoint_wal() MUSS auch bei einer Exception
+    # (Netzwerkfehler, Bug etc.) noch laufen, sonst koennten in diesem Lauf
+    # committete Daten ausschliesslich in der (vom Actions-Cache-Schritt in
+    # monitor.yml NICHT erfassten) WAL-Datei stehen - siehe checkpoint_wal()-Docstring.
     try:
+        semaphore = asyncio.Semaphore(MAX_CONCURRENT_CLASSIFICATIONS)
         await poll_once(sources, semaphore)
-    finally:
-        # Live-Audio startet langlebige ffmpeg-Kindprozesse im Hintergrund - ohne
-        # dieses aclose() wuerden sie nach Prozessende verwaist zurueckbleiben.
-        for source in sources:
-            aclose = getattr(source, "aclose", None)
-            if aclose is not None:
-                await aclose()
 
-    test_text = os.getenv("MANUAL_TEST_TEXT", "").strip()
-    if test_text:
-        # Bewusst OHNE is_known()/find_recent_duplicate()-Pruefung: ein manueller
-        # Test soll garantiert durch Claude (+ Telegram) laufen, auch wenn er
-        # einem frueheren Test-Statement aehnelt oder identisch ist.
-        logger.info("Manueller Test-Text gesetzt, jage ihn durch die Pipeline: %s", test_text[:100])
-        raw = RawStatement(
-            source="manual_test",
-            source_id=f"manual_test:{time.time()}",
-            text=test_text,
-        )
-        try:
-            # priority=True: ein manuell per workflow_dispatch ausgeloester Test soll
-            # nicht am normalen Tages-Limit scheitern, solange die Reserve noch Luft hat.
-            classification = await classify(raw.text, priority=True)
-        except DailyCapExceeded as exc:
-            # Erwarteter, kein echter Fehler (z.B. wenn poll_once() oben im selben
-            # Lauf das Tages-Limit schon ausgeschoepft hat) - soll den Workflow-Run
-            # nicht mit einem nicht-Null-Exitcode/rotem Kreuz beenden, obwohl der
-            # eigentliche Poll-Zyklus erfolgreich war. Gleiche Behandlung wie ueberall
-            # sonst im Code (siehe orchestrator.py: _classify_and_store).
-            logger.warning("[manual_test] %s", exc)
-            return 0
-        statement_id = insert_statement(raw, classification)
-        logger.info(
-            "[manual_test] relevant=%s sentiment=%s conf=%.2f ticker_calls=%s",
-            classification.is_market_relevant,
-            classification.sentiment,
-            classification.confidence,
-            classification.ticker_calls,
-        )
-        if is_alert_worthy(classification):
-            sent = await send_alert(raw, classification)
-            if sent:
-                mark_alert_sent(statement_id)
-            logger.info("Telegram-Alert gesendet: %s", sent)
-        else:
-            logger.info(
-                "[manual_test] Kein Alert: keine konkrete Aktie mit ausreichend hoher "
-                "Konfidenz (siehe ALERT_MIN_TICKER_CONFIDENCE)."
+        test_text = os.getenv("MANUAL_TEST_TEXT", "").strip()
+        if test_text:
+            # Bewusst OHNE is_known()/find_recent_duplicate()-Pruefung: ein manueller
+            # Test soll garantiert durch Claude (+ Telegram) laufen, auch wenn er
+            # einem frueheren Test-Statement aehnelt oder identisch ist.
+            logger.info("Manueller Test-Text gesetzt, jage ihn durch die Pipeline: %s", test_text[:100])
+            raw = RawStatement(
+                source="manual_test",
+                source_id=f"manual_test:{time.time()}",
+                text=test_text,
             )
+            try:
+                # priority=True: ein manuell per workflow_dispatch ausgeloester Test soll
+                # nicht am normalen Tages-Limit scheitern, solange die Reserve noch Luft hat.
+                classification = await classify(raw.text, priority=True)
+            except DailyCapExceeded as exc:
+                # Erwarteter, kein echter Fehler (z.B. wenn poll_once() oben im selben
+                # Lauf das Tages-Limit schon ausgeschoepft hat) - soll den Workflow-Run
+                # nicht mit einem nicht-Null-Exitcode/rotem Kreuz beenden, obwohl der
+                # eigentliche Poll-Zyklus erfolgreich war. Gleiche Behandlung wie ueberall
+                # sonst im Code (siehe orchestrator.py: _classify_and_store).
+                logger.warning("[manual_test] %s", exc)
+                return 0
+            statement_id = insert_statement(raw, classification)
+            logger.info(
+                "[manual_test] relevant=%s sentiment=%s conf=%.2f ticker_calls=%s",
+                classification.is_market_relevant,
+                classification.sentiment,
+                classification.confidence,
+                classification.ticker_calls,
+            )
+            if is_alert_worthy(classification):
+                sent = await send_alert(raw, classification)
+                if sent:
+                    mark_alert_sent(statement_id)
+                logger.info("Telegram-Alert gesendet: %s", sent)
+            else:
+                logger.info(
+                    "[manual_test] Kein Alert: keine konkrete Aktie mit ausreichend hoher "
+                    "Konfidenz (siehe ALERT_MIN_TICKER_CONFIDENCE)."
+                )
 
-    return 0
+        return 0
+    finally:
+        checkpoint_wal()
 
 
 if __name__ == "__main__":
