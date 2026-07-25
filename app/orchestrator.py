@@ -996,6 +996,12 @@ async def _build_alert_extras(
             gap_too_late=bool(chase and chase.get("too_late")),
             hedged=hedged,
             divergence=bool(extras.get("divergence")),
+            # Nutzerfund: die Empfehlung sagte "Jetzt kaufen", obwohl derselbe Alert
+            # weiter unten "🌙 Wochenende" anzeigte - eine ECHTE Order kann ausserhalb
+            # der Handelszeiten ohnehin nicht ausgefuehrt werden. market_open steuert
+            # nur den Text ("Jetzt" vs. "Zum naechsten Handelsstart"), nicht ob das
+            # Paper-Depot eine Position eroeffnet (das passiert unveraendert sofort).
+            market_open=(us_market_session() == "open"),
         )
     return extras
 

@@ -190,6 +190,34 @@ def test_trade_recommendation():
     check("hedged + Score < 60 -> wait mit Grund 'Gerücht'",
           hedged_low["action"] == "wait" and "Gerücht" in ", ".join(hedged_low["reasons"]))
 
+    # market_open=False (Nutzerfund: "Jetzt kaufen" trotz "🌙 Wochenende" im selben
+    # Alert): die Formulierung muss klarmachen, dass eine ECHTE Order erst zum
+    # naechsten Handelsstart moeglich ist - nicht "jetzt".
+    closed_strong = trade_recommendation(90, "long", market_open=False)
+    check("Markt zu, hoher Score -> KEIN 'Jetzt' im Label",
+          "Jetzt" not in closed_strong["label"])
+    check("Markt zu, hoher Score -> nennt 'nächsten Handelsstart'",
+          "nächsten Handelsstart" in closed_strong["label"])
+    check("Markt zu -> bleibt 'buy' (Position wird trotzdem eroeffnet)",
+          closed_strong["action"] == "buy")
+    check("Markt zu -> Grund nennt geschlossenen Markt",
+          "Markt aktuell geschlossen" in closed_strong["reasons"])
+
+    closed_normal = trade_recommendation(70, "long", market_open=False)
+    check("Markt zu, mittlerer Score -> Standard-Größe-Label nennt naechstes Open",
+          "nächsten Open" in closed_normal["label"])
+
+    # market_open darf 'wait'/'avoid' nicht verdecken - die harten Gegenanzeigen
+    # gelten unabhaengig von der Marktphase.
+    closed_block = trade_recommendation(90, "long", technical_contradicts_strongly=True,
+                                         market_open=False)
+    check("Markt zu aendert nichts an einer harten Gegenanzeige (weiterhin wait)",
+          closed_block["action"] == "wait")
+
+    # market_open=True (Standard) bleibt exakt wie zuvor - keine Regression.
+    check("market_open=True ist der Default (unveraendertes Verhalten)",
+          trade_recommendation(90, "long") == trade_recommendation(90, "long", market_open=True))
+
 
 def test_progress_bar():
     from app.scoring import format_progress_bar

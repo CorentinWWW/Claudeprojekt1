@@ -350,6 +350,7 @@ def trade_recommendation(
     gap_too_late: bool = False,
     hedged: bool = False,
     divergence: bool = False,
+    market_open: bool = True,
 ) -> dict:
     """Verdichtet die bereits vorhandenen Signale (Ueberzeugungs-Score inkl. aller
     Score-Anpassungen, technische Zweitmeinung, Gap-Chase-Timing, Geruecht-/
@@ -361,7 +362,14 @@ def trade_recommendation(
     Zwei harte Gegenanzeigen (technical_contradicts_strongly, gap_too_late) druecken die
     Empfehlung mindestens auf 'wait'; kommt dazu noch ein niedriger Score, auf 'avoid'.
     Sonst entscheidet der Score allein (>= 85 -> starkes 'buy', 60-84 -> normales 'buy',
-    < 60 -> 'wait')."""
+    < 60 -> 'wait').
+
+    market_open=False (vor-/nachboerslich, Wochenende, Feiertag): die 'buy'-Formulierung
+    wechselt von 'Jetzt kaufen' auf 'Zum naechsten Handelsstart kaufen' - eine ECHTE
+    Order kann ausserhalb der Handelszeiten ohnehin nicht ausgefuehrt werden, "jetzt"
+    waere dann irrefuehrend. Das Paper-Depot eroeffnet die Position trotzdem sofort (zum
+    best-effort aktuellen Kurs) - dieser Parameter aendert nur den TEXT, nicht ob/wann
+    eine Position eroeffnet wird."""
     if direction not in ("long", "short"):
         return {"action": "wait", "label": "🟠 Kein klares Signal", "reasons": []}
 
@@ -384,10 +392,14 @@ def trade_recommendation(
             "action": "wait", "label": "🟠 Abwarten / nur kleine Position",
             "reasons": reasons or ["Überzeugung noch moderat (< 60)"],
         }
+    now_str = "Jetzt" if market_open else "Zum nächsten Handelsstart"
+    if not market_open:
+        reasons.append("Markt aktuell geschlossen")
     if score >= 85:
-        return {"action": "buy", "label": f"🟢 Jetzt {verb}", "reasons": reasons or ["hohe Überzeugung"]}
+        return {"action": "buy", "label": f"🟢 {now_str} {verb}", "reasons": reasons or ["hohe Überzeugung"]}
+    size_str = "Standard-Größe" if market_open else "Standard-Größe, zum nächsten Open"
     return {
-        "action": "buy", "label": f"🟡 {verb.capitalize()}, Standard-Größe",
+        "action": "buy", "label": f"🟡 {verb.capitalize()}, {size_str}",
         "reasons": reasons or ["solide Überzeugung"],
     }
 
