@@ -82,27 +82,43 @@ jobs:
           # zeitgleiche Meldungen zum selben Thema (siehe app/config.py-Kommentar zu
           # MAX_CONCURRENT_CLASSIFICATIONS). Per Repo-Variable ueberschreibbar.
           MAX_CONCURRENT_CLASSIFICATIONS: ${{ vars.MAX_CONCURRENT_CLASSIFICATIONS || '2' }}
-          # Praezisions-Schwelle fuer Alerts (siehe app/config.py:
-          # ALERT_MIN_TICKER_CONFIDENCE). Optional ueber eine GitHub-Repository-Variable
-          # (Settings -> Secrets and variables -> Actions -> Variables) einstellbar, ohne
-          # Code zu aendern. Ist die Variable nicht gesetzt, liefert GitHub hier einen
-          # leeren String, den config.py wie "nicht gesetzt" behandelt -> es gilt dann der
-          # Standard 0.90 aus dem Code.
-          ALERT_MIN_TICKER_CONFIDENCE: ${{ vars.ALERT_MIN_TICKER_CONFIDENCE }}
-          # Zustell-Gates: alle standardmaessig aus im Code, hier auf Nutzerwunsch scharf
-          # gestellt (per Repo-Variable ueberschreibbar). ACHTUNG (siehe Commit-Message/
-          # Chat): viele dieser Gates gleichzeitig koennen Alerts stark ausduennen, weil
-          # eine Meldung durch ALLE Schwellen gleichzeitig muss.
+          # ============================================================================
+          # MESS-PHASE (bewusste Entscheidung, siehe Commit-Message)
+          # ----------------------------------------------------------------------------
+          # Ausgangslage: mit ALERT_MIN_TICKER_CONFIDENCE=0.90 (Code-Standard) kam ueber
+          # einen ganzen Handelstag KEIN EINZIGER Alert durch - die tatsaechlichen
+          # Claude-Konfidenzen lagen bei 0.35-0.85. Das erste Gate hat alles abgefangen,
+          # alle nachgelagerten Gates (Technik, Historie, Ensemble, VIX) wurden nie auch
+          # nur erreicht.
+          #
+          # Folge: null ausgewertete Ergebnisse -> das Ensemble-Modell bleibt dauerhaft
+          # untrainiert, das Historie-Gate hat nie Daten, und es laesst sich grundsaetzlich
+          # nicht feststellen, ob das System ueberhaupt einen Edge hat. Ein System, das nie
+          # alarmiert, lernt nie etwas ueber sich selbst.
+          #
+          # Diese Schwellen sind daher bewusst auf DATENGEWINNUNG gestellt, nicht auf
+          # maximale Praezision. Es ist Paper-Trading, es steht kein Geld im Risiko. Sobald
+          # ~100 ausgewertete Ergebnisse vorliegen, sollten die Werte anhand der GEMESSENEN
+          # Trefferquoten nachgeschaerft werden (/api/calibration liefert dafuer sogar eine
+          # konkrete Schwellen-Empfehlung) - statt wie bisher anhand von Schaetzungen.
+          # Kosten/Spam bleiben durch MAX_ALERTS_PER_HOUR und MAX_CLASSIFICATIONS_PER_DAY
+          # weiterhin hart gedeckelt.
+          # ============================================================================
+          ALERT_MIN_TICKER_CONFIDENCE: ${{ vars.ALERT_MIN_TICKER_CONFIDENCE || '0.75' }}
           MAX_NEWS_AGE_MINUTES: ${{ vars.MAX_NEWS_AGE_MINUTES || '180' }}
           TICKER_ALERT_COOLDOWN_MINUTES: ${{ vars.TICKER_ALERT_COOLDOWN_MINUTES || '60' }}
-          ALERT_MIN_CONVICTION: ${{ vars.ALERT_MIN_CONVICTION || '70' }}
+          ALERT_MIN_CONVICTION: ${{ vars.ALERT_MIN_CONVICTION || '55' }}
           MAX_ALERTS_PER_HOUR: ${{ vars.MAX_ALERTS_PER_HOUR || '5' }}
-          ALERT_MIN_EXPECTED_MOVE_PCT: ${{ vars.ALERT_MIN_EXPECTED_MOVE_PCT || '2.0' }}
-          # Historische-Performance-Feedback: Ticker lernt aus eigener Bilanz, inkl. hartem
-          # Unterdrueckungs-Gate ab < 40% Trefferquote (erst aussagekraeftig, sobald genug
-          # ausgewertete Alerts vorliegen, siehe HISTORICAL_PERFORMANCE_MIN_SAMPLES).
+          ALERT_MIN_EXPECTED_MOVE_PCT: ${{ vars.ALERT_MIN_EXPECTED_MOVE_PCT || '1.0' }}
+          # Historische-Performance-Feedback: der SCORE-Effekt bleibt an (sanft, wirkt erst
+          # ab genug Samples). Das HARTE Unterdrueckungs-Gate ist dagegen auf 0 (aus):
+          # bei HISTORICAL_PERFORMANCE_MIN_SAMPLES=5 waere "< 40% Trefferquote" nach fuenf
+          # Trades statistisch reines Rauschen (2 von 5 Fehlschlaegen reichen) - es wuerde
+          # brauchbare Ticker zufaellig dauerhaft abwuergen, bevor ueberhaupt genug Daten
+          # da sind, um das zu bemerken. Wieder scharf stellen, sobald die Stichprobe je
+          # Ticker aussagekraeftig ist.
           ENABLE_HISTORICAL_PERFORMANCE_GATE: ${{ vars.ENABLE_HISTORICAL_PERFORMANCE_GATE || 'true' }}
-          HISTORICAL_PERFORMANCE_SUPPRESS_BELOW: ${{ vars.HISTORICAL_PERFORMANCE_SUPPRESS_BELOW || '0.4' }}
+          HISTORICAL_PERFORMANCE_SUPPRESS_BELOW: ${{ vars.HISTORICAL_PERFORMANCE_SUPPRESS_BELOW || '0' }}
           # Zweitmeinung fuer Grenzfaelle: kostet einen Extra-Call (Sonnet) pro Grenzfall,
           # zaehlt gegen das Tages-Limit.
           ENABLE_BORDERLINE_ESCALATION: ${{ vars.ENABLE_BORDERLINE_ESCALATION || 'true' }}
@@ -142,11 +158,16 @@ jobs:
           PAPER_COST_BPS: ${{ vars.PAPER_COST_BPS || '10' }}
           # Technische Analyse (TradingView-Stil): technische Gesamtbewertung je Ticker aus
           # der Kurshistorie (Stooq), als Bestaetigung/Widerspruch zum Nachrichtensignal.
-          # '|| true' = standardmaessig AN; zum Abschalten Repo-Variable ENABLE_TECHNICALS=false.
-          # Optionales hartes Gate (nur bei klarem Widerspruch unterdruecken) ueber
-          # TECHNICALS_REQUIRE_AGREEMENT - auf Nutzerwunsch hier scharf gestellt.
+          # Die Anzeige + der SCORE-Effekt (TECHNICALS_CONVICTION_WEIGHT) bleiben an.
+          # TECHNICALS_REQUIRE_AGREEMENT (hartes Unterdruecken bei klarem Widerspruch) ist
+          # dagegen fuer die Mess-Phase AUS: dass die Technik ein Nachrichtensignal
+          # zuverlaessig widerlegt, ist eine unbelegte Annahme - als hartes Filter wuerde
+          # sie stillschweigend genau die Faelle entfernen, an denen sich diese Annahme
+          # ueberhaupt erst pruefen liesse. Wieder einschalten, sobald die Daten zeigen,
+          # dass technisch widersprochene Alerts tatsaechlich schlechter abschneiden
+          # (dafuer gibt es /api/gate-stats).
           ENABLE_TECHNICALS: ${{ vars.ENABLE_TECHNICALS || 'true' }}
-          TECHNICALS_REQUIRE_AGREEMENT: ${{ vars.TECHNICALS_REQUIRE_AGREEMENT || 'true' }}
+          TECHNICALS_REQUIRE_AGREEMENT: ${{ vars.TECHNICALS_REQUIRE_AGREEMENT || 'false' }}
           # Ensemble-Modell (Bag-of-Words-Naive-Bayes, siehe app/ensemble.py): klassische,
           # von Claude UNABHAENGIGE Zweitmeinung aus der eigenen bisherigen Erfolgsbilanz.
           # '|| true' = standardmaessig AN; zum Abschalten Repo-Variable
