@@ -425,8 +425,9 @@ def _format_message(
             if gap.get("early"):
                 trailing += (
                     f"\n🚀 Mögliche Übernacht-Rallye: Katalysator {phase} – der Markt kann "
-                    "kaum noch reagieren. Einstieg jetzt, bevor der Kurs zum nächsten Open "
-                    "hochgappt (bevor es vorbörslich schon läuft)."
+                    "kaum noch reagieren. Eine ECHTE Order geht erst zum nächsten "
+                    "Handelsstart durch; das Paper-Depot merkt sich schon jetzt einen "
+                    "Kurs, bevor es vorbörslich schon hochläuft."
                 )
             else:
                 trailing += (

@@ -67,6 +67,32 @@ def test_recommendation_wiring_buy():
     check("Label nennt 'kaufen' (long)", rec and "kaufen" in rec["label"])
 
 
+def test_recommendation_wiring_market_closed():
+    """Nutzerfund: die Empfehlung sagte 'Jetzt kaufen', obwohl derselbe Alert
+    '🌙 Wochenende' anzeigte. market_open muss aus der tatsaechlichen Session kommen."""
+    config, db, orch = _fresh()
+    cls = _cls(db)
+
+    orch.us_market_session = lambda: "weekend"
+    extras = asyncio.run(orch._build_alert_extras(
+        orch.RawStatement(source="x", source_id="r1b", text="AAA news"),
+        cls, statement_id=1, score=90, corroboration=1, hedged=False,
+    ))
+    rec = extras.get("recommendation")
+    check("Wochenende: kein 'Jetzt' in der Empfehlung", rec and "Jetzt" not in rec["label"])
+    check("Wochenende: nennt naechsten Handelsstart", rec and "nächsten Handelsstart" in rec["label"])
+    check("Wochenende: bleibt trotzdem 'buy' (Paper-Position wird eroeffnet)",
+          rec and rec["action"] == "buy")
+
+    orch.us_market_session = lambda: "open"
+    extras_open = asyncio.run(orch._build_alert_extras(
+        orch.RawStatement(source="x", source_id="r1c", text="AAA news"),
+        cls, statement_id=2, score=90, corroboration=1, hedged=False,
+    ))
+    rec_open = extras_open.get("recommendation")
+    check("Markt offen: 'Jetzt' wieder in der Empfehlung", rec_open and "Jetzt" in rec_open["label"])
+
+
 def test_recommendation_wiring_technical_override():
     config, db, orch = _fresh(ENABLE_TECHNICALS="true")
     cls = _cls(db)
@@ -132,6 +158,7 @@ def test_telegram_rendering():
 
 def main():
     test_recommendation_wiring_buy()
+    test_recommendation_wiring_market_closed()
     test_recommendation_wiring_technical_override()
     test_recommendation_disabled()
     test_recommendation_no_actionable_ticker()

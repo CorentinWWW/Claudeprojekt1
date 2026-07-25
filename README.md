@@ -322,7 +322,12 @@ Die Alerts kamen zuletzt teils erst, **als die Bewegung schon lief**. Zwei Gegen
   (z.B. „📢 Empfehlung: 🟢 Jetzt kaufen (hohe Überzeugung)" oder „📢 Empfehlung: 🟠
   Abwarten / nur kleine Position (Technik widerspricht klar)") — spart das manuelle
   Zusammenreimen aus mehreren Alert-Zeilen. Rein additiv aus bereits vorhandenen
-  Signalen, kein zusätzlicher Claude-Call. **Keine Anlageberatung.**
+  Signalen, kein zusätzlicher Claude-Call. **Marktphasen-bewusst**: ist der Markt
+  gerade zu (vor-/nachbörslich, Wochenende), heißt es „Zum nächsten Handelsstart
+  kaufen" statt „Jetzt kaufen" — eine echte Order kann außerhalb der Handelszeiten
+  ohnehin nicht ausgeführt werden. Das Paper-Depot eröffnet die Position trotzdem
+  sofort (zum best-effort aktuellen Kurs); nur der Text ändert sich. **Keine
+  Anlageberatung.**
 
 ## Robustheit / Reife dieser Version
 
