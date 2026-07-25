@@ -311,12 +311,85 @@ def evaluate_gap_chase(
         return {
             "gap_pct": with_thesis, "too_late": too_late,
             "used_fraction": used_fraction, "remaining_pct": remaining_pct,
+            # Fortschritt RELATIV zur 'zu spaet'-Schwelle (1.0 = Schwelle exakt erreicht,
+            # >1.0 = schon drueber) - fuer die Balken-Visualisierung im Alert (#Grafik).
+            "cutoff_fraction": used_fraction / too_late_ratio if too_late_ratio > 0 else None,
         }
 
     too_late = with_thesis >= too_late_abs_pct
-    return {"gap_pct": with_thesis, "too_late": too_late, "used_fraction": None, "remaining_pct": None}
+    return {
+        "gap_pct": with_thesis, "too_late": too_late, "used_fraction": None, "remaining_pct": None,
+        "cutoff_fraction": with_thesis / too_late_abs_pct if too_late_abs_pct > 0 else None,
+    }
 
-    return None
+
+# --- Fortschrittsbalken (reine Text-/Unicode-Visualisierung, kein Bild/Dependency) ------
+def format_progress_bar(fraction: Optional[float], width: int = 10) -> str:
+    """Text-Fortschrittsbalken fuer die Gap-Chase-Cutoff-Visualisierung im Alert
+    ("bei welcher Luecke lohnt sich ein Kauf nicht mehr") - bewusst als reiner
+    Unicode-Text statt eines generierten Bildes: kein zusaetzlicher Dependency
+    (matplotlib/Pillow wuerden die Installationszeit der 48x/Tag frisch
+    aufgesetzten GitHub-Actions-Laeufe spuerbar verlaengern) und rendert in JEDEM
+    Telegram-Client sofort, ohne Bild-Upload.
+
+    fraction=1.0 -> Balken exakt voll (= 'zu spaet'-Schwelle erreicht). Werte > 1.0
+    (Schwelle schon ueberschritten) werden bei einem vollen Balken gedeckelt;
+    None/nicht-endliche Werte -> leerer Balken (0%)."""
+    if not isinstance(fraction, (int, float)) or not math.isfinite(fraction):
+        fraction = 0.0
+    fraction = max(0.0, min(1.0, fraction))
+    filled = round(fraction * width)
+    return "[" + "█" * filled + "░" * (width - filled) + f"] {fraction * 100:.0f}% bis 'zu spät'"
+
+
+# --- Handlungsempfehlung (#Empfehlung) ---------------------------------------------
+def trade_recommendation(
+    score: int,
+    direction: Optional[str],
+    technical_contradicts_strongly: bool = False,
+    gap_too_late: bool = False,
+    hedged: bool = False,
+    divergence: bool = False,
+) -> dict:
+    """Verdichtet die bereits vorhandenen Signale (Ueberzeugungs-Score inkl. aller
+    Score-Anpassungen, technische Zweitmeinung, Gap-Chase-Timing, Geruecht-/
+    Divergenz-Warnung) zu EINER klaren, kurzen Handlungsempfehlung - macht explizit,
+    was man sonst aus mehreren einzelnen Alert-Zeilen selbst zusammenreimen muesste.
+    Rein additiv aus vorhandenen Signalen, KEIN zusaetzlicher Claude-Call. Ausdruecklich
+    KEINE Anlageberatung.
+
+    Zwei harte Gegenanzeigen (technical_contradicts_strongly, gap_too_late) druecken die
+    Empfehlung mindestens auf 'wait'; kommt dazu noch ein niedriger Score, auf 'avoid'.
+    Sonst entscheidet der Score allein (>= 85 -> starkes 'buy', 60-84 -> normales 'buy',
+    < 60 -> 'wait')."""
+    if direction not in ("long", "short"):
+        return {"action": "wait", "label": "🟠 Kein klares Signal", "reasons": []}
+
+    verb = "kaufen" if direction == "long" else "shorten"
+    reasons = []
+    if technical_contradicts_strongly:
+        reasons.append("Technik widerspricht klar")
+    if gap_too_late:
+        reasons.append("Bewegung bereits größtenteils gelaufen")
+    if hedged:
+        reasons.append("unbestätigt/Gerücht")
+    if divergence:
+        reasons.append("Kurs läuft bereits gegen die These")
+    hard_block = technical_contradicts_strongly or gap_too_late
+
+    if hard_block and score < 50:
+        return {"action": "avoid", "label": f"🔴 Eher NICHT {verb}", "reasons": reasons}
+    if hard_block or score < 60:
+        return {
+            "action": "wait", "label": "🟠 Abwarten / nur kleine Position",
+            "reasons": reasons or ["Überzeugung noch moderat (< 60)"],
+        }
+    if score >= 85:
+        return {"action": "buy", "label": f"🟢 Jetzt {verb}", "reasons": reasons or ["hohe Überzeugung"]}
+    return {
+        "action": "buy", "label": f"🟡 {verb.capitalize()}, Standard-Größe",
+        "reasons": reasons or ["solide Überzeugung"],
+    }
 
 
 # --- Ruhezeiten-Fenster (#7, reine Zeitfenster-Logik) -----------------------------

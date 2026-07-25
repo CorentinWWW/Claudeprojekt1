@@ -39,6 +39,7 @@ from app.db import (
     insert_paper_position,
     set_meta,
 )
+from app.market_hours import session_label, us_market_session
 
 logger = logging.getLogger(__name__)
 
@@ -162,11 +163,20 @@ def _t(pos: dict) -> str:
     return html.escape(str(pos.get("ticker", "?")))
 
 
-def format_open_message(pos: dict, account_value_after: float, free_cash_after: float) -> str:
+def format_open_message(
+    pos: dict, account_value_after: float, free_cash_after: float, session: Optional[str] = None
+) -> str:
+    """session (siehe app.market_hours.us_market_session/session_label): macht transparent,
+    in welcher Boersen-Phase der als 'Kaufpreis' gemerkte Kurs abgefragt wurde - der Bot
+    merkt sich immer nur den TATSAECHLICHEN aktuellen Kurs zum Alarm-Zeitpunkt (nie einen
+    idealisierten/nachtraeglich korrigierten Wert). Ist das ausserhalb der reguraeren
+    Session (z.B. vorboerslich), ist das best-effort ueber Stooq - der angezeigte Kurs
+    kann dann der zuletzt gehandelte (moeglicherweise etwas verzoegerte) Kurs sein."""
     direction = pos["direction"]
+    session_str = f" ({session_label(session)})" if session and session_label(session) else ""
     lines = [
         f"🟢 <b>Paper-Position eröffnet: {_t(pos)} {html.escape(direction)}</b> {_arrow(direction)}",
-        f"Einstieg {pos['entry_price']:g} · {pos['qty']:.4g} Stück · Einsatz {pos['stake']:.2f}€",
+        f"Einstieg {pos['entry_price']:g}{session_str} · {pos['qty']:.4g} Stück · Einsatz {pos['stake']:.2f}€",
     ]
     if pos.get("stop") is not None and pos.get("target") is not None:
         lines.append(f"🛡 SL {pos['stop']:g} / 🎯 TP {pos['target']:g}")
@@ -275,6 +285,11 @@ async def open_positions_for_alert(classification, statement_id, score: Optional
     from app.telegram_alert import send_text
 
     loss_streak = get_consecutive_paper_losses() if PAPER_CAPITAL_PRESERVATION else 0
+    # Einmal pro Alert-Batch bestimmt (nicht je Ticker) - die Session aendert sich nicht
+    # innerhalb weniger Sekunden. Rein informativ fuer die Telegram-Meldung (#Kaufpreis-
+    # Transparenz): macht sichtbar, ob der gemerkte Kurs aus der regulaeren Session oder
+    # best-effort ausserhalb (vor-/nachboerslich) stammt.
+    session = us_market_session()
 
     for tc in actionable_tickers(classification):
         ticker = (tc.get("ticker") or "").upper()
@@ -316,7 +331,9 @@ async def open_positions_for_alert(classification, statement_id, score: Optional
         )
         after = account_snapshot()
         pos = {"ticker": ticker, "direction": direction, "entry_price": price, **plan}
-        await send_text(format_open_message(pos, after["account_value"], after["free_cash"]))
+        await send_text(
+            format_open_message(pos, after["account_value"], after["free_cash"], session=session)
+        )
 
 
 async def manage_open_positions() -> None:

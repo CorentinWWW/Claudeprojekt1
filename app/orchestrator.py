@@ -29,6 +29,7 @@ from app.config import (
     ENABLE_PRICE_TRACKING,
     ENABLE_RISK_LEVELS,
     ENABLE_TECHNICALS,
+    ENABLE_TRADE_RECOMMENDATION,
     ENABLE_TRUTH_SOCIAL,
     ENABLE_WEEKLY_DIGEST,
     ENSEMBLE_CONVICTION_WEIGHT,
@@ -127,6 +128,7 @@ from app.scoring import (
     parse_hour_window,
     position_tier,
     predict_gap,
+    trade_recommendation,
 )
 from app.sources.news_gdelt import GdeltNewsSource
 from app.sources.news_rss import RssNewsSource
@@ -197,6 +199,7 @@ def active_gates() -> dict:
         "late_move_warn_pct": LATE_MOVE_WARN_PCT or None,
         "gap_prediction": ENABLE_GAP_PREDICTION,
         "gap_chase_evaluation": ENABLE_GAP_CHASE_EVALUATION and ENABLE_PRICE_TRACKING,
+        "trade_recommendation": ENABLE_TRADE_RECOMMENDATION,
         "borderline_escalation": ENABLE_BORDERLINE_ESCALATION,
         "weekly_digest": ENABLE_WEEKLY_DIGEST,
         "ensemble_model": ENABLE_ENSEMBLE_MODEL,
@@ -976,6 +979,24 @@ async def _build_alert_extras(
         thread = get_topic_thread(classification.related_topic_id)
         if len(thread) > 1:
             extras["thread"] = thread
+
+    # Verdichtete Kauf-/Verkaufsempfehlung (Nutzerwunsch): fasst Score, technische
+    # Zweitmeinung, Gap-Chase-Timing und Geruecht-/Divergenz-Warnung des staerksten
+    # handelbaren Tickers zu EINER klaren Handlungsempfehlung zusammen. Nutzt bewusst
+    # die bereits oben berechneten extras (technical/gap_chase/divergence), kein
+    # zusaetzlicher Call/Kursabruf.
+    if ENABLE_TRADE_RECOMMENDATION and actionable:
+        top = max(actionable, key=lambda tc: tc.get("confidence") or 0.0)
+        top_ticker = (top.get("ticker") or "").upper()
+        tech_for_top = (extras.get("technical") or {}).get(top_ticker)
+        chase = extras.get("gap_chase")
+        extras["recommendation"] = trade_recommendation(
+            score, top.get("direction"),
+            technical_contradicts_strongly=bool(tech_for_top and tech_for_top.get("contradicts_strongly")),
+            gap_too_late=bool(chase and chase.get("too_late")),
+            hedged=hedged,
+            divergence=bool(extras.get("divergence")),
+        )
     return extras
 
 

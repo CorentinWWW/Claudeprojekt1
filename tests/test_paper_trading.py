@@ -327,6 +327,34 @@ def test_capital_preservation_mode():
           abs(pos["stake"] - 67.5) < 1e-6)
 
 
+def test_open_message_shows_session():
+    """Kaufpreis-Transparenz (Nutzerwunsch): die 'Position eroeffnet'-Meldung zeigt, in
+    welcher Boersen-Session der gemerkte (tatsaechliche) Kurs abgefragt wurde."""
+    _, config, db, prices, pt, orch = _fresh()
+    from app.db import Classification
+
+    sent = _install_fakes(pt, orch, {
+        "NVDA": {"price": 100.0, "high": 105.0, "low": 95.0, "change_pct": 1.0},
+    })
+    pt.us_market_session = lambda: "pre"
+    cls = Classification(
+        is_market_relevant=True, sentiment="positive", confidence=0.95,
+        ticker_calls=[{"ticker": "NVDA", "direction": "long", "confidence": 0.95}],
+    )
+    asyncio.run(pt.open_positions_for_alert(cls, statement_id=1, score=90))
+    check("Session-Label ('vorbörslich') in der Eroeffnungs-Meldung",
+          any("vorbörslich" in s for s in sent))
+    check("tatsächlicher Kurs (100) weiterhin exakt gemerkt",
+          db.get_open_paper_position_for_ticker("NVDA")["entry_price"] == 100.0)
+
+
+def test_paper_max_positions_default_is_high():
+    """PAPER_MAX_POSITIONS ist auf Nutzerwunsch hochgesetzt (Kapital, nicht Anzahl, soll
+    der praktische Deckel sein) - reine Config-Regression."""
+    _, config, db, prices, pt, orch = _fresh()
+    check("Code-Standard PAPER_MAX_POSITIONS >= 50", config.PAPER_MAX_POSITIONS >= 50)
+
+
 def test_capital_preservation_disabled():
     """PAPER_CAPITAL_PRESERVATION=false -> kein Effekt, egal wie lang der Streak."""
     _, config, db, prices, pt, orch = _fresh(
@@ -345,6 +373,8 @@ def main():
     test_late_move_extra()
     test_capital_preservation_mode()
     test_capital_preservation_disabled()
+    test_open_message_shows_session()
+    test_paper_max_positions_default_is_high()
 
     print()
     if failures:

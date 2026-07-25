@@ -143,6 +143,68 @@ def test_alert_rendering_new_fields():
     check("kein Hedge-Hinweis ohne Flag", "unbestätigt/Gerücht" not in msg)
 
 
+def test_trade_recommendation():
+    from app.scoring import trade_recommendation
+
+    check("keine Richtung -> wait, kein Signal",
+          trade_recommendation(90, None)["action"] == "wait")
+    check("keine Richtung -> short auch abgefangen",
+          trade_recommendation(90, "sideways")["action"] == "wait")
+
+    # Hoher Score, keine Gegenanzeigen -> starkes buy.
+    strong = trade_recommendation(90, "long")
+    check("Score >= 85, keine Flags -> buy", strong["action"] == "buy")
+    check("starkes buy nennt 'Jetzt'", "Jetzt" in strong["label"])
+    check("long -> 'kaufen' im Label", "kaufen" in strong["label"])
+
+    # Short-Richtung -> 'shorten' statt 'kaufen'.
+    short_strong = trade_recommendation(90, "short")
+    check("short -> 'shorten' im Label", "shorten" in short_strong["label"])
+
+    # Mittlerer Score (60-84), keine Flags -> normales buy.
+    normal = trade_recommendation(70, "long")
+    check("Score 70, keine Flags -> buy (Standard-Groesse)", normal["action"] == "buy")
+    check("Standard-Groesse im Label", "Standard-Größe" in normal["label"])
+
+    # Niedriger Score (< 60) -> wait, auch ohne harte Gegenanzeige.
+    low = trade_recommendation(40, "long")
+    check("Score < 60 -> wait", low["action"] == "wait")
+
+    # Harte Gegenanzeige (Technik widerspricht) + guter Score -> mindestens wait.
+    tech_block = trade_recommendation(90, "long", technical_contradicts_strongly=True)
+    check("Technik widerspricht + hoher Score -> wait (nicht buy)", tech_block["action"] == "wait")
+    check("Grund wird genannt", "Technik" in ", ".join(tech_block["reasons"]))
+
+    # Harte Gegenanzeige + niedriger Score -> avoid.
+    avoid = trade_recommendation(30, "long", technical_contradicts_strongly=True)
+    check("Gegenanzeige + Score < 50 -> avoid", avoid["action"] == "avoid")
+    check("avoid nennt 'Eher NICHT'", "Eher NICHT" in avoid["label"])
+
+    # Gap zu spaet -> ebenfalls harte Gegenanzeige.
+    gap_block = trade_recommendation(90, "long", gap_too_late=True)
+    check("Gap zu spaet + hoher Score -> wait", gap_block["action"] == "wait")
+
+    # Hedge/Divergenz alleine (ohne harte Gegenanzeige) senken NICHT unter buy,
+    # tauchen aber als Grund auf, wenn der Score schon knapp ist.
+    hedged_low = trade_recommendation(55, "long", hedged=True)
+    check("hedged + Score < 60 -> wait mit Grund 'Gerücht'",
+          hedged_low["action"] == "wait" and "Gerücht" in ", ".join(hedged_low["reasons"]))
+
+
+def test_progress_bar():
+    from app.scoring import format_progress_bar
+
+    check("0.0 -> leerer Balken", format_progress_bar(0.0).startswith("[░░░░░░░░░░]"))
+    check("1.0 -> voller Balken", format_progress_bar(1.0).startswith("[██████████]"))
+    check("0.5 -> halb voll (5/10)", format_progress_bar(0.5).startswith("[█████░░░░░]"))
+    check("None -> wie 0.0 (leer)", format_progress_bar(None) == format_progress_bar(0.0))
+    check("> 1.0 wird bei vollem Balken gedeckelt", format_progress_bar(1.7) == format_progress_bar(1.0))
+    check("negativ wird bei leerem Balken gedeckelt", format_progress_bar(-0.3) == format_progress_bar(0.0))
+    check("NaN -> wie 0.0 (leer)", format_progress_bar(float("nan")) == format_progress_bar(0.0))
+    check("Prozent-Anzeige im Text", "50%" in format_progress_bar(0.5))
+    check("eigene Breite wird respektiert", len(format_progress_bar(0.5, width=4)) < len(format_progress_bar(0.5, width=20)))
+
+
 def main():
     test_conviction_score()
     test_position_tier()
@@ -150,6 +212,8 @@ def main():
     test_expected_move_format()
     test_quiet_hours_window()
     test_alert_rendering_new_fields()
+    test_trade_recommendation()
+    test_progress_bar()
 
     print()
     if failures:
