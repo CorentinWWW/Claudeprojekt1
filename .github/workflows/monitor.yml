@@ -128,6 +128,18 @@ jobs:
           # (Standard 500 EUR) anpassbar.
           PAPER_TRADING: ${{ vars.PAPER_TRADING || 'true' }}
           PAPER_STARTING_CAPITAL: ${{ vars.PAPER_STARTING_CAPITAL }}
+          # Kapital-Recycling: ohne Zeit-Exit bliebe eine Position, die weder Stop noch
+          # Ziel erreicht, unbegrenzt offen und wuerde ihren Einsatz dauerhaft binden -
+          # nach den ersten Alerts bekaeme mangels freiem Kapital KEIN weiterer Alert
+          # mehr eine Position.
+          PAPER_MAX_HOLDING_HOURS: ${{ vars.PAPER_MAX_HOLDING_HOURS || '24' }}
+          # Trailing-Stop: ohne ihn ist der Gewinn je Trade bei ~1.5R gedeckelt, der
+          # Verlust bei 1R - rechnerisch braeuchte das 40% Trefferquote nur fuers
+          # Break-even. Der Trail laesst stark laufende Bewegungen weiter laufen.
+          PAPER_TRAILING_STOP: ${{ vars.PAPER_TRAILING_STOP || 'true' }}
+          # Handelskosten je Seite in Basispunkten - macht die ausgewiesene Paper-Rendite
+          # ehrlich (ohne Abzug sieht sie systematisch besser aus als die Realitaet).
+          PAPER_COST_BPS: ${{ vars.PAPER_COST_BPS || '10' }}
           # Technische Analyse (TradingView-Stil): technische Gesamtbewertung je Ticker aus
           # der Kurshistorie (Stooq), als Bestaetigung/Widerspruch zum Nachrichtensignal.
           # '|| true' = standardmaessig AN; zum Abschalten Repo-Variable ENABLE_TECHNICALS=false.

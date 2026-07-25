@@ -19,12 +19,17 @@ from typing import Optional
 from app import prices
 from app.config import (
     PAPER_CAPITAL_PRESERVATION,
+    PAPER_COST_BPS,
     PAPER_LOSS_STREAK_SIZE_FACTOR,
     PAPER_LOSS_STREAK_THRESHOLD,
+    PAPER_MAX_HOLDING_HOURS,
     PAPER_MAX_POSITIONS,
     PAPER_MIN_STAKE,
     PAPER_STARTING_CAPITAL,
     PAPER_STATUS_INTERVAL_MINUTES,
+    PAPER_TRAIL_ACTIVATE_R,
+    PAPER_TRAIL_DISTANCE_R,
+    PAPER_TRAILING_STOP,
 )
 from app.db import (
     close_paper_position,
@@ -38,6 +43,7 @@ from app.db import (
     get_paper_realized_pnl,
     insert_paper_position,
     set_meta,
+    update_paper_position_risk,
 )
 from app.market_hours import session_label, us_market_session
 
@@ -54,20 +60,29 @@ def position_fraction(score: Optional[int], loss_streak: int = 0) -> float:
     Signale bekommen mehr Kapital, schwaechere weniger. Bewusst gedeckelt, damit nie das
     ganze Depot auf einer Position steht. None (Score aus) -> mittlerer Anteil.
 
+    Die Anteile sind bewusst moderat (max. 15% statt frueher 30%): der freie Barbestand
+    ist der eigentlich bindende Faktor dafuer, wie viele Alerts ueberhaupt eine Position
+    bekommen (PAPER_MAX_POSITIONS greift praktisch nie). Mit 30% je Position waren nach
+    vier Alerts saemtliche Mittel gebunden - der Wunsch "bei ALLEN Alerts eine Position"
+    liess sich so gar nicht erfuellen. Kleinere Anteile streuen das Kapital ueber
+    deutlich mehr Signale und sind zugleich risikoseitig angemessener: 30% des Depots auf
+    einen einzelnen Trade mit ~40%-Trefferquote liegt weit oberhalb dessen, was das
+    Kelly-Kriterium rechtfertigen wuerde.
+
     Kapitalerhalt-Modus (#Kapitalerhalt): laeuft eine Verlustserie (loss_streak >=
     PAPER_LOSS_STREAK_THRESHOLD geschlossene Verlust-Trades IN FOLGE), wird der Anteil
     zusaetzlich um PAPER_LOSS_STREAK_SIZE_FACTOR verkleinert - Risk-off nach einer
     Pechstraehne, statt unveraendert weiterzumachen."""
     if score is None:
-        base = 0.16
+        base = 0.09
     elif score >= 85:
-        base = 0.30
+        base = 0.15
     elif score >= 70:
-        base = 0.22
-    elif score >= 50:
-        base = 0.16
-    else:
         base = 0.12
+    elif score >= 50:
+        base = 0.09
+    else:
+        base = 0.06
     if PAPER_CAPITAL_PRESERVATION and loss_streak >= PAPER_LOSS_STREAK_THRESHOLD:
         base *= PAPER_LOSS_STREAK_SIZE_FACTOR
     return base
@@ -123,6 +138,73 @@ def return_pct(direction: str, entry_price: float, current_price: float) -> floa
     return -raw if direction == "short" else raw
 
 
+def update_high_water(direction: str, high_water: Optional[float], current_price: float) -> float:
+    """Zieht den Hoch-/Tiefpunkt einer offenen Position nach: bei Long das Maximum, bei
+    Short das Minimum des Kurses seit Eroeffnung. Fehlender bisheriger Wert (alte
+    DB-Zeile) -> der aktuelle Kurs ist der Startpunkt."""
+    if high_water is None:
+        return current_price
+    return max(high_water, current_price) if direction == "long" else min(high_water, current_price)
+
+
+def trailing_stop_price(
+    direction: str,
+    entry_price: float,
+    initial_stop: Optional[float],
+    high_water: Optional[float],
+    activate_r: float = 1.0,
+    distance_r: float = 1.0,
+) -> Optional[float]:
+    """Nachgezogener Stop ("Gewinner laufen lassen"), oder None solange der Trail noch
+    nicht aktiv ist (dann gilt der urspruengliche Stop unveraendert).
+
+    R = Anfangsrisiko = |Einstieg - urspruenglicher Stop|. Der Trail wird erst aktiv,
+    wenn die Position mindestens activate_r * R im Plus stand, und liegt dann
+    distance_r * R hinter dem bisherigen Hoch-/Tiefpunkt. Der zurueckgegebene Stop
+    bewegt sich NUR in die guenstige Richtung (nie zurueck), sodass einmal gesicherter
+    Gewinn nicht wieder freigegeben wird.
+
+    Zweck (siehe PAPER_TRAILING_STOP): ohne Trail ist der Gewinn je Trade bei ~1.5R
+    gedeckelt, der Verlust bei 1R - das braucht rechnerisch 40% Trefferquote nur fuers
+    Break-even. Der Trail laesst einzelne, stark laufende Nachrichten-Bewegungen weit
+    darueber hinauslaufen und hebt so den mittleren Gewinn."""
+    if direction not in ("long", "short"):
+        return None
+    if initial_stop is None or high_water is None:
+        return None
+    risk = abs(entry_price - initial_stop)
+    if risk <= 0:
+        return None
+    profit_r = (
+        (high_water - entry_price) / risk if direction == "long"
+        else (entry_price - high_water) / risk
+    )
+    if profit_r < activate_r:
+        return None
+    if direction == "long":
+        trail = high_water - distance_r * risk
+        return max(initial_stop, trail)
+    trail = high_water + distance_r * risk
+    return min(initial_stop, trail)
+
+
+def apply_costs(pnl: float, stake: float, cost_bps: float) -> float:
+    """Zieht die Handelskosten (Spread/Gebuehren) beider Seiten vom Rohergebnis ab.
+    cost_bps = Basispunkte je Seite (10 bps = 0.1%), bezogen auf den Positionswert.
+    0 -> unveraendert. Macht die Paper-Rendite ehrlicher: ohne Kostenabzug sieht gerade
+    eine Strategie mit vielen kleinen Trades deutlich besser aus, als sie real waere."""
+    if cost_bps <= 0 or stake <= 0:
+        return pnl
+    return pnl - 2.0 * stake * (cost_bps / 10000.0)
+
+
+def holding_hours(entry_ts: Optional[float], now: Optional[float] = None) -> Optional[float]:
+    """Bisherige Haltedauer einer Position in Stunden (None bei fehlendem Zeitstempel)."""
+    if not isinstance(entry_ts, (int, float)) or entry_ts <= 0:
+        return None
+    return max(0.0, ((now if now is not None else time.time()) - entry_ts) / 3600.0)
+
+
 def stop_or_target_hit(
     direction: str, current_price: float, stop: Optional[float], target: Optional[float]
 ) -> Optional[str]:
@@ -147,6 +229,7 @@ _CLOSE_REASON_LABEL = {
     "target": "Ziel erreicht",
     "reversal": "Gegensignal",
     "manual": "manuell",
+    "timeout": "Haltedauer abgelaufen",
 }
 
 
@@ -265,6 +348,10 @@ async def _close(pos: dict, exit_price: float, reason: str, notify: bool) -> flo
     """Schliesst eine Position best-effort und meldet sie (falls notify). Gibt den
     realisierten PnL zurueck."""
     pnl = unrealized_pnl(pos["direction"], pos["entry_price"], pos["qty"], exit_price)
+    # Handelskosten (Spread/Gebuehren) beider Seiten abziehen - erst hier, damit die
+    # Roh-Kursbewegung (return_pct) unveraendert bleibt und nur das GELD-Ergebnis die
+    # Kosten traegt.
+    pnl = apply_costs(pnl, pos.get("stake") or 0.0, PAPER_COST_BPS)
     ret = return_pct(pos["direction"], pos["entry_price"], exit_price)
     close_paper_position(pos["id"], exit_price, time.time(), pnl, reason)
     if notify:
@@ -337,10 +424,11 @@ async def open_positions_for_alert(classification, statement_id, score: Optional
 
 
 async def manage_open_positions() -> None:
-    """Bewertet alle offenen Positionen zum aktuellen Kurs, schliesst automatisch die,
-    die Stop-Loss oder Take-Profit erreicht haben (mit Sofort-Meldung), und schickt -
-    hoechstens alle PAPER_STATUS_INTERVAL_MINUTES - einen Depot-Status. Best-effort: ist
-    der Kursdienst nicht erreichbar, passiert nichts (keine Fehlmeldung)."""
+    """Bewertet alle offenen Positionen zum aktuellen Kurs, zieht den Trailing-Stop nach,
+    schliesst automatisch die, die Stop-Loss/Take-Profit erreicht oder die maximale
+    Haltedauer ueberschritten haben (jeweils mit Sofort-Meldung), und schickt - hoechstens
+    alle PAPER_STATUS_INTERVAL_MINUTES - einen Depot-Status. Best-effort: ist der
+    Kursdienst nicht erreichbar, passiert nichts (keine Fehlmeldung)."""
     positions = get_open_paper_positions()
     if not positions:
         return
@@ -353,10 +441,39 @@ async def manage_open_positions() -> None:
         if price is None:
             still_open.append({**pos, "current_price": None})
             continue
-        hit = stop_or_target_hit(pos["direction"], price, pos.get("stop"), pos.get("target"))
+
+        stop = pos.get("stop")
+        target = pos.get("target")
+
+        if PAPER_TRAILING_STOP:
+            high_water = update_high_water(pos["direction"], pos.get("high_water"), price)
+            trail = trailing_stop_price(
+                pos["direction"], pos["entry_price"], stop, high_water,
+                activate_r=PAPER_TRAIL_ACTIVATE_R, distance_r=PAPER_TRAIL_DISTANCE_R,
+            )
+            if trail is not None:
+                stop = trail
+                # Sobald der Trail laeuft, entscheidet ER ueber den Ausstieg - das feste
+                # Ziel wird bewusst ignoriert. Sonst wuerde die Position weiterhin bei
+                # ~1.5R glattgestellt und der Trail koennte nie den groesseren Gewinn
+                # erwirtschaften, um dessentwillen er ueberhaupt existiert.
+                target = None
+            update_paper_position_risk(pos["id"], high_water, stop=trail)
+            pos = {**pos, "high_water": high_water, "stop": stop}
+
+        hit = stop_or_target_hit(pos["direction"], price, stop, target)
         if hit:
             await _close(pos, price, hit, notify=True)
             continue
+
+        # Zeit-Exit: bindet eine Position weder Stop noch Ziel erreichend dauerhaft
+        # Kapital, wird sie nach PAPER_MAX_HOLDING_HOURS glattgestellt - sonst bekaemen
+        # spaetere Alerts mangels freiem Barbestand gar keine Position mehr.
+        held = holding_hours(pos.get("entry_ts"))
+        if PAPER_MAX_HOLDING_HOURS > 0 and held is not None and held >= PAPER_MAX_HOLDING_HOURS:
+            await _close(pos, price, "timeout", notify=True)
+            continue
+
         still_open.append({
             **pos,
             "current_price": price,

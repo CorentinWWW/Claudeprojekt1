@@ -116,7 +116,10 @@ CREATE TABLE IF NOT EXISTS paper_positions (
     exit_price REAL,
     exit_ts REAL,
     pnl REAL,
-    close_reason TEXT
+    close_reason TEXT,
+    -- Hoch-/Tiefpunkt seit Eroeffnung (Long: Maximum, Short: Minimum) fuer den
+    -- Trailing-Stop, siehe paper_trading.trailing_stop_price.
+    high_water REAL
 );
 CREATE INDEX IF NOT EXISTS idx_paper_positions_status ON paper_positions(status);
 CREATE INDEX IF NOT EXISTS idx_paper_positions_open_ticker
@@ -183,6 +186,15 @@ _MIGRATION_COLUMNS_ALERT_OUTCOMES = {
     "gap_pct": "ALTER TABLE alert_outcomes ADD COLUMN gap_pct REAL",
 }
 
+# Analog fuer paper_positions: der bisherige Hoch-/Tiefpunkt einer offenen Position
+# (bei Long das Maximum, bei Short das Minimum des Kurses seit Eroeffnung) - Grundlage
+# fuer den Trailing-Stop (siehe paper_trading.trailing_stop_price). Nullable, damit
+# Positionen aus einer aelteren DB (z.B. GitHub-Actions-Cache) weiter ladbar bleiben;
+# fehlt der Wert, wird beim naechsten Bewerten der Einstiegskurs als Startpunkt genommen.
+_MIGRATION_COLUMNS_PAPER_POSITIONS = {
+    "high_water": "ALTER TABLE paper_positions ADD COLUMN high_water REAL",
+}
+
 
 @dataclass
 class RawStatement:
@@ -244,6 +256,12 @@ def init_db():
         }
         for col_name, alter_sql in _MIGRATION_COLUMNS_ALERT_OUTCOMES.items():
             if col_name not in existing_outcome_cols:
+                conn.execute(alter_sql)
+        existing_paper_cols = {
+            row["name"] for row in conn.execute("PRAGMA table_info(paper_positions)").fetchall()
+        }
+        for col_name, alter_sql in _MIGRATION_COLUMNS_PAPER_POSITIONS.items():
+            if col_name not in existing_paper_cols:
                 conn.execute(alter_sql)
 
 
@@ -1006,19 +1024,42 @@ def insert_paper_position(
     stop: Optional[float],
     target: Optional[float],
 ) -> int:
-    """Legt eine neue offene virtuelle Position an (Paper-Trading) und gibt ihre ID zurueck."""
+    """Legt eine neue offene virtuelle Position an (Paper-Trading) und gibt ihre ID zurueck.
+    high_water startet beim Einstiegskurs - ab da zieht update_paper_high_water() den
+    Hoch-/Tiefpunkt fuer den Trailing-Stop nach."""
     with get_conn() as conn:
         cur = conn.execute(
             """
             INSERT INTO paper_positions
                 (statement_id, ticker, direction, entry_price, entry_ts, qty, stake,
-                 stop, target, status)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'open')
+                 stop, target, status, high_water)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?)
             """,
             (statement_id, (ticker or "").upper(), direction, entry_price, entry_ts,
-             qty, stake, stop, target),
+             qty, stake, stop, target, entry_price),
         )
         return cur.lastrowid
+
+
+def update_paper_position_risk(
+    position_id: int, high_water: float, stop: Optional[float] = None
+) -> None:
+    """Schreibt den nachgezogenen Hoch-/Tiefpunkt (und optional den nachgezogenen Stop)
+    einer offenen Position zurueck - Grundlage fuer den Trailing-Stop ueber mehrere
+    Poll-Zyklen/GitHub-Actions-Laeufe hinweg. WHERE status='open' verhindert, dass eine
+    zwischenzeitlich geschlossene Position noch veraendert wird."""
+    with get_conn() as conn:
+        if stop is None:
+            conn.execute(
+                "UPDATE paper_positions SET high_water = ? WHERE id = ? AND status = 'open'",
+                (high_water, position_id),
+            )
+        else:
+            conn.execute(
+                "UPDATE paper_positions SET high_water = ?, stop = ? "
+                "WHERE id = ? AND status = 'open'",
+                (high_water, stop, position_id),
+            )
 
 
 def get_open_paper_positions() -> list[dict]:

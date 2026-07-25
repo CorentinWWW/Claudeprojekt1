@@ -224,6 +224,25 @@ GitHub-Actions-Workflow bereits an, abschaltbar über die Repo-Variable `PAPER_T
 - **Stop-Loss / Take-Profit** werden aus der Tagesspanne abgeleitet (`suggest_risk_levels`)
   und schließen die Position **automatisch**, sobald der Kurs sie erreicht — mit sofortiger
   Telegram-Meldung.
+- **Trailing-Stop** (`PAPER_TRAILING_STOP`, Standard an): Sobald eine Position
+  `PAPER_TRAIL_ACTIVATE_R` (Standard 1.0) mal ihr Anfangsrisiko im Plus steht, zieht der
+  Stop mit dem Hochpunkt mit (`PAPER_TRAIL_DISTANCE_R` dahinter) und das feste Ziel wird
+  ignoriert — **Gewinner dürfen laufen**. Hintergrund: mit fixem Ziel ist der Gewinn je
+  Trade bei ~1,5R gedeckelt, der Verlust bei 1R. Break-even bräuchte damit rechnerisch
+  **40 % Trefferquote** (1/(1+1,5)) — exakt der Wert, den ein reiner Zufallskurs liefert.
+  Der gesamte Erwartungswert hinge also allein daran, dass das Nachrichtensignal echte
+  Vorhersagekraft hat, und Spread/Slippage fräßen den Rest. Der Trail hebt den mittleren
+  Gewinn, ohne den Verlust je Trade zu vergrößern.
+- **Maximale Haltedauer** (`PAPER_MAX_HOLDING_HOURS`, Standard 24 h): Eine Position, die
+  weder Stop noch Ziel erreicht, wird danach zum aktuellen Kurs glattgestellt
+  (`Haltedauer abgelaufen`). Ohne das bliebe sie **unbegrenzt** offen und würde ihren
+  Einsatz dauerhaft binden — da der freie Barbestand (nicht `PAPER_MAX_POSITIONS`) der
+  eigentlich bindende Faktor ist, bekäme nach den ersten Alerts **kein weiterer Alert**
+  mehr eine Position.
+- **Handelskosten** (`PAPER_COST_BPS`, im Workflow 10 bps je Seite): Spread/Gebühren
+  werden vom realisierten Ergebnis abgezogen. Das macht die Zahlen nicht besser, sondern
+  **ehrlich** — eine Strategie, die nur ohne Kosten funktioniert, sollte man nicht mit
+  echtem Geld nachbauen.
 - Ein **Gegensignal** (z.B. offene Long-Position, neuer Short-Alert auf denselben Ticker)
   **dreht die Position**: die alte wird glattgestellt, die neue eröffnet.
 - Solange Positionen offen sind, kommt **laufend ein Depot-Status** per Telegram — „auf wie
