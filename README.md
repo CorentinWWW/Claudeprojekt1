@@ -870,3 +870,10 @@ Jede Testdatei läuft in einem eigenen Prozess (bewusst kein pytest, siehe Komme
 in `tests/run_tests.py`). Über `.github/workflows/tests.yml` läuft die Suite
 automatisch bei jedem Push - eine Regression erscheint sofort als rotes Kreuz am
 Commit.
+
+## Lizenz
+
+MIT License, siehe [`LICENSE`](LICENSE). Kurz gesagt: der Code darf frei genutzt,
+verändert und weiterverbreitet werden - **ohne jede Gewährleistung** ("as is"). Das
+gilt zusätzlich zum Disclaimer oben: **keine Finanzberatung, keine Anlageempfehlung,
+Nutzung auf eigenes Risiko.**
