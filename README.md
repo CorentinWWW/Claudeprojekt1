@@ -14,6 +14,16 @@ Trefferquoten-Übersicht.
 **Kein Trading-Signal / keine Finanzberatung.** Die Einschätzungen (inkl. Long/Short)
 sind LLM-generiert und können falsch liegen - eigene Anlageentscheidung auf eigenes Risiko.
 
+> **Branch-Hinweis:** Dieses Repository hat (noch) keinen `main`-Branch. Produktiv -
+> also der Branch, auf dem der GitHub-Actions-Cron (`.github/workflows/monitor.yml`)
+> tatsächlich läuft - ist immer der **Default-Branch** des Repos (aktuell
+> `claude/trump-market-impact-analyzer-dbjvu5`), sichtbar oben links im GitHub-
+> Branch-Dropdown bzw. unter *Settings → Branches*. GitHub-Actions-`schedule`-Trigger
+> feuern ausschließlich auf dem Default-Branch, egal wie viele andere Branches
+> existieren oder wie sie heißen - Änderungen auf anderen Branches (z.B.
+> Review-/Feature-Branches) haben also erst nach einem Merge in den Default-Branch
+> einen Effekt auf den laufenden Bot.
+
 ## Architektur
 
 ```
@@ -201,10 +211,16 @@ GitHub-Actions-Workflow bereits an, abschaltbar über die Repo-Variable `PAPER_T
 
 **Was passiert:**
 - Bei **jedem tatsächlich verschickten Alert** (Long/Short) wird für die handelbaren
-  Ticker eine **virtuelle Position eröffnet** — der Einstiegskurs wird gemerkt. Die
-  **Positionsgröße bestimmt der Bot selbst** aus dem Überzeugungs-Score (Anteil des
-  Depotwerts: stärkeres Signal → mehr Kapital, gedeckelt, siehe
-  `app/paper_trading.py: position_fraction`).
+  Ticker eine **virtuelle Position eröffnet** — für ALLE, nicht nur eine Auswahl
+  (`PAPER_MAX_POSITIONS`, Standard 100, ist nur noch ein hohes Sicherheitsnetz; der
+  eigentliche Deckel ist das freie Kapital). Der Einstiegskurs ist immer der
+  **tatsächliche aktuelle Kurs** zum Alarm-Zeitpunkt (Stooq-Live-Quote, best-effort) —
+  läuft ein Alert z.B. vorbörslich bei 100 €, merkt sich der Bot 100 €, nicht einen
+  nachträglich "korrigierten" Wert. Die Eröffnungs-Meldung zeigt dazu die Börsen-Session
+  an (🌅 vorbörslich / 🟢 Börse offen / 🌆 nachbörslich / 🌙 zu), damit transparent ist,
+  in welcher Phase der Kurs abgefragt wurde. Die **Positionsgröße bestimmt der Bot
+  selbst** aus dem Überzeugungs-Score (Anteil des Depotwerts: stärkeres Signal → mehr
+  Kapital, gedeckelt, siehe `app/paper_trading.py: position_fraction`).
 - **Stop-Loss / Take-Profit** werden aus der Tagesspanne abgeleitet (`suggest_risk_levels`)
   und schließen die Position **automatisch**, sobald der Kurs sie erreicht — mit sofortiger
   Telegram-Meldung.
@@ -275,7 +291,19 @@ Die Alerts kamen zuletzt teils erst, **als die Bewegung schon lief**. Zwei Gegen
   („⏭ … riskant, Gap-Fade-Gefahr“); ist noch Luft, heißt es „🎯 … kann sich noch lohnen“
   samt einem groben Ausstiegs-Kursziel (aus der verbleibenden geschätzten Bewegung, sonst
   aus derselben Tagesspannen-Logik wie die normalen Stop-/Ziel-Vorschläge). Nur relevant,
-  wenn der Gap überhaupt `GAP_CHASE_MIN_GAP_PCT` (Standard 3 %) erreicht.
+  wenn der Gap überhaupt `GAP_CHASE_MIN_GAP_PCT` (Standard 3 %) erreicht. Der Alert zeigt
+  dazu **immer einen Text-Fortschrittsbalken** (`[███████░░░] 70% bis 'zu spät'`), der
+  auf einen Blick zeigt, wie nah der Gap an der "lohnt sich nicht mehr"-Schwelle ist —
+  bewusst als reiner Unicode-Balken statt eines generierten Bild-Charts, damit kein
+  zusätzlicher Dependency (matplotlib o.ä.) die Installationszeit der 48x/Tag frisch
+  aufgesetzten GitHub-Actions-Läufe verlangsamt.
+- **Verdichtete Kauf-/Verkaufsempfehlung** (`ENABLE_TRADE_RECOMMENDATION`, Standard an):
+  fasst Überzeugungs-Score, technische Zweitmeinung, Gap-Chase-Timing und Gerücht-/
+  Divergenz-Warnung des stärksten handelbaren Tickers zu **einer** klaren Zeile zusammen
+  (z.B. „📢 Empfehlung: 🟢 Jetzt kaufen (hohe Überzeugung)" oder „📢 Empfehlung: 🟠
+  Abwarten / nur kleine Position (Technik widerspricht klar)") — spart das manuelle
+  Zusammenreimen aus mehreren Alert-Zeilen. Rein additiv aus bereits vorhandenen
+  Signalen, kein zusätzlicher Claude-Call. **Keine Anlageberatung.**
 
 ## Robustheit / Reife dieser Version
 

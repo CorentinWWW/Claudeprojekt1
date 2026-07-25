@@ -48,10 +48,12 @@ def test_evaluate_gap_chase_pure():
     check("12/15 = 80% -> genau an der Schwelle -> zu spaet", r and r["too_late"] is True)
     check("used_fraction korrekt (0.8)", r and abs(r["used_fraction"] - 0.8) < 1e-9)
     check("remaining_pct korrekt (3.0)", r and abs(r["remaining_pct"] - 3.0) < 1e-9)
+    check("cutoff_fraction genau 1.0 an der Schwelle", r and abs(r["cutoff_fraction"] - 1.0) < 1e-9)
 
     r2 = evaluate_gap_chase("long", 6.0, expected_move_pct=15.0, too_late_ratio=0.8)
     check("6/15 = 40% -> noch nicht zu spaet", r2 and r2["too_late"] is False)
     check("remaining_pct korrekt (9.0)", r2 and abs(r2["remaining_pct"] - 9.0) < 1e-9)
+    check("cutoff_fraction 0.5 (40% von 80%-Schwelle)", r2 and abs(r2["cutoff_fraction"] - 0.5) < 1e-9)
 
     # Short: gap_pct ist vorzeichenbehaftet (negativ = Kurs gefallen), with_thesis positiv.
     r3 = evaluate_gap_chase("short", -6.0, expected_move_pct=15.0, too_late_ratio=0.8)
@@ -62,8 +64,11 @@ def test_evaluate_gap_chase_pure():
     r4 = evaluate_gap_chase("long", 7.0, too_late_abs_pct=6.0)
     check("ohne Erwartungswert, Gap 7% >= 6% -> zu spaet", r4 and r4["too_late"] is True)
     check("used_fraction ohne Erwartungswert None", r4 and r4["used_fraction"] is None)
+    check("cutoff_fraction ohne Erwartungswert trotzdem gesetzt (7/6 > 1)",
+          r4 and r4["cutoff_fraction"] > 1.0)
     r5 = evaluate_gap_chase("long", 4.0, too_late_abs_pct=6.0)
     check("ohne Erwartungswert, Gap 4% < 6% -> noch nicht zu spaet", r5 and r5["too_late"] is False)
+    check("cutoff_fraction 4/6 (0.667)", r5 and abs(r5["cutoff_fraction"] - (4.0 / 6.0)) < 1e-9)
 
 
 # ---------------------------------------------------------------------------

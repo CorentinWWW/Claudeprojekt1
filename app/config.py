@@ -198,6 +198,13 @@ GAP_CHASE_TOO_LATE_RATIO = _float("GAP_CHASE_TOO_LATE_RATIO", 0.8)
 # in % - ab dieser Gap-Groesse allein gilt es als "zu spaet", unabhaengig vom Kontext.
 GAP_CHASE_TOO_LATE_ABS_PCT = _float("GAP_CHASE_TOO_LATE_ABS_PCT", 6.0)
 
+# Nutzerwunsch: EINE klare, verdichtete Kauf-/Verkaufsempfehlung im Alert (statt die
+# einzelnen Signale - Score, Technik, Gap-Timing, Geruecht-Warnung - selbst zusammen-
+# reimen zu muessen), siehe scoring.trade_recommendation(). Rein additiv aus bereits
+# vorhandenen Signalen, kein zusaetzlicher Claude-Call. Standardmaessig AN wie die
+# uebrigen reinen Anreicherungs-Funktionen. KEINE Anlageberatung.
+ENABLE_TRADE_RECOMMENDATION = _bool("ENABLE_TRADE_RECOMMENDATION", True)
+
 # Kelly-lite Positionsanteil (#5): aus der historischen Trefferquote + mittlerem Gewinn/
 # Verlust einen groben, ausdruecklich unverbindlichen Bankroll-Anteil (Half-Kelly,
 # gedeckelt) ableiten und im Alert anzeigen. Braucht ausgewertete Ergebnisse
@@ -373,9 +380,13 @@ VIX_CONVICTION_PENALTY = _int("VIX_CONVICTION_PENALTY", 10)
 PAPER_TRADING = _bool("PAPER_TRADING", False)
 # Virtuelles Startkapital in EUR (Basiswert des Depots).
 PAPER_STARTING_CAPITAL = _float("PAPER_STARTING_CAPITAL", 500.0)
-# Hoechstens so viele gleichzeitig offene virtuelle Positionen (verhindert, dass das
-# Kapital in zu viele Kleinstpositionen zerfaellt).
-PAPER_MAX_POSITIONS = _int("PAPER_MAX_POSITIONS", 8)
+# Hoechstens so viele gleichzeitig offene virtuelle Positionen. Nutzerwunsch: fuer JEDEN
+# tatsaechlich verschickten Alert soll eine Position eroeffnet werden, nicht nur fuer die
+# ersten paar - der praktische Deckel gegen zu viele Kleinstpositionen ist ohnehin schon
+# der freie Barbestand (siehe compute_position/PAPER_MIN_STAKE: ohne freies Kapital wird
+# kein neuer Trade mehr eroeffnet, unabhaengig von diesem Wert). Dieser Wert ist daher nur
+# noch ein hohes Sicherheitsnetz, kein praktisches Limit mehr.
+PAPER_MAX_POSITIONS = _int("PAPER_MAX_POSITIONS", 100)
 # Mindesteinsatz je Position in EUR - faellt der freie Barbestand darunter, wird keine
 # neue Position mehr eroeffnet (kein sinnloser Dust-Trade).
 PAPER_MIN_STAKE = _float("PAPER_MIN_STAKE", 10.0)

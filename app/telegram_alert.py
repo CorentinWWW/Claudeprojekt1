@@ -20,7 +20,7 @@ from app.config import (
 )
 from app.db import Classification, RawStatement
 from app.market_hours import session_label, us_market_session
-from app.scoring import format_expected_move, high_volatility_text
+from app.scoring import format_expected_move, format_progress_bar, high_volatility_text
 
 logger = logging.getLogger(__name__)
 
@@ -365,6 +365,15 @@ def _format_message(
         tier_str = f" · {tier}" if tier else ""
         trailing += f"\n🎯 Überzeugung {conviction}/100{tier_str}"
 
+    # Verdichtete Kauf-/Verkaufsempfehlung (Nutzerwunsch): fasst Score + Technik +
+    # Gap-Timing + Geruecht-/Divergenz-Warnung zu einer klaren Handlungsansage zusammen.
+    rec = extras.get("recommendation")
+    if isinstance(rec, dict) and rec.get("label"):
+        trailing += f"\n📢 Empfehlung: {html.escape(str(rec['label']))}"
+        reasons = [r for r in (rec.get("reasons") or []) if isinstance(r, str)]
+        if reasons:
+            trailing += f" ({html.escape(', '.join(reasons))})"
+
     # Erwartete Bewegung + Horizont (#3) - direkt aus der Classification.
     move_str = format_expected_move(
         classification.expected_move_pct, classification.expected_horizon
@@ -458,6 +467,9 @@ def _format_message(
                 f"\n🎯 {ticker_part}bereits {gap_val:+.1f}% gegappt, aber noch nicht "
                 f"ausgereizt – Einstieg kann sich noch lohnen{target_str}."
             )
+        # Visualisierung (Nutzerwunsch): Balken zeigt, wie nah der Gap bereits an der
+        # "zu spät"-Schwelle ist - unabhängig davon, ob too_late schon erreicht ist.
+        trailing += f"\n{format_progress_bar(chase.get('cutoff_fraction'))}"
 
     # Technische Gesamtbewertung (TradingView-Stil) je handelbarem Ticker.
     tech_line = _technical_segment(extras.get("technical"))
