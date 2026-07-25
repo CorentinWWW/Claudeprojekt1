@@ -54,15 +54,17 @@ def _fresh(**env):
 def test_pure_helpers():
     _, config, db, prices, pt, orch = _fresh()
 
-    check("Sizing: hoher Score -> 30%", pt.position_fraction(90) == 0.30)
-    check("Sizing: mittel -> 22%", pt.position_fraction(75) == 0.22)
-    check("Sizing: Score None -> 16%", pt.position_fraction(None) == 0.16)
-    check("Sizing: niedrig -> 12%", pt.position_fraction(10) == 0.12)
+    # Anteile bewusst moderat, damit das Kapital ueber mehr Alerts reicht (siehe
+    # position_fraction-Docstring) - frueher 30/22/16/12%.
+    check("Sizing: hoher Score -> 15%", pt.position_fraction(90) == 0.15)
+    check("Sizing: mittel -> 12%", pt.position_fraction(75) == 0.12)
+    check("Sizing: Score None -> 9%", pt.position_fraction(None) == 0.09)
+    check("Sizing: niedrig -> 6%", pt.position_fraction(10) == 0.06)
 
-    # compute_position: 500 Depot, Score 90 -> 30% = 150 Einsatz, qty = 150/100 = 1.5
+    # compute_position: 500 Depot, Score 90 -> 15% = 75 Einsatz, qty = 75/100 = 0.75
     plan = pt.compute_position(500.0, 500.0, 90, 100.0, "long", day_high=105, day_low=95)
-    check("compute_position: Einsatz 150", plan["stake"] == 150.0)
-    check("compute_position: qty = 1.5", abs(plan["qty"] - 1.5) < 1e-9)
+    check("compute_position: Einsatz 75", plan["stake"] == 75.0)
+    check("compute_position: qty = 0.75", abs(plan["qty"] - 0.75) < 1e-9)
     check("compute_position: Stop < Einstieg (long)", plan["stop"] < 100.0)
     check("compute_position: Ziel > Einstieg (long)", plan["target"] > 100.0)
 
@@ -169,7 +171,7 @@ def test_open_positions_for_alert():
     check("Position eroeffnet (1 offen)", db.count_open_paper_positions() == 1)
     pos = db.get_open_paper_position_for_ticker("NVDA")
     check("Einstiegskurs gemerkt (100)", pos["entry_price"] == 100.0)
-    check("Einsatz 150 (Score 90 -> 30%)", pos["stake"] == 150.0)
+    check("Einsatz 75 (Score 90 -> 15%)", pos["stake"] == 75.0)
     check("Eroeffnung wurde per Telegram gemeldet", any("eröffnet" in s for s in sent))
 
     # Gleiche Richtung erneut -> NICHT aufstocken
@@ -200,8 +202,8 @@ def test_reversal_closes_and_reopens():
     check("alte Long-Position ist geschlossen", db.get_open_paper_position_for_ticker("NVDA")["direction"] == "short")
     check("genau eine offene Position (Short)", db.count_open_paper_positions() == 1)
     check("Long wurde realisiert (1 closed)", db.get_paper_closed_stats()["closed"] == 1)
-    # Long @100 -> exit @90, qty 1.5 -> -15 EUR
-    check("Umkehr-Verlust realisiert (~-15)", abs(db.get_paper_realized_pnl() - (-15.0)) < 1e-6)
+    # Long @100 -> exit @90, qty 0.75 (Einsatz 75 bei 15%) -> -7.50 EUR
+    check("Umkehr-Verlust realisiert (~-7.50)", abs(db.get_paper_realized_pnl() - (-7.5)) < 1e-6)
 
 
 def test_manage_closes_on_stop():
@@ -284,10 +286,10 @@ def test_capital_preservation_mode():
         PAPER_LOSS_STREAK_THRESHOLD="3", PAPER_LOSS_STREAK_SIZE_FACTOR="0.5"
     )
 
-    check("kein Streak -> normales Sizing", pt.position_fraction(90, loss_streak=0) == 0.30)
-    check("Streak unter Schwelle -> normales Sizing", pt.position_fraction(90, loss_streak=2) == 0.30)
-    check("Streak erreicht Schwelle -> halbiert", pt.position_fraction(90, loss_streak=3) == 0.15)
-    check("Streak ueber Schwelle -> weiterhin halbiert", pt.position_fraction(90, loss_streak=5) == 0.15)
+    check("kein Streak -> normales Sizing", pt.position_fraction(90, loss_streak=0) == 0.15)
+    check("Streak unter Schwelle -> normales Sizing", pt.position_fraction(90, loss_streak=2) == 0.15)
+    check("Streak erreicht Schwelle -> halbiert", abs(pt.position_fraction(90, loss_streak=3) - 0.075) < 1e-9)
+    check("Streak ueber Schwelle -> weiterhin halbiert", abs(pt.position_fraction(90, loss_streak=5) - 0.075) < 1e-9)
 
     # get_consecutive_paper_losses: 3 Verluste in Folge, dann ein Gewinn (juenger) -> Streak = 0.
     now = time.time()
@@ -322,9 +324,9 @@ def test_capital_preservation_mode():
     asyncio.run(pt.open_positions_for_alert(cls, statement_id=99, score=90))
     pos = db.get_open_paper_position_for_ticker("NVDA")
     # Realisierter Saldo der obigen 7 Trades: -10-10-10+10-10-10-10 = -50 -> Depotwert 450.
-    # Normal waer's 30% von 450 = 135; mit aktivem Kapitalerhalt-Modus 15% = 67.5.
-    check("Einsatz durch Kapitalerhalt-Modus halbiert (~67.5 statt ~135)",
-          abs(pos["stake"] - 67.5) < 1e-6)
+    # Normal waer's 15% von 450 = 67.5; mit aktivem Kapitalerhalt-Modus 7.5% = 33.75.
+    check("Einsatz durch Kapitalerhalt-Modus halbiert (~33.75 statt ~67.5)",
+          abs(pos["stake"] - 33.75) < 1e-6)
 
 
 def test_open_message_shows_session():
@@ -355,12 +357,152 @@ def test_paper_max_positions_default_is_high():
     check("Code-Standard PAPER_MAX_POSITIONS >= 50", config.PAPER_MAX_POSITIONS >= 50)
 
 
+def test_trailing_stop_pure():
+    """Trailing-Stop ('Gewinner laufen lassen'): reine Formel, ohne DB/Netz."""
+    _, config, db, prices, pt, orch = _fresh()
+    f = pt.trailing_stop_price
+
+    # Long, Einstieg 100, Stop 90 -> R = 10. Trail aktiviert ab +1R (Hoch >= 110).
+    check("noch nicht aktiv unterhalb activate_r (Hoch 105 = +0.5R)",
+          f("long", 100.0, 90.0, 105.0) is None)
+    check("genau an der Aktivierungsschwelle (Hoch 110 = +1R) -> aktiv",
+          f("long", 100.0, 90.0, 110.0) is not None)
+    # Bei Hoch 110 und distance 1R: Trail = 110 - 10 = 100 (= Break-even).
+    check("Trail bei +1R liegt auf Break-even (100)",
+          abs(f("long", 100.0, 90.0, 110.0) - 100.0) < 1e-9)
+    # Hoch 130 -> Trail = 120, sichert deutlichen Gewinn.
+    check("Trail zieht mit dem Hochpunkt mit (Hoch 130 -> Stop 120)",
+          abs(f("long", 100.0, 90.0, 130.0) - 120.0) < 1e-9)
+    # Der Trail darf NIE unter den urspruenglichen Stop zurueckfallen.
+    check("Trail faellt nie unter den Ausgangs-Stop",
+          f("long", 100.0, 90.0, 110.0) >= 90.0)
+
+    # Short spiegelverkehrt: Einstieg 100, Stop 110 -> R = 10, Gewinn wenn Kurs faellt.
+    check("Short: noch nicht aktiv (Tief 95 = +0.5R)", f("short", 100.0, 110.0, 95.0) is None)
+    check("Short: aktiv ab Tief 90 (+1R)", f("short", 100.0, 110.0, 90.0) is not None)
+    check("Short: Trail bei Tief 70 liegt bei 80",
+          abs(f("short", 100.0, 110.0, 70.0) - 80.0) < 1e-9)
+
+    # Robustheit
+    check("ungueltige Richtung -> None", f("sideways", 100.0, 90.0, 130.0) is None)
+    check("fehlender Stop -> None", f("long", 100.0, None, 130.0) is None)
+    check("fehlender Hochpunkt -> None", f("long", 100.0, 90.0, None) is None)
+    check("Risiko 0 (Stop == Einstieg) -> None", f("long", 100.0, 100.0, 130.0) is None)
+
+    # update_high_water
+    check("Long: Hochpunkt steigt", pt.update_high_water("long", 100.0, 110.0) == 110.0)
+    check("Long: Hochpunkt faellt NICHT", pt.update_high_water("long", 110.0, 100.0) == 110.0)
+    check("Short: Tiefpunkt faellt", pt.update_high_water("short", 100.0, 90.0) == 90.0)
+    check("Short: Tiefpunkt steigt NICHT", pt.update_high_water("short", 90.0, 100.0) == 90.0)
+    check("fehlender Startwert -> aktueller Kurs", pt.update_high_water("long", None, 105.0) == 105.0)
+
+
+def test_costs_pure():
+    """Handelskosten-Modell: beide Seiten, in Basispunkten auf den Positionswert."""
+    _, config, db, prices, pt, orch = _fresh()
+    # 10 bps je Seite auf 1000 Einsatz = 2 * 1000 * 0.001 = 2.00
+    check("10 bps auf 1000 Einsatz kosten 2.00 (beide Seiten)",
+          abs(pt.apply_costs(50.0, 1000.0, 10.0) - 48.0) < 1e-9)
+    check("0 bps -> unveraendert", pt.apply_costs(50.0, 1000.0, 0.0) == 50.0)
+    check("Kosten verschlechtern auch einen Verlust",
+          abs(pt.apply_costs(-50.0, 1000.0, 10.0) - (-52.0)) < 1e-9)
+    check("Einsatz 0 -> unveraendert", pt.apply_costs(50.0, 0.0, 10.0) == 50.0)
+    check("Code-Standard PAPER_COST_BPS ist 0 (Tests bleiben exakt)",
+          config.PAPER_COST_BPS == 0.0)
+
+
+def test_trailing_stop_end_to_end():
+    """Trailing-Stop ueber manage_open_positions: Kurs laeuft weit ins Plus, faellt dann
+    zurueck -> die Position wird zum NACHGEZOGENEN Stop geschlossen (nicht zum
+    urspruenglichen), also mit Gewinn statt Verlust."""
+    _, config, db, prices, pt, orch = _fresh(PAPER_TRAILING_STOP="true")
+    from app.db import Classification
+
+    _install_fakes(pt, orch, {
+        "NVDA": {"price": 100.0, "high": 102.0, "low": 98.0, "change_pct": 0.0},
+    })
+    cls = Classification(is_market_relevant=True, sentiment="positive", confidence=0.95,
+                         ticker_calls=[{"ticker": "NVDA", "direction": "long", "confidence": 0.95}])
+    asyncio.run(pt.open_positions_for_alert(cls, statement_id=1, score=90))
+    pos = db.get_open_paper_position_for_ticker("NVDA")
+    entry, initial_stop = pos["entry_price"], pos["stop"]
+    risk = entry - initial_stop
+    check("Ausgangs-Stop liegt unter dem Einstieg", risk > 0)
+    check("high_water startet beim Einstiegskurs", pos["high_water"] == entry)
+
+    # Kurs laeuft auf +3R -> Trail sollte auf +2R nachziehen, Position bleibt offen.
+    top_price = entry + 3 * risk
+    _install_fakes(pt, orch, {"NVDA": {"price": top_price, "high": top_price, "low": entry,
+                                       "change_pct": 10.0}})
+    asyncio.run(pt.manage_open_positions())
+    pos2 = db.get_open_paper_position_for_ticker("NVDA")
+    check("Position bei +3R noch offen (kein fixes Ziel mehr)", pos2 is not None)
+    check("high_water auf den Hochpunkt gezogen", abs(pos2["high_water"] - top_price) < 1e-6)
+    check("Stop wurde nachgezogen (jetzt ueber dem Einstieg)", pos2["stop"] > entry)
+    check("Stop liegt bei ~+2R", abs(pos2["stop"] - (entry + 2 * risk)) < 1e-6)
+
+    # Kurs faellt auf den nachgezogenen Stop zurueck -> Schliessung MIT Gewinn.
+    fallback = pos2["stop"] - 0.01
+    _install_fakes(pt, orch, {"NVDA": {"price": fallback, "high": top_price, "low": fallback,
+                                       "change_pct": -5.0}})
+    asyncio.run(pt.manage_open_positions())
+    check("Position durch Trailing-Stop geschlossen", db.count_open_paper_positions() == 0)
+    check("Trailing-Stop realisierte einen GEWINN (statt Verlust am Ausgangs-Stop)",
+          db.get_paper_realized_pnl() > 0)
+
+
+def test_time_exit():
+    """Zeit-Exit: eine Position, die weder Stop noch Ziel erreicht, wird nach
+    PAPER_MAX_HOLDING_HOURS glattgestellt und gibt ihr Kapital wieder frei."""
+    _, config, db, prices, pt, orch = _fresh(
+        PAPER_MAX_HOLDING_HOURS="24", PAPER_TRAILING_STOP="false"
+    )
+    from app.db import Classification
+
+    _install_fakes(pt, orch, {
+        "NVDA": {"price": 100.0, "high": 102.0, "low": 98.0, "change_pct": 0.0},
+    })
+    cls = Classification(is_market_relevant=True, sentiment="positive", confidence=0.95,
+                         ticker_calls=[{"ticker": "NVDA", "direction": "long", "confidence": 0.95}])
+    asyncio.run(pt.open_positions_for_alert(cls, statement_id=1, score=90))
+    pid = db.get_open_paper_position_for_ticker("NVDA")["id"]
+    free_before = pt.account_snapshot()["free_cash"]
+
+    # Kurs bleibt zwischen Stop und Ziel -> ohne Zeit-Exit bliebe die Position ewig offen.
+    _install_fakes(pt, orch, {"NVDA": {"price": 100.5, "high": 102.0, "low": 99.0,
+                                       "change_pct": 0.5}})
+    asyncio.run(pt.manage_open_positions())
+    check("frisch eroeffnete Position bleibt offen", db.count_open_paper_positions() == 1)
+
+    # Einstieg kuenstlich 25h zurueckdatieren -> Haltedauer ueberschritten.
+    with db.get_conn() as conn:
+        conn.execute("UPDATE paper_positions SET entry_ts = ? WHERE id = ?",
+                     (time.time() - 25 * 3600, pid))
+    _install_fakes(pt, orch, {"NVDA": {"price": 100.5, "high": 102.0, "low": 99.0,
+                                       "change_pct": 0.5}})
+    asyncio.run(pt.manage_open_positions())
+    check("Position nach Ueberschreiten der Haltedauer geschlossen",
+          db.count_open_paper_positions() == 0)
+    check("Kapital wieder frei (mehr als vorher gebunden)",
+          pt.account_snapshot()["free_cash"] > free_before)
+
+    # Deaktiviert (0) -> kein Zeit-Exit.
+    _, config2, db2, prices2, pt2, orch2 = _fresh(
+        PAPER_MAX_HOLDING_HOURS="0", PAPER_TRAILING_STOP="false"
+    )
+    check("PAPER_MAX_HOLDING_HOURS=0 -> Zeit-Exit aus", config2.PAPER_MAX_HOLDING_HOURS == 0)
+
+    check("holding_hours rechnet korrekt (~2h)",
+          abs(pt.holding_hours(time.time() - 7200) - 2.0) < 0.01)
+    check("holding_hours ohne Zeitstempel -> None", pt.holding_hours(None) is None)
+
+
 def test_capital_preservation_disabled():
     """PAPER_CAPITAL_PRESERVATION=false -> kein Effekt, egal wie lang der Streak."""
     _, config, db, prices, pt, orch = _fresh(
         PAPER_CAPITAL_PRESERVATION="false", PAPER_LOSS_STREAK_THRESHOLD="3",
     )
-    check("deaktiviert: Streak hat keinen Effekt", pt.position_fraction(90, loss_streak=10) == 0.30)
+    check("deaktiviert: Streak hat keinen Effekt", pt.position_fraction(90, loss_streak=10) == 0.15)
 
 
 def main():
@@ -375,6 +517,10 @@ def main():
     test_capital_preservation_disabled()
     test_open_message_shows_session()
     test_paper_max_positions_default_is_high()
+    test_trailing_stop_pure()
+    test_costs_pure()
+    test_trailing_stop_end_to_end()
+    test_time_exit()
 
     print()
     if failures:

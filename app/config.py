@@ -395,6 +395,46 @@ PAPER_MIN_STAKE = _float("PAPER_MIN_STAKE", 10.0)
 # Schliessungen werden IMMER sofort gemeldet, unabhaengig davon. 0 = bei jedem Zyklus.
 PAPER_STATUS_INTERVAL_MINUTES = _int("PAPER_STATUS_INTERVAL_MINUTES", 30)
 
+# --- Maximale Haltedauer (Kapital-Recycling) ---
+# Ohne Zeit-Exit bleibt eine Position, die weder Stop noch Ziel erreicht, UNBEGRENZT
+# offen und bindet ihren Einsatz dauerhaft. Da der freie Barbestand (nicht
+# PAPER_MAX_POSITIONS) der eigentlich bindende Faktor ist, waeren nach den ersten
+# Alerts saemtliche Mittel gebunden und JEDER weitere Alert bekaeme keine Position mehr -
+# genau das Gegenteil des Nutzerwunsches "bei allen Alerts eine Position eroeffnen".
+# Nach so vielen Stunden wird eine Position daher zum aktuellen Kurs glattgestellt
+# (close_reason 'timeout'). Sinnvoll am Signal-Horizont orientiert: die Erfolgsmessung
+# wertet ohnehin nach PRICE_OUTCOME_HORIZON_MINUTES aus - eine Position tagelang zu
+# halten testet etwas anderes als das, was das Signal behauptet. 0 = aus (unbegrenzt).
+PAPER_MAX_HOLDING_HOURS = _float("PAPER_MAX_HOLDING_HOURS", 24.0)
+
+# --- Trailing-Stop ("Gewinner laufen lassen") ---
+# Ohne Trailing-Stop ist der Gewinn je Trade hart bei ~1.5R gedeckelt (siehe
+# prices.suggest_risk_levels: Stop 1 Tagesspanne, Ziel 1.5), waehrend der Verlust 1R
+# betraegt. Break-even braucht damit rechnerisch 40% Trefferquote - exakt der Wert, den
+# ein reiner Zufallskurs liefert (1/(1+1.5)). Der Erwartungswert haengt also vollstaendig
+# davon ab, dass das Nachrichtensignal echte Vorhersagekraft hat, und Spread/Slippage
+# fressen den Rest. Ein nachziehender Stop dreht dieses Verhaeltnis: einzelne, stark
+# laufende Nachrichten-Bewegungen duerfen weit ueber 1.5R hinauslaufen, was den mittleren
+# Gewinn hebt, ohne den Verlust je Trade zu vergroessern. Standard AN.
+PAPER_TRAILING_STOP = _bool("PAPER_TRAILING_STOP", True)
+# Ab wie viel Gewinn (in Vielfachen des Anfangsrisikos R) der Trailing-Stop aktiv wird.
+# Bis dahin gilt der urspruengliche Stop unveraendert. 1.0 = sobald der Trade so weit im
+# Plus liegt, wie sein Stop entfernt ist.
+PAPER_TRAIL_ACTIVATE_R = _float("PAPER_TRAIL_ACTIVATE_R", 1.0)
+# Wie weit (in R) der nachgezogene Stop hinter dem bisherigen Hochpunkt (bei Short:
+# Tiefpunkt) der Position bleibt. Kleiner = sichert mehr, wird aber frueher ausgestoppt.
+PAPER_TRAIL_DISTANCE_R = _float("PAPER_TRAIL_DISTANCE_R", 1.0)
+
+# --- Handelskosten-Modell (Realismus der Paper-Ergebnisse) ---
+# Das virtuelle Depot rechnet Ein- und Ausstieg bisher zum selben Mittelkurs, ohne
+# Spread/Gebuehren - die ausgewiesene Rendite ist damit systematisch zu optimistisch,
+# gerade bei vielen kleinen Trades. Kosten je Seite in Basispunkten (10 bps = 0.1%) auf
+# den Positionswert. Nicht "profitabler", aber EHRLICHER: eine Strategie, die nur ohne
+# Kosten funktioniert, sollte man nicht mit echtem Geld nachbauen. Code-Standard 0
+# (haelt die Unit-Tests exakt/deterministisch); in .env.example und im Workflow ist ein
+# realistischer Wert gesetzt.
+PAPER_COST_BPS = _float("PAPER_COST_BPS", 0.0)
+
 # --- Kapitalerhalt-Modus (dynamisches Paper-Sizing nach Verlustserie) ---
 # Nach mehreren aufeinanderfolgenden Verlust-Trades das Positions-Sizing automatisch
 # verkleinern (Risk-off), statt nach einer Pechstraehne unveraendert weiterzumachen -
