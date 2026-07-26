@@ -257,7 +257,13 @@ def test_rss_bozo_feed_logs_warning():
                 return Resp()
 
         result = asyncio.run(src._fetch_feed("https://example.com/rss", FakeClient()))
-        check("kaputtes Feed-XML liefert leere Entries-Liste (kein Crash)", result == [])
+        # Frueher wurde hier auf [] geprueft. _fetch_feed unterscheidet inzwischen
+        # bewusst: None = Feed kaputt/nicht erreichbar, [] = Feed in Ordnung, aber ohne
+        # Eintraege. Ohne diese Unterscheidung war ein dauerhaft degradierter Feed
+        # (Bot-Challenge/Paywall) von "gerade keine Meldungen" nicht zu trennen (siehe
+        # tests/test_source_failure_visibility.py). Die eigentliche Zusicherung dieses
+        # Tests - kein Absturz + Warnung im Log - gilt unveraendert.
+        check("kaputtes Feed-XML liefert None statt Eintraegen (kein Crash)", result is None)
         check("bozo-Warnung wird geloggt",
               any("kein gueltiges Feed-Format" in m for m in records))
     finally:

@@ -1580,6 +1580,9 @@ async def poll_once(sources, semaphore: asyncio.Semaphore):
     for source in sources:
         health = source_health[source.name]
         health["last_poll_at"] = time.time()
+        # Vor jedem Poll zuruecksetzen, damit last_failure immer den AKTUELLEN Abruf
+        # beschreibt und ein einmaliger Ausfall nicht dauerhaft haengen bleibt.
+        source.last_failure = None
         t_fetch = time.time()
         try:
             raw_statements = await source.poll()
@@ -1592,6 +1595,17 @@ async def poll_once(sources, semaphore: asyncio.Semaphore):
             log_pipeline_timing(
                 cycle_id, f"poll_source:{source.name}", t_fetch, (time.time() - t_fetch) * 1000
             )
+
+        # Die Quellen fangen ihre Netzwerk-/Parse-Fehler selbst ab und liefern dann
+        # eine leere Liste (damit ein kaputter Feed nicht den ganzen Zyklus mitreisst).
+        # Ohne diese Abfrage kaeme die Ausnahme nie hier an und eine dauerhaft tote
+        # Quelle waere von "gerade keine passenden Meldungen" nicht zu unterscheiden -
+        # sie behielte auf Dauer ihr gruenes Haekchen in Dashboard und Live-Signal.
+        if source.last_failure:
+            logger.warning("Quelle %s meldet Fehlschlag: %s", source.name, source.last_failure)
+            health["last_error"] = source.last_failure
+            health["last_error_at"] = time.time()
+            continue
 
         health["last_success_at"] = time.time()
         health["total_fetched"] += len(raw_statements)
