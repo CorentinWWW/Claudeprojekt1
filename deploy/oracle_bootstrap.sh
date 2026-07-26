@@ -55,7 +55,13 @@ echo "== [3/5] Repo klonen =="
 if [ ! -d "$APP_DIR" ]; then
   git clone --branch "$BRANCH" "$REPO_URL" "$APP_DIR"
 else
-  echo "$APP_DIR existiert bereits, ueberspringe Klonen."
+  echo "$APP_DIR existiert bereits - hole stattdessen neue Commits."
+  # Ohne dieses Update wuerde ein erneuter Lauf auf einer bestehenden Installation
+  # (z.B. um wie hier den Auto-Update-Cron nachzuruesten) mit einem veralteten Stand
+  # weiterarbeiten - neue Dateien wie deploy/auto_update.sh waeren dann noch gar
+  # nicht vorhanden und Schritt [5/5] wuerde fehlschlagen.
+  git -C "$APP_DIR" fetch origin "$BRANCH" --quiet
+  git -C "$APP_DIR" merge --ff-only "origin/$BRANCH"
 fi
 cd "$APP_DIR"
 
