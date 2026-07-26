@@ -5,145 +5,209 @@
 <title>Market Impact Predictor</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <style>
-  :root { color-scheme: light dark; }
+  /* Farben als Custom Properties, damit Hell/Dunkel EIN Regelsatz bleibt. Vorher war
+     das Dashboard trotz "color-scheme: light dark" hart dunkel verdrahtet - auf einem
+     Geraet im Hellmodus sah es dadurch wie ein Fehler aus. */
+  :root {
+    color-scheme: light dark;
+    --bg: #f6f7f9;
+    --panel: #ffffff;
+    --panel-alt: #f0f2f5;
+    --border: #dfe3e8;
+    --text: #1b1f24;
+    --text-dim: #5c6672;
+    --accent: #2d6fe0;
+    --ok: #17914d;
+    --warn: #b07500;
+    --err: #c62828;
+    --shadow: 0 1px 3px rgba(0,0,0,0.06), 0 1px 2px rgba(0,0,0,0.04);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0b0d10;
+      --panel: #14171c;
+      --panel-alt: #1c2027;
+      --border: #2a2f36;
+      --text: #e6e6e6;
+      --text-dim: #9aa0a6;
+      --accent: #6ea8fe;
+      --ok: #2ecc71;
+      --warn: #f1c40f;
+      --err: #e74c3c;
+      --shadow: none;
+    }
+  }
+
+  * { box-sizing: border-box; }
   body {
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-    max-width: 900px;
+    max-width: 1000px;
     margin: 0 auto;
-    padding: 1.5rem;
-    background: #0b0d10;
-    color: #e6e6e6;
+    padding: 1.25rem 1rem 3rem;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.5;
   }
-  h1 { font-size: 1.4rem; margin-bottom: 0.25rem; }
-  h2 { font-size: 1rem; margin: 0 0 0.5rem; color: #c7c7c7; }
-  .subtitle { color: #9aa0a6; font-size: 0.85rem; margin-bottom: 1.25rem; }
+
+  header { margin-bottom: 1.25rem; }
+  h1 { font-size: 1.35rem; margin: 0 0 0.15rem; }
+  h2 {
+    font-size: 0.78rem; margin: 0 0 0.75rem; color: var(--text-dim);
+    text-transform: uppercase; letter-spacing: 0.06em; font-weight: 600;
+  }
+  .subtitle { color: var(--text-dim); font-size: 0.82rem; }
 
   .banner {
-    border-radius: 8px;
-    padding: 0.6rem 0.9rem;
-    margin-bottom: 1rem;
-    font-size: 0.85rem;
+    border-radius: 8px; padding: 0.6rem 0.9rem; margin-bottom: 0.6rem; font-size: 0.85rem;
+    border: 1px solid transparent;
   }
-  .banner.error { background: #3a1414; border: 1px solid #7a2020; color: #ffb3b3; }
-  .banner.warning { background: #3a3014; border: 1px solid #7a6420; color: #ffe2a8; }
+  .banner.error { background: color-mix(in srgb, var(--err) 12%, transparent); border-color: var(--err); }
+  .banner.warning { background: color-mix(in srgb, var(--warn) 15%, transparent); border-color: var(--warn); }
 
   .panel {
-    border: 1px solid #2a2f36;
-    border-radius: 10px;
-    padding: 0.9rem 1.1rem;
-    margin-bottom: 1rem;
-    background: #14171c;
+    border: 1px solid var(--border); border-radius: 12px; padding: 1rem 1.1rem;
+    margin-bottom: 1rem; background: var(--panel); box-shadow: var(--shadow);
   }
 
-  .status-row { display: flex; flex-wrap: wrap; gap: 0.5rem; }
-  .status-chip {
-    display: flex; align-items: center; gap: 0.4rem;
-    background: #1c2027; border-radius: 8px; padding: 0.3rem 0.6rem;
-    font-size: 0.78rem; color: #c7c7c7;
+  /* Kennzahlen-Raster statt flex-wrap mit festem gap: auf dem Handy brach die alte
+     .stats-row unschoen um (eine Kennzahl pro Zeile, viel Leerraum). */
+  .metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(105px, 1fr)); gap: 0.9rem; }
+  .metric .value { font-size: 1.4rem; font-weight: 650; letter-spacing: -0.02em; }
+  .metric .label { font-size: 0.71rem; color: var(--text-dim); line-height: 1.3; }
+  .metric.pos .value { color: var(--ok); }
+  .metric.neg .value { color: var(--err); }
+
+  /* Depot-Kachel: die wichtigste Zahl im Dashboard bekommt auch optisch den Vorrang. */
+  .hero { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0.6rem 1rem; margin-bottom: 0.9rem; }
+  .hero .big { font-size: 2.1rem; font-weight: 700; letter-spacing: -0.03em; line-height: 1.1; }
+  .hero .delta { font-size: 1rem; font-weight: 600; }
+  .hero .delta.pos { color: var(--ok); }
+  .hero .delta.neg { color: var(--err); }
+
+  .bar { height: 6px; border-radius: 3px; background: var(--panel-alt); overflow: hidden; margin: 0.5rem 0 0.35rem; }
+  .bar > span { display: block; height: 100%; background: var(--accent); }
+
+  .chips { display: flex; flex-wrap: wrap; gap: 0.45rem; }
+  .chip {
+    display: inline-flex; align-items: center; gap: 0.4rem; background: var(--panel-alt);
+    border-radius: 999px; padding: 0.3rem 0.7rem; font-size: 0.76rem; color: var(--text-dim);
   }
   .dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
-  .dot.ok { background: #2ecc71; }
-  .dot.warn { background: #f1c40f; }
-  .dot.error { background: #e74c3c; }
-  .dot.unknown { background: #555; }
+  .dot.ok { background: var(--ok); }
+  .dot.warn { background: var(--warn); }
+  .dot.error { background: var(--err); }
+  .dot.unknown { background: var(--text-dim); }
 
-  .stats-row { display: flex; flex-wrap: wrap; gap: 1.5rem; }
-  .stat { min-width: 90px; }
-  .stat .value { font-size: 1.3rem; font-weight: 600; }
-  .stat .label { font-size: 0.72rem; color: #9aa0a6; }
-  .stat.positive .value { color: #2ecc71; }
-  .stat.negative .value { color: #e74c3c; }
-
-  .test-form { display: flex; flex-direction: column; gap: 0.5rem; }
-  textarea {
-    background: #0b0d10; color: #e6e6e6; border: 1px solid #2a2f36; border-radius: 8px;
-    padding: 0.6rem; font-family: inherit; font-size: 0.9rem; resize: vertical; min-height: 4.5rem;
+  input[type=password], input[type=text], textarea {
+    background: var(--bg); color: var(--text); border: 1px solid var(--border);
+    border-radius: 8px; padding: 0.55rem 0.7rem; font-family: inherit; font-size: 0.88rem;
+    width: 100%;
   }
-  .test-form-row { display: flex; gap: 0.75rem; align-items: center; }
+  textarea { resize: vertical; min-height: 4.5rem; }
   button {
-    background: #2d6fe0; color: white; border: none; border-radius: 8px;
-    padding: 0.5rem 1rem; font-size: 0.85rem; cursor: pointer;
+    background: var(--accent); color: #fff; border: none; border-radius: 8px;
+    padding: 0.55rem 1.1rem; font-size: 0.85rem; font-weight: 500; cursor: pointer;
   }
-  button:disabled { background: #444; cursor: default; }
-  #testResult { font-size: 0.85rem; white-space: pre-wrap; margin-top: 0.4rem; }
+  button:disabled { opacity: 0.5; cursor: default; }
+  button.ghost { background: transparent; color: var(--text-dim); border: 1px solid var(--border); }
+  .row { display: flex; gap: 0.6rem; align-items: center; flex-wrap: wrap; }
+  label { font-size: 0.84rem; color: var(--text-dim); }
 
-  .filters { margin-bottom: 1rem; display: flex; gap: 0.75rem; align-items: center; }
+  /* Zugriffs-Panel belegte bisher dauerhaft den besten Platz ganz oben, obwohl der
+     Key nur einmal eingegeben wird. Ist er gesetzt, schrumpft es auf eine Zeile. */
+  details.access summary {
+    cursor: pointer; font-size: 0.78rem; color: var(--text-dim); list-style: none;
+    text-transform: uppercase; letter-spacing: 0.06em; font-weight: 600;
+  }
+  details.access summary::-webkit-details-marker { display: none; }
+  details.access summary::before { content: "▸ "; }
+  details.access[open] summary::before { content: "▾ "; }
+  details.access[open] summary { margin-bottom: 0.75rem; }
+
   .card {
-    border: 1px solid #2a2f36;
-    border-radius: 10px;
-    padding: 0.9rem 1.1rem;
-    margin-bottom: 0.75rem;
-    background: #14171c;
+    border: 1px solid var(--border); border-left-width: 3px; border-radius: 10px;
+    padding: 0.8rem 1rem; margin-bottom: 0.6rem; background: var(--panel);
   }
-  .card.positive { border-left: 4px solid #2ecc71; }
-  .card.negative { border-left: 4px solid #e74c3c; }
-  .card.neutral  { border-left: 4px solid #7f8c8d; }
-  .card.duplicate { opacity: 0.55; }
-  .meta { font-size: 0.75rem; color: #9aa0a6; margin-bottom: 0.4rem; }
-  .text { font-size: 0.95rem; margin-bottom: 0.5rem; }
-  .tags { font-size: 0.8rem; color: #c7c7c7; }
+  .card.positive { border-left-color: var(--ok); }
+  .card.negative { border-left-color: var(--err); }
+  .card.neutral  { border-left-color: var(--text-dim); }
+  .card.duplicate { opacity: 0.5; }
+  .meta { font-size: 0.73rem; color: var(--text-dim); margin-bottom: 0.35rem; }
+  .text { font-size: 0.92rem; margin-bottom: 0.5rem; }
+  .tags { font-size: 0.78rem; color: var(--text-dim); }
   .tag {
-    display: inline-block;
-    background: #23272e;
-    border-radius: 6px;
-    padding: 0.1rem 0.5rem;
-    margin-right: 0.3rem;
+    display: inline-block; background: var(--panel-alt); border-radius: 6px;
+    padding: 0.1rem 0.5rem; margin: 0 0.25rem 0.25rem 0; color: var(--text);
   }
-  a { color: #6ea8fe; }
-  .empty { color: #9aa0a6; font-style: italic; }
-  label { font-size: 0.85rem; color: #c7c7c7; }
+  a { color: var(--accent); }
+  .empty { color: var(--text-dim); font-style: italic; font-size: 0.85rem; }
+  .skeleton { color: var(--text-dim); font-size: 0.85rem; }
+  #testResult { font-size: 0.84rem; margin-top: 0.5rem; }
+  #testResult .tag { font-size: 0.78rem; }
+  .disclaimer { font-size: 0.72rem; color: var(--text-dim); margin-top: 1.5rem; text-align: center; }
 </style>
 </head>
 <body>
-  <h1>📈 Market Impact Predictor</h1>
-  <div class="subtitle">
-    Automatische Markteinschätzung marktrelevanter Nachrichten via Claude – keine Finanzberatung. Aktualisiert alle 15s.
-  </div>
+  <header>
+    <h1>📈 Market Impact Predictor</h1>
+    <div class="subtitle">
+      Automatische Markteinschätzung marktrelevanter Nachrichten via Claude —
+      keine Finanzberatung. <span id="refreshNote">Aktualisiert alle 15s.</span>
+    </div>
+  </header>
 
   <div id="banners">
     <div id="authBanner"></div>
     <div id="healthBanners"></div>
   </div>
 
-  <div class="panel">
-    <h2>Zugriff</h2>
-    <div class="test-form-row">
-      <input type="password" id="apiKeyInput" placeholder="X-API-Key (falls DASHBOARD_API_KEY gesetzt ist)" style="flex:1; background:#0b0d10; color:#e6e6e6; border:1px solid #2a2f36; border-radius:8px; padding:0.5rem;">
-      <button onclick="saveApiKey()">Speichern</button>
-    </div>
+  <div class="panel" id="paperPanel" hidden>
+    <h2>Paper-Depot</h2>
+    <div id="paperBody" class="skeleton">lädt…</div>
   </div>
 
   <div class="panel">
-    <h2>Status der Quellen</h2>
-    <div class="status-row" id="statusRow"></div>
-  </div>
-
-  <div class="panel">
-    <h2>Statistik</h2>
-    <div class="stats-row" id="statsRow"></div>
+    <h2>Status</h2>
+    <div class="chips" id="statusRow"><span class="skeleton">lädt…</span></div>
   </div>
 
   <div class="panel">
     <h2>Trefferquote (Backtesting)</h2>
-    <div class="stats-row" id="calibrationRow"></div>
+    <div class="metrics" id="calibrationRow"><span class="skeleton">lädt…</span></div>
+  </div>
+
+  <div class="panel">
+    <h2>Statistik</h2>
+    <div class="metrics" id="statsRow"><span class="skeleton">lädt…</span></div>
+  </div>
+
+  <div class="panel">
+    <details class="access" id="accessDetails">
+      <summary>Zugriff</summary>
+      <div class="row">
+        <input type="password" id="apiKeyInput" style="flex:1; min-width:180px;"
+               placeholder="X-API-Key (falls DASHBOARD_API_KEY gesetzt ist)">
+        <button onclick="saveApiKey()">Speichern</button>
+      </div>
+    </details>
   </div>
 
   <div class="panel">
     <h2>Pipeline testen</h2>
-    <div class="test-form">
-      <textarea id="testText" placeholder="z.B. Ich werde 25% Zölle auf alle importierten Autos erheben.">Ich werde 25% Zölle auf alle importierten Halbleiter erheben, das betrifft auch Taiwan.</textarea>
-      <div class="test-form-row">
-        <button id="testBtn" onclick="runTest()">Durch Claude jagen</button>
-        <label><input type="checkbox" id="testTelegram" checked> Bei Relevanz auch Telegram-Alert senden</label>
-      </div>
-      <div id="testResult"></div>
+    <textarea id="testText" placeholder="z.B. Ich werde 25% Zölle auf alle importierten Autos erheben.">Ich werde 25% Zölle auf alle importierten Halbleiter erheben, das betrifft auch Taiwan.</textarea>
+    <div class="row" style="margin-top:0.6rem;">
+      <button id="testBtn" onclick="runTest()">Durch Claude jagen</button>
+      <label><input type="checkbox" id="testTelegram" checked> Bei Relevanz auch Telegram-Alert senden</label>
     </div>
+    <div id="testResult"></div>
   </div>
 
-  <div class="filters">
+  <div class="row" style="margin-bottom:0.75rem;">
     <label><input type="checkbox" id="onlyRelevant"> Nur marktrelevante Aussagen</label>
   </div>
-  <div id="feed"></div>
+  <div id="feed"><span class="skeleton">lädt…</span></div>
+
+  <div class="disclaimer">Paper-Trading mit virtuellem Geld · keine Anlageberatung</div>
 
 <script>
 const feed = document.getElementById('feed');
@@ -179,7 +243,14 @@ function saveApiKey() {
   } else {
     localStorage.removeItem('dashboardApiKey');
   }
+  syncAccessPanel();
   refreshAll();
+}
+
+// Ist der Key gesetzt, bleibt das Zugriffs-Panel eingeklappt - es wird einmal
+// ausgefuellt und danach nie wieder gebraucht.
+function syncAccessPanel() {
+  document.getElementById('accessDetails').open = !getApiKey();
 }
 
 async function apiFetch(url, options = {}) {
@@ -195,7 +266,8 @@ async function apiFetch(url, options = {}) {
   const authBanner = document.getElementById('authBanner');
   if (res.status === 401) {
     authBanner.innerHTML =
-      '<div class="banner error">⛔ Fehlender/falscher API-Key - oben unter "Zugriff" den korrekten X-API-Key eintragen.</div>';
+      '<div class="banner error">⛔ Fehlender/falscher API-Key — unten unter "Zugriff" den korrekten X-API-Key eintragen.</div>';
+    document.getElementById('accessDetails').open = true;
   } else {
     authBanner.innerHTML = '';
   }
@@ -224,12 +296,67 @@ function timeAgo(ts) {
   return `vor ${Math.round(secs / 3600)}h`;
 }
 
+function eur(v) { return (v == null ? '–' : v.toFixed(2) + '€'); }
+function signed(v, digits = 2, suffix = '') {
+  if (v == null) return '–';
+  return (v >= 0 ? '+' : '') + v.toFixed(digits) + suffix;
+}
+function metric(value, label, cls = '') {
+  return `<div class="metric ${cls}"><div class="value">${value}</div><div class="label">${label}</div></div>`;
+}
+
+// Das Paper-Depot ist die interessanteste Zahl des ganzen Systems, tauchte im
+// Dashboard bisher aber gar nicht auf - /api/paper existierte, wurde nur nie
+// abgefragt. Bekommt deshalb den obersten Platz und die groesste Schrift.
+async function loadPaper() {
+  const panel = document.getElementById('paperPanel');
+  const body = document.getElementById('paperBody');
+  let p;
+  try {
+    const res = await apiFetch('/api/paper');
+    if (!res.ok) { panel.hidden = true; return; }
+    p = await res.json();
+  } catch { panel.hidden = true; return; }
+
+  if (!p || !p.enabled) { panel.hidden = true; return; }
+  panel.hidden = false;
+
+  const ret = p.total_return_pct;
+  const cls = ret == null ? '' : (ret >= 0 ? 'pos' : 'neg');
+  const winPct = p.win_rate == null ? '–' : Math.round(p.win_rate * 100) + '%';
+  // Anteil des gebundenen Kapitals - zeigt auf einen Blick, ob ueberhaupt noch Mittel
+  // fuer neue Positionen frei sind (haeufigster Grund fuer "Alert, aber keine Position").
+  const total = (p.free_cash || 0) + (p.open_stake || 0);
+  const boundPct = total > 0 ? Math.round((p.open_stake / total) * 100) : 0;
+
+  body.className = '';
+  body.innerHTML = `
+    <div class="hero">
+      <span class="big">${eur(p.account_value)}</span>
+      <span class="delta ${cls}">${signed(ret, 1, '%')}</span>
+      <span class="label" style="color:var(--text-dim); font-size:0.78rem;">
+        Start ${eur(p.starting_capital)}
+      </span>
+    </div>
+    <div class="bar"><span style="width:${boundPct}%"></span></div>
+    <div class="label" style="color:var(--text-dim); font-size:0.72rem; margin-bottom:0.9rem;">
+      ${eur(p.open_stake)} gebunden · ${eur(p.free_cash)} frei für neue Positionen
+    </div>
+    <div class="metrics">
+      ${metric(signed(p.realized_pnl), 'Realisiert', (p.realized_pnl || 0) >= 0 ? 'pos' : 'neg')}
+      ${metric(winPct, `Trefferquote (${p.closed_trades || 0} Trades)`)}
+      ${metric(p.wins || 0, 'Gewinner')}
+      ${metric((p.closed_trades || 0) - (p.wins || 0), 'Verlierer')}
+    </div>`;
+}
+
 async function loadFeed() {
   const params = new URLSearchParams({
     limit: '50',
     only_relevant: onlyRelevant.checked ? 'true' : 'false',
   });
   const res = await apiFetch('/api/statements?' + params.toString());
+  if (!res.ok) { feed.innerHTML = '<div class="empty">Feed nicht abrufbar.</div>'; return; }
   const items = await res.json();
 
   if (!items.length) {
@@ -275,15 +402,15 @@ function renderCard(item) {
   // Quellen (RSS/GDELT/Truth Social) - ohne noopener koennte die geoeffnete Seite per
   // window.opener dieses Dashboard-Tab umleiten (Reverse-Tabnabbing), z.B. auf eine
   // Phishing-Seite fuer den in localStorage liegenden DASHBOARD_API_KEY.
-  const link = itemUrl ? `<a href="${escapeAttr(itemUrl)}" target="_blank" rel="noopener noreferrer">Quelle</a>` : '';
+  const link = itemUrl ? `<a href="${escapeAttr(itemUrl)}" target="_blank" rel="noopener noreferrer">Quelle ↗</a>` : '';
 
   return `
     <div class="card ${sentimentClass(item.sentiment)}${isDup ? ' duplicate' : ''}">
       <div class="meta">${date} · ${escapeHtml(item.source)} · ${relevant} · Konfidenz ${conf}</div>
       <div class="text">${escapeHtml(item.text)}</div>
-      <div class="tags">Ticker: ${tickers} &nbsp; Sektoren: ${sectors}</div>
-      ${item.reasoning ? `<div class="tags" style="margin-top:0.3rem;">${escapeHtml(item.reasoning)}</div>` : ''}
-      <div style="margin-top:0.4rem;">${link}</div>
+      <div class="tags">Ticker: ${tickers}<br>Sektoren: ${sectors}</div>
+      ${item.reasoning ? `<div class="tags" style="margin-top:0.4rem;">${escapeHtml(item.reasoning)}</div>` : ''}
+      ${link ? `<div style="margin-top:0.45rem; font-size:0.8rem;">${link}</div>` : ''}
     </div>
   `;
 }
@@ -304,13 +431,23 @@ async function loadHealth() {
   ].join('');
 
   const statusRow = document.getElementById('statusRow');
-  const entries = Object.entries(health.sources || {});
-  const chips = entries.map(([name, s]) => {
+  const chips = [];
+
+  // Lebenszeichen des Servers zuerst: laeuft der Loop ueberhaupt noch? Ohne diese
+  // Anzeige sah ein haengender Poll-Zyklus genauso aus wie ein ruhiger Nachrichtentag.
+  if (health.last_cycle_at) {
+    const age = Math.round(Date.now() / 1000 - health.last_cycle_at);
+    const cls = age < 180 ? 'ok' : age < 900 ? 'warn' : 'error';
+    chips.push(`<div class="chip"><span class="dot ${cls}"></span>
+      <span>Letzter Zyklus ${timeAgo(health.last_cycle_at)}</span></div>`);
+  }
+
+  Object.entries(health.sources || {}).forEach(([name, s]) => {
     let dotClass = 'unknown';
     if (s.last_success_at) dotClass = 'ok';
     if (s.last_error && (s.last_error_at || 0) > (s.last_success_at || 0)) dotClass = 'warn';
-    return `<div class="status-chip"><span class="dot ${dotClass}"></span>
-      <span>${escapeHtml(name)} · letzter Poll ${timeAgo(s.last_poll_at)} · ${s.total_fetched} gesamt</span></div>`;
+    chips.push(`<div class="chip"><span class="dot ${dotClass}"></span>
+      <span>${escapeHtml(name)} · ${timeAgo(s.last_poll_at)} · ${s.total_fetched} gesamt</span></div>`);
   });
 
   // Kostentransparenz: wie viel vom Tages-Kostendeckel (MAX_CLASSIFICATIONS_PER_DAY)
@@ -332,7 +469,7 @@ async function loadHealth() {
       dotClass = 'warn';
     }
     const cap = priorityLimit > limit ? `${limit} (+${priorityLimit - limit} Reserve)` : `${limit}`;
-    chips.push(`<div class="status-chip"><span class="dot ${dotClass}"></span>
+    chips.push(`<div class="chip"><span class="dot ${dotClass}"></span>
       <span>Claude-Calls heute: ${used}/${cap}${suffix}</span></div>`);
   }
 
@@ -341,18 +478,17 @@ async function loadHealth() {
 
 async function loadStats() {
   const res = await apiFetch('/api/stats');
+  if (!res.ok) return;
   const stats = await res.json();
   const sentiment = stats.sentiment_breakdown || {};
 
-  const statsRow = document.getElementById('statsRow');
-  statsRow.innerHTML = `
-    <div class="stat"><div class="value">${stats.total}</div><div class="label">Statements gesamt</div></div>
-    <div class="stat"><div class="value">${stats.market_relevant}</div><div class="label">Marktrelevant</div></div>
-    <div class="stat positive"><div class="value">${sentiment.positive || 0}</div><div class="label">Positiv</div></div>
-    <div class="stat negative"><div class="value">${sentiment.negative || 0}</div><div class="label">Negativ</div></div>
-    <div class="stat"><div class="value">${stats.alerts_sent}</div><div class="label">Alerts gesendet</div></div>
-    <div class="stat"><div class="value">${stats.duplicates}</div><div class="label">Duplikate übersprungen</div></div>
-  `;
+  document.getElementById('statsRow').innerHTML =
+    metric(stats.total, 'Statements gesamt') +
+    metric(stats.market_relevant, 'Marktrelevant') +
+    metric(sentiment.positive || 0, 'Positiv', 'pos') +
+    metric(sentiment.negative || 0, 'Negativ', 'neg') +
+    metric(stats.alerts_sent, 'Alerts gesendet') +
+    metric(stats.duplicates, 'Duplikate übersprungen');
 }
 
 async function loadCalibration() {
@@ -364,29 +500,28 @@ async function loadCalibration() {
       // Sichtbar machen statt schweigend die letzten (moeglicherweise laengst
       // veralteten) Zahlen stehen zu lassen - sonst saehe ein dauerhaft fehlschlagender
       // Abruf (falscher API-Key, DB-Fehler) genauso aus wie ein aktueller Stand.
-      el.innerHTML = '<div class="stat"><div class="value">⚠️</div><div class="label">Trefferquote konnte nicht aktualisiert werden (Status ' + res.status + ')</div></div>';
+      el.innerHTML = metric('⚠️', 'Trefferquote konnte nicht aktualisiert werden (Status ' + res.status + ')');
       return;
     }
     cal = await res.json();
   } catch (err) {
-    el.innerHTML = '<div class="stat"><div class="value">⚠️</div><div class="label">Trefferquote konnte nicht aktualisiert werden</div></div>';
+    el.innerHTML = metric('⚠️', 'Trefferquote konnte nicht aktualisiert werden');
     return;
   }
   const pct = (v) => (v == null ? '–' : Math.round(v * 100) + '%');
   if (!cal || (!cal.evaluated && !cal.pending)) {
-    el.innerHTML = '<div class="stat"><div class="value">–</div><div class="label">noch keine ausgewerteten Alerts (Preis-Tracking aus/zu neu)</div></div>';
+    el.innerHTML = metric('–', 'noch keine ausgewerteten Alerts (Preis-Tracking aus/zu neu)');
     return;
   }
   const long = (cal.by_direction && cal.by_direction.long) || {};
   const short = (cal.by_direction && cal.by_direction.short) || {};
-  const avg = cal.avg_return_pct == null ? '–' : (cal.avg_return_pct >= 0 ? '+' : '') + cal.avg_return_pct.toFixed(2) + '%';
-  el.innerHTML = `
-    <div class="stat"><div class="value">${pct(cal.hit_rate)}</div><div class="label">Trefferquote (${cal.evaluated} ausgewertet)</div></div>
-    <div class="stat positive"><div class="value">${pct(long.hit_rate)}</div><div class="label">Long korrekt (${long.n || 0})</div></div>
-    <div class="stat negative"><div class="value">${pct(short.hit_rate)}</div><div class="label">Short korrekt (${short.n || 0})</div></div>
-    <div class="stat"><div class="value">${avg}</div><div class="label">Ø Bewegung</div></div>
-    <div class="stat"><div class="value">${cal.pending || 0}</div><div class="label">offen (Horizont läuft)</div></div>
-  `;
+  const avg = cal.avg_return_pct == null ? '–' : signed(cal.avg_return_pct, 2, '%');
+  el.innerHTML =
+    metric(pct(cal.hit_rate), `Trefferquote (${cal.evaluated} ausgewertet)`) +
+    metric(pct(long.hit_rate), `Long korrekt (${long.n || 0})`, 'pos') +
+    metric(pct(short.hit_rate), `Short korrekt (${short.n || 0})`, 'neg') +
+    metric(avg, 'Ø Bewegung') +
+    metric(cal.pending || 0, 'offen (Horizont läuft)');
 }
 
 async function runTest() {
@@ -412,15 +547,20 @@ async function runTest() {
     }
     const data = await res.json();
     const c = data.classification;
-    const tickerStr = (c.ticker_calls || []).map(tc => `${tc.ticker} (${tc.direction})`).join(', ') || '–';
-    resultEl.textContent =
-      `marktrelevant: ${c.is_market_relevant} | sentiment: ${c.sentiment} | ` +
-      `konfidenz: ${Math.round(c.confidence * 100)}%\n` +
-      `ticker: ${tickerStr} | sektoren: ${(c.sectors || []).join(', ') || '–'}\n` +
-      `begründung: ${c.reasoning}\n` +
-      `Telegram-Alert gesendet: ${data.alert_sent}`;
+    // Strukturiert statt als Textblock: das Ergebnis ist der eigentliche Zweck des
+    // Panels und war vorher eine schwer lesbare Zeilenwueste.
+    resultEl.innerHTML = `
+      <div class="tags" style="margin-bottom:0.4rem;">
+        <span class="tag">${c.is_market_relevant ? '✅ marktrelevant' : '— nicht marktrelevant'}</span>
+        <span class="tag">${escapeHtml(c.sentiment)}</span>
+        <span class="tag">Konfidenz ${Math.round(c.confidence * 100)}%</span>
+        <span class="tag">${data.alert_sent ? '📨 Telegram gesendet' : '🔇 kein Alert'}</span>
+      </div>
+      <div class="tags" style="margin-bottom:0.4rem;">Ticker: ${renderTickerCalls(c.ticker_calls)}</div>
+      <div class="tags">${escapeHtml(c.reasoning)}</div>`;
     loadFeed();
     loadStats();
+    loadPaper();
   } catch (err) {
     resultEl.textContent = 'Fehler: ' + err;
   } finally {
@@ -429,13 +569,32 @@ async function runTest() {
 }
 
 async function refreshAll() {
-  await Promise.all([loadFeed(), loadHealth(), loadStats(), loadCalibration()]);
+  await Promise.all([loadFeed(), loadHealth(), loadStats(), loadCalibration(), loadPaper()]);
 }
 
+// Im Hintergrund-Tab wird nicht gepollt: das Dashboard laeuft oft stundenlang offen
+// nebenher und feuerte bisher auch dann alle 15s fuenf API-Calls ab - unnoetige Last
+// auf einer 1-OCPU-VM. Beim Zurueckwechseln wird sofort einmal aktualisiert.
+let timer = null;
+function startPolling() {
+  if (timer) return;
+  timer = setInterval(refreshAll, 15000);
+  document.getElementById('refreshNote').textContent = 'Aktualisiert alle 15s.';
+}
+function stopPolling() {
+  clearInterval(timer);
+  timer = null;
+  document.getElementById('refreshNote').textContent = 'Pausiert (Tab im Hintergrund).';
+}
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) { stopPolling(); } else { refreshAll(); startPolling(); }
+});
+
 document.getElementById('apiKeyInput').value = getApiKey();
+syncAccessPanel();
 onlyRelevant.addEventListener('change', loadFeed);
 refreshAll();
-setInterval(refreshAll, 15000);
+startPolling();
 </script>
 </body>
 </html>
