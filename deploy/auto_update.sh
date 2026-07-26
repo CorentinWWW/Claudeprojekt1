@@ -13,28 +13,47 @@ APP_DIR="$HOME/trump-market-monitor"
 BRANCH="claude/trump-market-impact-analyzer-dbjvu5"
 LOCK_FILE="/tmp/trump-monitor-autoupdate.lock"
 LOG_FILE="$APP_DIR/auto_update.log"
+# Merkt sich den Commit, der zuletzt NACHGEWIESEN gesund lief. Bewusst nicht "git HEAD"
+# als Massstab: bricht ein Lauf zwischen "git merge" und dem fertigen Rebuild ab (z.B.
+# Strg+C bei manuellem Aufruf, Reboot, OOM), dann steht HEAD schon auf dem neuen Commit,
+# waehrend der Container noch das alte Image faehrt. Ein HEAD-Vergleich wuerde das als
+# "aktuell" werten und den Container dauerhaft veraltet stehen lassen.
+DEPLOYED_FILE="$APP_DIR/.deployed_sha"
+# Verhindert, dass ein Commit, der den Healthcheck reisst, alle 15 Minuten erneut
+# gebaut und zurueckgerollt wird. Ein spaeterer Fix hat eine andere SHA und wird
+# normal wieder versucht.
+FAILED_FILE="$APP_DIR/.failed_sha"
 HEALTH_URL="http://localhost:8000/api/health"
 HEALTH_TIMEOUT_SECONDS=120
+
+log() { echo "$(date -Iseconds) $*" >> "$LOG_FILE"; }
 
 # Verhindert ueberlappende Laeufe, falls ein vorheriger Build (z.B. nach einer
 # requirements.txt-Aenderung) laenger als 15 Minuten dauert.
 exec 9>"$LOCK_FILE"
 if ! flock -n 9; then
-  echo "$(date -Iseconds) Vorheriger Lauf noch aktiv, ueberspringe." >> "$LOG_FILE"
+  log "Vorheriger Lauf noch aktiv, ueberspringe."
   exit 0
 fi
 
 cd "$APP_DIR"
 git fetch origin "$BRANCH" --quiet
 
-LOCAL_SHA=$(git rev-parse HEAD)
 REMOTE_SHA=$(git rev-parse "origin/$BRANCH")
+CURRENT_SHA=$(git rev-parse HEAD)
+# Erster Lauf nach der Einrichtung: es laeuft bereits ein gesunder Container auf dem
+# ausgecheckten Stand, den nehmen wir als Ausgangsbasis.
+DEPLOYED_SHA=$(cat "$DEPLOYED_FILE" 2>/dev/null || echo "$CURRENT_SHA")
 
-if [ "$LOCAL_SHA" = "$REMOTE_SHA" ]; then
+if [ "$DEPLOYED_SHA" = "$REMOTE_SHA" ]; then
   exit 0
 fi
 
-echo "$(date -Iseconds) Neuer Commit gefunden: $LOCAL_SHA -> $REMOTE_SHA, deploye..." >> "$LOG_FILE"
+if [ "$(cat "$FAILED_FILE" 2>/dev/null || true)" = "$REMOTE_SHA" ]; then
+  exit 0
+fi
+
+log "Neuer Commit gefunden: $DEPLOYED_SHA -> $REMOTE_SHA, deploye..."
 
 # --ff-only statt "git pull": scheitert laut statt still einen Merge-Commit
 # anzulegen, falls hier je lokale Aenderungen liegen sollten (sollten es nicht -
@@ -55,10 +74,15 @@ while [ $SECONDS -lt "$DEADLINE" ]; do
 done
 
 if [ -n "$HEALTHY" ]; then
-  echo "$(date -Iseconds) Deploy erfolgreich, Container healthy auf $REMOTE_SHA." >> "$LOG_FILE"
+  echo "$REMOTE_SHA" > "$DEPLOYED_FILE"
+  rm -f "$FAILED_FILE"
+  log "Deploy erfolgreich, Container healthy auf $REMOTE_SHA."
 else
-  echo "$(date -Iseconds) FEHLER: nicht healthy nach Deploy von $REMOTE_SHA - Rollback auf $LOCAL_SHA." >> "$LOG_FILE"
-  git reset --hard "$LOCAL_SHA"
+  log "FEHLER: nicht healthy nach Deploy von $REMOTE_SHA - Rollback auf $DEPLOYED_SHA."
+  # Erst die kaputte SHA vermerken, dann zuruecksetzen: bricht der Rollback selbst ab,
+  # wird der defekte Commit trotzdem nicht alle 15 Minuten erneut versucht.
+  echo "$REMOTE_SHA" > "$FAILED_FILE"
+  git reset --hard "$DEPLOYED_SHA" >> "$LOG_FILE" 2>&1
   sudo docker compose up -d --build >> "$LOG_FILE" 2>&1
-  echo "$(date -Iseconds) Rollback auf $LOCAL_SHA abgeschlossen." >> "$LOG_FILE"
+  log "Rollback auf $DEPLOYED_SHA abgeschlossen."
 fi

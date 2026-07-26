@@ -3,3 +3,7 @@ __pycache__/
 *.pyc
 .env
 *.db
+# Laufzeit-Zustand von deploy/auto_update.sh (liegt im Repo-Verzeichnis auf dem Server)
+auto_update.log
+.deployed_sha
+.failed_sha
