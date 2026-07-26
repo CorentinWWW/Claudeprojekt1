@@ -4,6 +4,7 @@ import logging
 import re
 import time
 import uuid
+from typing import Optional
 
 from anthropic import AuthenticationError, NotFoundError, PermissionDeniedError
 
@@ -21,6 +22,7 @@ from app.config import (
     DIVERGENCE_WARN_PCT,
     ENABLE_BORDERLINE_ESCALATION,
     ENABLE_CONVICTION_SCORE,
+    ENABLE_DAILY_LIVE_SIGNAL,
     ENABLE_ENSEMBLE_MODEL,
     ENABLE_HISTORICAL_HITRATE,
     ENABLE_KELLY_SUGGESTION,
@@ -85,6 +87,8 @@ from app.db import (
     Classification,
     RawStatement,
     count_alerted_statements_since,
+    get_alerts_sent_today,
+    get_classification_calls_today,
     get_corroboration_count,
     get_dedup_candidates,
     get_kelly_inputs,
@@ -1453,9 +1457,69 @@ async def _maybe_send_weekly_digest():
     await send_weekly_digest(stats)
 
 
+def _format_duration(seconds: Optional[float]) -> str:
+    """Kompakte Dauer fuer das Live-Signal ("3d 4h", "12m", "42s")."""
+    if seconds is None or seconds < 0:
+        return "?"
+    seconds = int(seconds)
+    if seconds < 60:
+        return f"{seconds}s"
+    if seconds < 3600:
+        return f"{seconds // 60}m"
+    if seconds < 86400:
+        return f"{seconds // 3600}h {(seconds % 3600) // 60}m"
+    return f"{seconds // 86400}d {(seconds % 86400) // 3600}h"
+
+
+def _format_live_signal() -> list[str]:
+    """Taegliches Lebenszeichen des Servers (Nutzerwunsch, zusammen mit dem
+    Morgen-Depot-Update): belegt, dass der Dauerbetrieb tatsaechlich laeuft und die
+    Quellen liefern.
+
+    Der Zweck ist, STILLE von "nichts passiert" unterscheidbar zu machen: ohne dieses
+    Signal sieht ein abgestuerzter Bot genauso aus wie ein Tag ohne marktrelevante
+    Nachrichten - man wuerde einen Ausfall womoeglich tagelang nicht bemerken."""
+    now = time.time()
+    lines = ["", "🛰 <b>Live-Signal</b>"]
+
+    started_at = run_health.get("started_at")
+    uptime = _format_duration(now - started_at) if started_at else "?"
+    last_cycle_at = run_health.get("last_cycle_at")
+    cycle_age = _format_duration(now - last_cycle_at) if last_cycle_at else "?"
+    restarts = run_health.get("loop_restarts", 0)
+    restart_note = f" · {restarts} Neustart(s)" if restarts else ""
+    lines.append(f"✅ Läuft seit {uptime} · letzter Zyklus vor {cycle_age}{restart_note}")
+
+    # Quellen-Status: eine Quelle gilt als gestoert, wenn ihr letzter Fehler juenger ist
+    # als ihr letzter Erfolg (ein alter Fehler, auf den ein Erfolg folgte, ist erledigt).
+    parts = []
+    for name, h in sorted(source_health.items()):
+        last_ok = h.get("last_success_at") or 0
+        last_err_at = h.get("last_error_at") or 0
+        parts.append(f"{name} {'⚠️' if last_err_at > last_ok else '✅'}")
+    if parts:
+        lines.append("📡 " + " · ".join(parts))
+
+    try:
+        calls = get_classification_calls_today()
+        alerts = get_alerts_sent_today()
+        lines.append(
+            f"🧠 {calls}/{MAX_CLASSIFICATIONS_PER_DAY} Analysen heute · {alerts} Alerts"
+        )
+    except Exception:
+        # Das Live-Signal ist Diagnose-Beiwerk - eine klemmende DB-Abfrage darf das
+        # Depot-Update, an dem es haengt, nicht mit runterreissen.
+        logger.debug("[live-signal] Tageszahlen nicht abrufbar.", exc_info=True)
+
+    return lines
+
+
 async def _maybe_send_daily_depot_update():
     """Taegliches Depot-Update (morgens 08:00 UTC + abends 20:00 UTC), nur wenn
-    PAPER_TRADING aktiv ist. Zeigt Wert, P&L, offene/geschlossene Positionen, Win-Rate."""
+    PAPER_TRADING aktiv ist. Zeigt Wert, P&L, offene/geschlossene Positionen, Win-Rate.
+    Der Morgen-Versand traegt zusaetzlich das Live-Signal des Servers (siehe
+    _format_live_signal) - bewusst nur morgens, damit das Lebenszeichen taeglich
+    verlaesslich kommt, ohne abends dieselbe Diagnose zu wiederholen."""
     if not PAPER_TRADING:
         return
     now = datetime.datetime.now(datetime.timezone.utc)
@@ -1473,7 +1537,8 @@ async def _maybe_send_daily_depot_update():
     total_return_pct = (snap["account_value"] - start_capital) / start_capital * 100.0 if start_capital else 0.0
 
     from app.telegram_alert import send_text
-    time_label = "☀️ Morgen" if now.hour == 8 else "🌙 Abend"
+    is_morning = now.hour == 8
+    time_label = "☀️ Morgen" if is_morning else "🌙 Abend"
     lines = [
         f"{time_label} <b>Paper-Depot Update</b>",
         f"💼 Wert {snap['account_value']:.2f}€ (Start {start_capital:.0f}€)",
@@ -1484,6 +1549,9 @@ async def _maybe_send_daily_depot_update():
         lines.append(f"✅ {closed['wins']}/{closed['closed']} geschlossene Trades ({closed['wins']/closed['closed']*100:.0f}%)")
     else:
         lines.append("📭 Keine geschlossenen Trades")
+
+    if is_morning and ENABLE_DAILY_LIVE_SIGNAL:
+        lines += _format_live_signal()
 
     await send_text("\n".join(lines))
 
