@@ -258,7 +258,29 @@ class TruthSocialSource(Source):
                 statuses = await self._fetch_via_browser()
                 enforce_account_scope = True
 
-        if not statuses or not isinstance(statuses, list):
+        # None heisst "Abruf fehlgeschlagen", eine leere Liste dagegen "erreicht, aber
+        # keine neuen Posts". Beides fuehrte bisher gleichermassen zu einem stillen
+        # return [] - dadurch war eine dauerhaft tote Quelle (kein Bearer-Token,
+        # Endpoint blockiert, Browser-Fallback aus) im Dashboard nicht von einem
+        # ruhigen Tag zu unterscheiden. Siehe Source.last_failure.
+        if statuses is None:
+            hint = (
+                "direkter API-Abruf fehlgeschlagen und Browser-Fallback ist aus "
+                "(TRUTH_SOCIAL_BROWSER_FALLBACK=false) - ohne "
+                "TRUTH_SOCIAL_BEARER_TOKEN liefert diese Quelle nichts"
+                if not TRUTH_SOCIAL_BROWSER_FALLBACK
+                else "weder direkter API-Abruf noch Browser-Fallback lieferten Daten"
+            )
+            self.note_failure(RuntimeError(hint))
+            return []
+
+        if not isinstance(statuses, list):
+            self.note_failure(RuntimeError(
+                f"unerwartetes Antwortformat: {type(statuses).__name__} statt Liste"
+            ))
+            return []
+
+        if not statuses:
             return []
 
         return self._to_raw_statements(statuses, enforce_account_scope=enforce_account_scope)

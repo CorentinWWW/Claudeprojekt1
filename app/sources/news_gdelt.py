@@ -107,6 +107,10 @@ class GdeltNewsSource(Source):
                     )
                 )
             return results
-        except Exception:
+        except Exception as exc:
             logger.exception("GDELT-Abfrage fehlgeschlagen")
+            # Ohne diese Meldung waere ein dauerhaft kaputtes GDELT (Endpoint
+            # geaendert, Netzsperre, Rate-Limit) von "keine passenden Nachrichten"
+            # nicht unterscheidbar - siehe Source.last_failure.
+            self.note_failure(exc)
             return []

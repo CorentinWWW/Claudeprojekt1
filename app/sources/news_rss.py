@@ -53,7 +53,11 @@ class RssNewsSource(Source):
     def __init__(self):
         self._seen: BoundedSeenSet = BoundedSeenSet(maxlen=5000)
 
-    async def _fetch_feed(self, feed_url: str, client: httpx.AsyncClient) -> list:
+    async def _fetch_feed(self, feed_url: str, client: httpx.AsyncClient) -> list | None:
+        """Eintraege des Feeds, oder None wenn der Abruf fehlschlug. None statt einer
+        leeren Liste, damit poll() "Feed kaputt" von "Feed gerade ohne neue Meldungen"
+        unterscheiden kann - nur wenn ALLE Feeds ausfallen, gilt die Quelle als
+        gestoert (ein einzelner kaputter Feed ist Normalbetrieb)."""
         async def _fetch():
             resp = await client.get(feed_url)
             resp.raise_for_status()
@@ -76,10 +80,11 @@ class RssNewsSource(Source):
                     "Paywall/Redirect): %s (%s)",
                     feed_url, str(parsed.get("bozo_exception", "")),
                 )
+                return None
             return parsed.entries
         except Exception:
             logger.warning("RSS-Feed nicht erreichbar: %s", feed_url, exc_info=True)
-            return []
+            return None
 
     async def poll(self) -> list[RawStatement]:
         # Alle Feeds GLEICHZEITIG abfragen statt nacheinander (frueher: ein einzelner
@@ -99,8 +104,18 @@ class RssNewsSource(Source):
                 *(self._fetch_feed(feed_url, client) for feed_url in FEEDS)
             )
 
+        # Erst wenn KEIN einziger Feed durchkam, gilt die Quelle als gestoert - bei
+        # sieben Feeds ist ein einzelner Ausfall Normalbetrieb und soll nicht als
+        # Quellen-Stoerung gemeldet werden (siehe Source.last_failure).
+        if all(entries is None for entries in all_entries):
+            self.note_failure(RuntimeError(
+                f"kein einziger der {len(FEEDS)} RSS-Feeds war erreichbar/gueltig"
+            ))
+
         results: list[RawStatement] = []
         for entries in all_entries:
+            if entries is None:
+                continue
             for entry in entries:
                 try:
                     link = entry.get("link", "")
