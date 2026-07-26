@@ -260,6 +260,13 @@ ENABLE_WEEKLY_DIGEST = _bool("ENABLE_WEEKLY_DIGEST", True)
 WEEKLY_DIGEST_WEEKDAY = _int("WEEKLY_DIGEST_WEEKDAY", 0)
 WEEKLY_DIGEST_MIN_HOUR = _int("WEEKLY_DIGEST_MIN_HOUR", 8)
 
+# Taegliches Lebenszeichen des Servers, angehaengt an das MORGENDLICHE Depot-Update
+# (08:00 UTC): Laufzeit, Alter des letzten Poll-Zyklus, Status je Quelle und die
+# heutigen Analyse-/Alert-Zahlen. Macht STILLE von "nichts passiert" unterscheidbar -
+# ohne dieses Signal sieht ein abgestuerzter Bot genauso aus wie ein Tag ohne
+# marktrelevante Nachrichten, ein Ausfall bliebe womoeglich tagelang unbemerkt.
+ENABLE_DAILY_LIVE_SIGNAL = _bool("ENABLE_DAILY_LIVE_SIGNAL", True)
+
 # Kurz-Cache fuer Live-Kursabfragen (#13): dieselbe Ticker-Quote wird innerhalb dieses
 # Fensters nicht erneut vom Kursdienst geholt (spart HTTP-Calls, wenn derselbe Ticker in
 # einem Zyklus mehrfach vorkommt). 0 = aus.
