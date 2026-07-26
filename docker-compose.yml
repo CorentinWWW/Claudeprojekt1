@@ -7,6 +7,16 @@ services:
       - "8000:8000"
     volumes:
       - trump-monitor-data:/data
+    # Ohne Begrenzung schreibt Dockers json-file-Treiber unbegrenzt weiter. Im
+    # Dauerbetrieb (Poll-Zyklus alle 60s, rund um die Uhr) waechst das Log stetig und
+    # kann auf einer kleinen VM irgendwann das Boot-Volume vollschreiben - dann steht
+    # der Bot. 3 x 10 MB deckelt es bei 30 MB und behaelt genug Historie fuer die
+    # Fehlersuche der letzten Tage.
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
 
 volumes:
   trump-monitor-data:
