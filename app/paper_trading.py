@@ -267,6 +267,18 @@ def format_open_message(
     return "\n".join(lines)
 
 
+def format_no_position_message(reasons: list[str], free_cash: float) -> str:
+    """Gegenstueck zu format_open_message fuer den Fall, dass ein Alert KEINE Position
+    ausgeloest hat. Existiert, weil ein Alert ohne jede Depot-Reaktion sonst wie ein
+    Fehler aussieht - der Grund stand bisher nur im Server-Log, das der Nutzer nie sieht."""
+    lines = ["⚪️ <b>Keine Paper-Position zu diesem Alert</b>"]
+    lines += [f"· {html.escape(r)}" for r in reasons]
+    # Bewusst nicht _eur(): das setzt fuer Gewinn/Verlust ein Vorzeichen davor
+    # ("+3.20€"), was bei einem Barbestand irrefuehrend waere.
+    lines.append(f"💼 frei: {free_cash:.2f}€")
+    return "\n".join(lines)
+
+
 def format_close_message(
     pos: dict, exit_price: float, pnl: float, ret_pct: float, reason: str,
     account_value_after: float,
@@ -365,7 +377,14 @@ async def open_positions_for_alert(classification, statement_id, score: Optional
     """Eroeffnet fuer die handelbaren Ticker eines gerade verschickten Alerts virtuelle
     Positionen. Laeuft schon eine Position auf demselben Ticker in GEGEN-Richtung, wird
     sie zuerst geschlossen (Signal-Umkehr); in GLEICHER Richtung wird nicht doppelt
-    eroeffnet. Best-effort: ohne erreichbaren Kurs entfaellt das Eroeffnen still."""
+    eroeffnet.
+
+    Nutzerwunsch "zu JEDEM Alert eine passende Depot-Position": bei endlichem Kapital
+    laesst sich das nicht immer erfuellen (irgendwann ist der Barbestand gebunden). Was
+    dieser Code garantiert, ist die schwaechere, aber ehrliche Variante: es gibt KEINE
+    stille Luecke mehr. Konnte fuer einen Alert nichts eroeffnet werden, geht eine
+    Meldung mit dem konkreten Grund raus - vorher verschwanden diese Faelle
+    kommentarlos im Log, und ein Alert ohne Depot-Reaktion sah aus wie ein Fehler."""
     # Late import, um einen Import-Zyklus (orchestrator -> paper_trading -> orchestrator)
     # zu vermeiden - actionable_tickers lebt im orchestrator.
     from app.orchestrator import actionable_tickers
@@ -378,6 +397,9 @@ async def open_positions_for_alert(classification, statement_id, score: Optional
     # best-effort ausserhalb (vor-/nachboerslich) stammt.
     session = us_market_session()
 
+    opened = 0
+    skipped: list[str] = []
+
     for tc in actionable_tickers(classification):
         ticker = (tc.get("ticker") or "").upper()
         direction = tc.get("direction")
@@ -387,19 +409,26 @@ async def open_positions_for_alert(classification, statement_id, score: Optional
         quote = await prices.get_quote(ticker)
         if not quote or not quote.get("price"):
             logger.debug("[paper] kein Kurs fuer %s - Position wird nicht eroeffnet.", ticker)
+            skipped.append(f"{ticker}: kein Kurs abrufbar")
             continue
         price = quote["price"]
 
         existing = get_open_paper_position_for_ticker(ticker)
         if existing is not None:
             if existing["direction"] == direction:
-                continue  # gleiche Richtung laeuft schon - nicht aufstocken
+                # Gleiche Richtung laeuft schon - bewusst nicht aufstocken (das waere
+                # Pyramiding auf ein Signal, das der Bot ohnehin schon haelt).
+                held = holding_hours(existing.get("entry_ts"))
+                seit = f" (seit {held:.0f}h)" if held is not None else ""
+                skipped.append(f"{ticker}: {_arrow(direction)} läuft bereits{seit}")
+                continue
             # Gegensignal: alte Position glattstellen, dann neu in Gegenrichtung eroeffnen.
             await _close(existing, price, "reversal", notify=True)
 
         if count_open_paper_positions() >= PAPER_MAX_POSITIONS:
             logger.info("[paper] Positionslimit (%d) erreicht - kein neuer Trade fuer %s.",
                         PAPER_MAX_POSITIONS, ticker)
+            skipped.append(f"{ticker}: Positionslimit ({PAPER_MAX_POSITIONS}) erreicht")
             continue
 
         snap = account_snapshot()
@@ -410,6 +439,10 @@ async def open_positions_for_alert(classification, statement_id, score: Optional
         if plan is None:
             logger.info("[paper] kein Einsatz mehr frei fuer %s (frei %.2f€).",
                         ticker, snap["free_cash"])
+            skipped.append(
+                f"{ticker}: zu wenig freies Kapital "
+                f"({snap['free_cash']:.2f}€ frei, mind. {PAPER_MIN_STAKE:.2f}€ nötig)"
+            )
             continue
 
         insert_paper_position(
@@ -418,9 +451,17 @@ async def open_positions_for_alert(classification, statement_id, score: Optional
         )
         after = account_snapshot()
         pos = {"ticker": ticker, "direction": direction, "entry_price": price, **plan}
+        opened += 1
         await send_text(
             format_open_message(pos, after["account_value"], after["free_cash"], session=session)
         )
+
+    # Nur melden, wenn der Alert UEBERHAUPT keine Position ausgeloest hat: wurde bei
+    # mehreren Tickern wenigstens einer eroeffnet, ist die Depot-Reaktion sichtbar und
+    # eine zusaetzliche "aber Ticker X nicht"-Nachricht waere blosses Rauschen.
+    if opened == 0 and skipped:
+        snap = account_snapshot()
+        await send_text(format_no_position_message(skipped, snap["free_cash"]))
 
 
 async def manage_open_positions() -> None:
