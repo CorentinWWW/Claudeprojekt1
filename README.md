@@ -722,7 +722,8 @@ kostenlos bleibt. So richtest du ihn ein:
    ```
    Das Skript (`deploy/oracle_bootstrap.sh`) installiert Docker, öffnet Port 8000 in
    der VM-eigenen Firewall (iptables/ufw - zusätzlich zur Security List aus Schritt 3),
-   klont dieses Repo und legt `.env` aus der Vorlage an.
+   klont dieses Repo, legt `.env` aus der Vorlage an und richtet automatische Updates
+   per Cron ein (siehe unten).
 5. **Konfigurieren und starten**:
    ```bash
    nano ~/trump-market-monitor/.env   # ANTHROPIC_API_KEY (+ optional Telegram) eintragen
@@ -731,7 +732,17 @@ kostenlos bleibt. So richtest du ihn ein:
 6. Dashboard unter `http://<Server-IP>:8000` aufrufen, im Test-Panel einen Beispieltext
    durchjagen um zu prüfen, dass alles korrekt konfiguriert ist.
 
-Für Updates später: `cd ~/trump-market-monitor && git pull && sudo docker compose up -d --build`.
+**Updates laufen danach automatisch:** `deploy/auto_update.sh` läuft alle 15 Minuten
+per Cron, zieht sich neue Commits vom Produktions-Branch selbst (pull-basiert - keine
+Zugangsdaten auf GitHub nötig, kein zusätzlicher offener Port), baut bei Bedarf neu
+und rollt automatisch auf den zuletzt funktionierenden Commit zurück, falls der
+Container danach nicht `healthy` wird. Log: `~/trump-market-monitor/auto_update.log`.
+Manuelles Update bleibt weiterhin möglich: `cd ~/trump-market-monitor && git pull &&
+sudo docker compose up -d --build`.
+
+Läuft die VM schon von vor dieser Änderung, holt sie den Cron nachträglich mit einem
+erneuten Lauf des Bootstrap-Skripts (siehe Schritt 4 oben) - Docker/Repo/`.env`
+werden dabei übersprungen, es wird nur der Cron ergänzt.
 
 ### Option A: Docker (auf einem beliebigen Server)
 

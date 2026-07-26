@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Einmal-Setup fuer eine frische Oracle Cloud "Always Free" VM (Ubuntu-Image).
 # Installiert Docker, oeffnet Port 8000 in der VM-eigenen Firewall, klont das
-# Repo und bereitet .env vor. Danach nur noch .env ausfuellen und
+# Repo, bereitet .env vor und richtet automatische Updates per Cron ein (siehe
+# deploy/auto_update.sh). Danach nur noch .env ausfuellen und
 # "sudo docker compose up -d --build" ausfuehren.
 #
 # Nutzung (auf der VM, per SSH eingeloggt):
@@ -19,7 +20,7 @@ if ! command -v apt-get &> /dev/null; then
   exit 1
 fi
 
-echo "== [1/4] Docker installieren =="
+echo "== [1/5] Docker installieren =="
 if ! command -v docker &> /dev/null; then
   sudo apt-get update -y
   sudo apt-get install -y ca-certificates curl gnupg
@@ -42,7 +43,7 @@ else
   echo "Docker ist bereits installiert, ueberspringe."
 fi
 
-echo "== [2/4] Port 8000 in der VM-Firewall oeffnen =="
+echo "== [2/5] Port 8000 in der VM-Firewall oeffnen =="
 # Oracle-Ubuntu-Images blocken eingehende Ports standardmaessig per iptables,
 # zusaetzlich zur Security List auf Netzwerk-Ebene (siehe README/Anleitung).
 sudo iptables -I INPUT -p tcp --dport 8000 -j ACCEPT || true
@@ -50,7 +51,7 @@ sudo netfilter-persistent save 2>/dev/null || sudo iptables-save | sudo tee /etc
 # Falls stattdessen ufw aktiv ist:
 sudo ufw allow 8000/tcp 2>/dev/null || true
 
-echo "== [3/4] Repo klonen =="
+echo "== [3/5] Repo klonen =="
 if [ ! -d "$APP_DIR" ]; then
   git clone --branch "$BRANCH" "$REPO_URL" "$APP_DIR"
 else
@@ -58,9 +59,25 @@ else
 fi
 cd "$APP_DIR"
 
-echo "== [4/4] .env vorbereiten =="
+echo "== [4/5] .env vorbereiten =="
 if [ ! -f .env ]; then
   cp .env.example .env
+  NEEDS_ENV_SETUP=1
+else
+  echo ".env existiert bereits - ueberspringe."
+  NEEDS_ENV_SETUP=0
+fi
+
+echo "== [5/5] Automatische Updates einrichten =="
+# Cron statt Push-per-SSH: die VM zieht sich neue Commits vom Produktions-Branch
+# selbst (alle 15 Min), baut bei Bedarf neu und rollt bei einem fehlgeschlagenen
+# Healthcheck automatisch zurueck - siehe deploy/auto_update.sh fuer Details.
+chmod +x "$APP_DIR/deploy/auto_update.sh"
+CRON_LINE="*/15 * * * * $APP_DIR/deploy/auto_update.sh"
+( crontab -l 2>/dev/null | grep -v "auto_update.sh" ; echo "$CRON_LINE" ) | crontab -
+echo "Cron eingerichtet (prueft alle 15 Min auf neue Commits, Log: $APP_DIR/auto_update.log)."
+
+if [ "$NEEDS_ENV_SETUP" = "1" ]; then
   echo ""
   echo "############################################################"
   echo "  Fast fertig! Jetzt noch:"
@@ -71,6 +88,5 @@ if [ ! -f .env ]; then
   echo "  3) Dashboard: http://<Server-IP>:8000"
   echo "############################################################"
 else
-  echo ".env existiert bereits - starte den Stack direkt."
   cd "$APP_DIR" && sudo docker compose up -d --build
 fi
