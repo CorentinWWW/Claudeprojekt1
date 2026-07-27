@@ -25,6 +25,7 @@ from app.config import (
     ENABLE_DAILY_LIVE_SIGNAL,
     ENABLE_ENSEMBLE_MODEL,
     ENABLE_HISTORICAL_HITRATE,
+    ENABLE_FED_AUDIO,
     ENABLE_KELLY_SUGGESTION,
     ENABLE_NEWS,
     ENABLE_PREFILTER,
@@ -136,6 +137,7 @@ from app.scoring import (
 )
 from app.sources.news_gdelt import GdeltNewsSource
 from app.sources.news_rss import RssNewsSource
+from app.sources.fed_audio import FedAudioSource
 from app.sources.truth_social import TruthSocialSource
 from app.telegram_alert import (
     send_alert,
@@ -355,6 +357,8 @@ def build_sources():
         sources.append(RssNewsSource())
     if ENABLE_TRUTH_SOCIAL:
         sources.append(TruthSocialSource())
+    if ENABLE_FED_AUDIO:
+        sources.append(FedAudioSource())
     for s in sources:
         source_health.setdefault(
             s.name,

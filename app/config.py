@@ -538,6 +538,42 @@ TRUTH_SOCIAL_BROWSER_FALLBACK_MIN_INTERVAL = _int(
     "TRUTH_SOCIAL_BROWSER_FALLBACK_MIN_INTERVAL", 300
 )
 
+# --- FED-Live-Audio (Nutzerwunsch: "wenn die FED spricht, besonders gut aufpassen") ---
+# Bewusst NUR die FED, nicht Trump/andere Livestreams: FOMC-Sitzungstermine + Presse-
+# konferenz-Uhrzeiten stehen Monate im Voraus fest (siehe FED_MEETING_WINDOWS), der Bot
+# hoert also nur in einem klar begrenzten Zeitfenster zu statt dauerhaft. Frueher gab es
+# eine aehnliche Live-Audio-Quelle fuer beliebige Livestreams, die wegen einer echten
+# Sicherheitsluecke komplett entfernt wurde: der transkribierte Text wurde direkt in ein
+# GitHub-Actions-Skript interpoliert (Script-Injection, CWE-94). Diese Quelle laeuft
+# stattdessen wie jede andere Source in-process im Dauerbetrieb - der transkribierte Text
+# durchlaeuft exakt dieselbe Klassifikations-Pipeline wie ein RSS-Artikel, es gibt keine
+# Shell-/Workflow-Interpolation an keiner Stelle.
+ENABLE_FED_AUDIO = _bool("ENABLE_FED_AUDIO", False)
+# URL des Live-Audio-/Video-Streams (z.B. der offizielle YouTube-Kanal der Federal
+# Reserve waehrend einer Pressekonferenz). Wird pro Poll-Zyklus per yt-dlp neu aufgeloest
+# (die zugrundeliegende Manifest-URL aendert sich/verfaellt) - kein Caching noetig.
+FED_AUDIO_STREAM_URL = _str("FED_AUDIO_STREAM_URL")
+# Wann zugehoert wird: Komma-Liste aus "ISO-Startzeit(UTC)/Dauer-in-Minuten", z.B.
+# "2026-09-16T18:30/90,2026-11-04T19:00/90". BEWUSST nicht automatisch vom Fed-Kalender
+# abgerufen (keine stabile oeffentliche API dafuer) und bewusst NICHT mit Terminen
+# vorbefuellt - der Bot soll keine geratenen/veralteten Zukunftsdaten verwenden. Aktuelle
+# Termine: federalreserve.gov/monetarypolicy/fomccalendars.htm (Pressekonferenz-Beginn
+# ist dort angegeben, i.d.R. 30min nach Statement-Veroeffentlichung).
+FED_MEETING_WINDOWS = _str("FED_MEETING_WINDOWS")
+# Kleinstes/schnellstes Whisper-Modell - bewusst nicht "base"/"small", um RAM/CPU auf der
+# 1GB-Referenz-VM nicht zu sprengen (siehe README Oracle-Cloud-Anleitung). Wird bei
+# ENABLE_FED_AUDIO=true beim ersten Fenster einmalig geladen (~75MB Download) und danach
+# im Prozess wiederverwendet.
+FED_AUDIO_WHISPER_MODEL = _str("FED_AUDIO_WHISPER_MODEL", "tiny")
+# Wie viele Sekunden Live-Audio pro Poll-Zyklus mitgeschnitten werden - bewusst knapp
+# unter POLL_INTERVAL_SECONDS, damit aufeinanderfolgende Mitschnitte sich nicht
+# ueberlappen, aber auch keine grosse Luecke zwischen ihnen entsteht.
+FED_AUDIO_CHUNK_SECONDS = _int("FED_AUDIO_CHUNK_SECONDS", 50)
+# Sicherheitsdeckel: selbst ein falsch konfiguriertes (zu langes) Zeitfenster kann nicht
+# laenger als das hier zuhoeren - verhindert dauerhafte Ressourcenlast durch einen
+# Tippfehler in FED_MEETING_WINDOWS.
+FED_AUDIO_MAX_WINDOW_MINUTES = _int("FED_AUDIO_MAX_WINDOW_MINUTES", 150)
+
 DASHBOARD_PORT = _int("DASHBOARD_PORT", 8000)
 # Falls gesetzt, verlangen alle /api/*-Endpunkte einen passenden "X-API-Key"-Header.
 # Ohne das waere z.B. /api/test (kostet einen echten Claude-Call + kann einen echten
@@ -644,4 +680,49 @@ def validate() -> tuple[list[str], list[str]]:
             "statt verkleinern)."
         )
 
+    if ENABLE_FED_AUDIO:
+        if not FED_AUDIO_STREAM_URL:
+            warnings.append(
+                "ENABLE_FED_AUDIO=true, aber FED_AUDIO_STREAM_URL ist leer - die "
+                "Quelle bleibt dauerhaft inaktiv (kein Effekt)."
+            )
+        if not FED_MEETING_WINDOWS:
+            warnings.append(
+                "ENABLE_FED_AUDIO=true, aber FED_MEETING_WINDOWS ist leer - es gibt "
+                "keine Zeitfenster zum Zuhoeren, die Quelle bleibt dauerhaft inaktiv. "
+                "Termine: federalreserve.gov/monetarypolicy/fomccalendars.htm"
+            )
+        elif not _parse_fed_meeting_windows(FED_MEETING_WINDOWS):
+            errors.append(
+                f"FED_MEETING_WINDOWS='{FED_MEETING_WINDOWS}' konnte nicht geparst "
+                "werden - erwartetes Format: 'ISO-Startzeit(UTC)/Dauer-in-Minuten', "
+                "Komma-getrennt, z.B. '2026-09-16T18:30/90,2026-11-04T19:00/90'."
+            )
+
     return errors, warnings
+
+
+def _parse_fed_meeting_windows(raw: str) -> list[tuple]:
+    """Parst FED_MEETING_WINDOWS in (start, ende)-datetime-Paare (UTC), inkl.
+    FED_AUDIO_MAX_WINDOW_MINUTES als hartem Deckel. Eigene Funktion statt Inline-Code
+    in app/sources/fed_audio.py, damit validate() denselben Parser fuer die
+    Konfigurationspruefung nutzt wie die Quelle selbst zur Laufzeit - ein Tippfehler
+    soll beim Start auffallen, nicht erst wenn ein Fenster laengst vorbei ist."""
+    import datetime
+
+    windows = []
+    for entry in raw.split(","):
+        entry = entry.strip()
+        if not entry:
+            continue
+        try:
+            start_str, minutes_str = entry.split("/")
+            start = datetime.datetime.fromisoformat(start_str.strip()).replace(
+                tzinfo=datetime.timezone.utc
+            )
+            minutes = min(int(minutes_str.strip()), FED_AUDIO_MAX_WINDOW_MINUTES)
+            end = start + datetime.timedelta(minutes=minutes)
+            windows.append((start, end))
+        except (ValueError, TypeError):
+            return []
+    return windows

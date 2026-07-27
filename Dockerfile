@@ -8,6 +8,14 @@ WORKDIR /app
 # am selben Ort findet.
 ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
 
+# ffmpeg: fuer app/sources/fed_audio.py (Live-Audio-Mitschnitt waehrend konfigurierter
+# FED-Zeitfenster, ENABLE_FED_AUDIO=false per Default - siehe app/config.py). Eigener,
+# schlanker RUN-Schritt statt in die pip/playwright-Zeile unten gemischt, damit ein
+# Cache-Hit hier nicht von Python-Abhaengigkeits-Aenderungen abhaengt.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ffmpeg \
+    && rm -rf /var/lib/apt/lists/*
+
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt \
     && playwright install --with-deps chromium \

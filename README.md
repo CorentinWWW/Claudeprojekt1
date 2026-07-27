@@ -105,8 +105,10 @@ Direkt nach dem Start:
 | Nachrichten (GDELT) | `app/sources/news_gdelt.py` | Stabil, kostenlos, kein Key nötig | ~15 Min |
 | Nachrichten (RSS) | `app/sources/news_rss.py` | Stabil, kostenlos | Minuten |
 | Truth Social | `app/sources/truth_social.py` | Best-Effort: direkter API-Call, mit Browser-Fallback | Sekunden-Minuten |
+| FED-Live-Audio (optional, Standard aus) | `app/sources/fed_audio.py` | Nur innerhalb konfigurierter Zeitfenster aktiv | Sekunden, während des Fensters |
 
-Quellen einzeln an/aus schalten über `.env` (`ENABLE_NEWS`, `ENABLE_TRUTH_SOCIAL`).
+Quellen einzeln an/aus schalten über `.env` (`ENABLE_NEWS`, `ENABLE_TRUTH_SOCIAL`,
+`ENABLE_FED_AUDIO`).
 
 **Allgemeine Abdeckung, nicht auf eine Person eingeschränkt:** GDELT und RSS filtern
 bewusst NICHT auf ein bestimmtes Thema/eine bestimmte Person, sondern decken alle
@@ -140,6 +142,45 @@ Testen nicht verifizieren (Netzwerk-Policy blockiert ausgehende Verbindungen zu
 diesem Host). Beide Codepfade wurden mechanisch getestet (Chromium startet,
 navigiert, Fehlerbehandlung greift), aber die tatsächliche Erfolgsrate auf einem
 Server mit echtem Internetzugang lässt sich erst nach dem Deployment verifizieren.
+
+### FED-Live-Audio im Detail
+
+Hört während konfigurierter Zeitfenster (typischerweise FOMC-Pressekonferenzen) einen
+Livestream mit, transkribiert per [faster-whisper](https://github.com/SYSTRAN/faster-whisper)
+und speist den Text als ganz normales Statement in die Klassifikations-Pipeline ein.
+
+**Sicherheitshinweis:** Es gab bereits eine ähnliche Live-Audio-Quelle für beliebige
+Streams, die komplett entfernt wurde, weil der transkribierte Text direkt in ein
+GitHub-Actions-Skript interpoliert wurde (Script-Injection, CWE-94). Diese Quelle läuft
+stattdessen wie jede andere Quelle in-process im Dauerbetrieb (kein Workflow-Trigger),
+der transkribierte Text landet nur als Statement-Text in der DB und durchläuft die
+normale Claude-Klassifikation - keine Shell-/Workflow-Interpolation an irgendeiner
+Stelle.
+
+**Bewusst nur die FED, nicht beliebige Livestreams:** FOMC-Sitzungstermine stehen
+Monate im Voraus fest, der Bot hört also nur in einem klar begrenzten Zeitfenster zu
+statt dauerhaft - relevant auf einer ressourcenknappen VM (siehe Oracle-Cloud-Anleitung
+oben, 1GB RAM).
+
+Einrichtung:
+
+1. `ENABLE_FED_AUDIO=true`
+2. `FED_AUDIO_STREAM_URL` auf einen Live-Stream setzen (z.B. der offizielle
+   YouTube-Kanal der Federal Reserve)
+3. `FED_MEETING_WINDOWS` mit den aktuellen Terminen befüllen, Format
+   `ISO-Startzeit(UTC)/Dauer-in-Minuten`, Komma-getrennt, z.B.
+   `2026-09-16T18:30/90,2026-11-04T19:00/90`. Aktuelle Termine:
+   [federalreserve.gov/monetarypolicy/fomccalendars.htm](https://www.federalreserve.gov/monetarypolicy/fomccalendars.htm) -
+   bewusst nicht vorbefüllt, da es dafür keine verlässliche automatisierte Quelle gibt.
+
+Braucht zusätzlich das System-Paket `ffmpeg` (im mitgelieferten Dockerfile bereits
+enthalten) sowie `faster-whisper`/`yt-dlp` (in `requirements.txt`). Bei Docker/Oracle-
+Cloud-Deployment ist alles bereits vorbereitet, nur die drei `.env`-Werte oben fehlen.
+
+Ein Fehlschlag beim Auflösen der Stream-URL oder beim Mitschnitt wird wie bei jeder
+anderen Quelle in `/api/health` sichtbar (`last_error` bei `fed_audio`); Stille
+innerhalb des Fensters (z.B. Pause in der Pressekonferenz) gilt dagegen nicht als
+Fehler.
 
 ### Sonstige Einschränkungen
 
