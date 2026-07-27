@@ -526,8 +526,13 @@ async def manage_open_positions() -> None:
 
 
 def _status_is_due(now: float) -> bool:
+    # "0 = aus", konsistent mit jedem anderen Schwellenwert in diesem Projekt
+    # (ALERT_MIN_CONVICTION, MAX_ALERTS_PER_HOUR, HISTORICAL_PERFORMANCE_SUPPRESS_BELOW
+    # usw.). Frueher bedeutete 0 hier "bei jedem Zyklus" - das genaue Gegenteil dessen,
+    # was "0 = aus" ueberall sonst heisst, und damit ein Footgun: wer 0 zum Abschalten
+    # gesetzt haette, waere stattdessen alle 60s zugespammt worden.
     if PAPER_STATUS_INTERVAL_MINUTES <= 0:
-        return True
+        return False
     last = get_meta(_STATUS_META_KEY)
     if last is None:
         return True

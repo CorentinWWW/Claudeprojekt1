@@ -399,8 +399,12 @@ PAPER_MAX_POSITIONS = _int("PAPER_MAX_POSITIONS", 100)
 PAPER_MIN_STAKE = _float("PAPER_MIN_STAKE", 10.0)
 # Wie oft (Minuten) hoechstens ein Depot-Status ("auf wie viel steht alles") per
 # Telegram geschickt wird, solange Positionen offen sind. Eroeffnungen und (Stop/Ziel-)
-# Schliessungen werden IMMER sofort gemeldet, unabhaengig davon. 0 = bei jedem Zyklus.
-PAPER_STATUS_INTERVAL_MINUTES = _int("PAPER_STATUS_INTERVAL_MINUTES", 30)
+# Schliessungen werden IMMER sofort gemeldet, unabhaengig davon - dieser periodische
+# Status ist reines Zusatz-Update oben drauf. 0 = aus (Standard: der zweimal taegliche
+# Depot-Digest um 08/20 Uhr UTC, siehe ENABLE_DAILY_LIVE_SIGNAL, deckt die Uebersicht
+# schon ab; Nutzerfund: alle 30 Min bei jeder offenen Position war als staendige
+# Zusatzmeldung empfunden zu aufdringlich).
+PAPER_STATUS_INTERVAL_MINUTES = _int("PAPER_STATUS_INTERVAL_MINUTES", 0)
 
 # --- Maximale Haltedauer (Kapital-Recycling) ---
 # Ohne Zeit-Exit bleibt eine Position, die weder Stop noch Ziel erreicht, UNBEGRENZT
