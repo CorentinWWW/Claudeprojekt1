@@ -198,7 +198,14 @@ Aktivieren über `ENABLE_TECHNICALS=true` (im Workflow bereits an).
 
 Für jeden handelbaren Ticker eines Alerts wird die **Tageshistorie** (Stooq, best-effort,
 kein Key) geladen und ein großer Teil der TradingView-Standardindikatoren in reinem
-Python berechnet (`app/indicators.py`, keine zusätzlichen Dependencies):
+Python berechnet (`app/indicators.py`, keine zusätzlichen Dependencies).
+
+**Zwei-Quellen-Fallback (`app/prices.py`):** Liefert Stooq keinen Kurs/keine Historie
+(live beobachtet: vorbörslich fehlt bei kleineren/jüngeren Werten wie RKLB oft ein
+frisches Close, Stooq antwortet dann mit „N/D"), wird automatisch **Yahoo Finance**
+(ebenfalls kostenlos, kein Key) als zweite Quelle versucht, bevor der Ticker als
+„kein Kurs abrufbar" gilt. Dabei wird bevorzugt ein echter Vor-/Nachbörslich-Kurs
+verwendet, falls vorhanden - genau die Lücke, die Stooq vorbörslich oft nicht deckt.
 
 - **Gleitende Durchschnitte:** SMA & EMA (10/20/30/50/100/200), VWMA(20), Hull-MA(9),
   Ichimoku-Basislinie(9/26/52)
