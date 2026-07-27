@@ -20,7 +20,7 @@ if ! command -v apt-get &> /dev/null; then
   exit 1
 fi
 
-echo "== [1/5] Docker installieren =="
+echo "== [1/6] Docker installieren =="
 if ! command -v docker &> /dev/null; then
   sudo apt-get update -y
   sudo apt-get install -y ca-certificates curl gnupg
@@ -43,7 +43,7 @@ else
   echo "Docker ist bereits installiert, ueberspringe."
 fi
 
-echo "== [2/5] Port 8000 in der VM-Firewall oeffnen =="
+echo "== [2/6] Port 8000 in der VM-Firewall oeffnen =="
 # Oracle-Ubuntu-Images blocken eingehende Ports standardmaessig per iptables,
 # zusaetzlich zur Security List auf Netzwerk-Ebene (siehe README/Anleitung).
 sudo iptables -I INPUT -p tcp --dport 8000 -j ACCEPT || true
@@ -51,7 +51,24 @@ sudo netfilter-persistent save 2>/dev/null || sudo iptables-save | sudo tee /etc
 # Falls stattdessen ufw aktiv ist:
 sudo ufw allow 8000/tcp 2>/dev/null || true
 
-echo "== [3/5] Repo klonen =="
+echo "== [3/6] Swap als Sicherheitsnetz einrichten =="
+# Die Referenz-VM (VM.Standard.E2.1.Micro) hat nur 1GB RAM. Ohne Swap fuehrt eine
+# kurzzeitige Speicherspitze (z.B. FED-Live-Audio, siehe app/sources/fed_audio.py) zum
+# harten OOM-Kill des Containers statt zu blossem Langsamerwerden. 2GB Swap ist Best-
+# Effort-Kulanz, kein Ersatz fuer echten RAM - idempotent (ueberspringt, falls schon
+# vorhanden) und persistiert ueber Reboots per /etc/fstab.
+if [ "$(swapon --show=NAME --noheadings | wc -l)" -eq 0 ]; then
+  sudo fallocate -l 2G /swapfile
+  sudo chmod 600 /swapfile
+  sudo mkswap /swapfile
+  sudo swapon /swapfile
+  echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab > /dev/null
+  echo "2GB Swap eingerichtet."
+else
+  echo "Swap bereits aktiv, ueberspringe."
+fi
+
+echo "== [4/6] Repo klonen =="
 if [ ! -d "$APP_DIR" ]; then
   git clone --branch "$BRANCH" "$REPO_URL" "$APP_DIR"
 else
@@ -65,7 +82,7 @@ else
 fi
 cd "$APP_DIR"
 
-echo "== [4/5] .env vorbereiten =="
+echo "== [5/6] .env vorbereiten =="
 if [ ! -f .env ]; then
   cp .env.example .env
   NEEDS_ENV_SETUP=1
@@ -74,7 +91,7 @@ else
   NEEDS_ENV_SETUP=0
 fi
 
-echo "== [5/5] Automatische Updates einrichten =="
+echo "== [6/6] Automatische Updates einrichten =="
 # Cron statt Push-per-SSH: die VM zieht sich neue Commits vom Produktions-Branch
 # selbst (alle 15 Min), baut bei Bedarf neu und rollt bei einem fehlgeschlagenen
 # Healthcheck automatisch zurueck - siehe deploy/auto_update.sh fuer Details.

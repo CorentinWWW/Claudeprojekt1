@@ -15,3 +15,11 @@ pydantic==2.13.4
 # Truth-Social Browser-Fallback (empfohlen; TRUTH_SOCIAL_BROWSER_FALLBACK=false zum Abschalten).
 # Nach "pip install" zusaetzlich einmalig ausfuehren: playwright install chromium
 playwright==1.61.0
+
+# FED-Live-Audio (app/sources/fed_audio.py; ENABLE_FED_AUDIO=false zum Abschalten).
+# Braucht zusaetzlich das System-Paket ffmpeg (im Dockerfile bereits enthalten).
+faster-whisper==1.2.1
+# yt-dlp bricht durch YouTube-seitige Aenderungen erfahrungsgemaess oefter als andere
+# Pakete hier - liefert ENABLE_FED_AUDIO trotz korrekt konfiguriertem Zeitfenster keine
+# Ergebnisse, ist eine veraltete yt-dlp-Version der erste Verdaechtige (Version anheben).
+yt-dlp==2026.7.4
