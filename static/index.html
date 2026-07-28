@@ -98,7 +98,7 @@
   .dot.error { background: var(--err); }
   .dot.unknown { background: var(--text-dim); }
 
-  input[type=password], input[type=text], textarea {
+  input[type=password], input[type=text], input[type=number], input[type=date], textarea {
     background: var(--bg); color: var(--text); border: 1px solid var(--border);
     border-radius: 8px; padding: 0.55rem 0.7rem; font-family: inherit; font-size: 0.88rem;
     width: 100%;
@@ -112,6 +112,10 @@
   button.ghost { background: transparent; color: var(--text-dim); border: 1px solid var(--border); }
   .row { display: flex; gap: 0.6rem; align-items: center; flex-wrap: wrap; }
   label { font-size: 0.84rem; color: var(--text-dim); }
+  label.field { display: flex; flex-direction: column; gap: 0.25rem; }
+  label.field input { width: auto; }
+  #btStart, #btEnd { width: 9.5rem; }
+  #btHorizon, #btMaxCalls { width: 4.5rem; }
 
   /* Zugriffs-Panel belegte bisher dauerhaft den besten Platz ganz oben, obwohl der
      Key nur einmal eingegeben wird. Ist er gesetzt, schrumpft es auf eine Zeile. */
@@ -200,6 +204,26 @@
       <label><input type="checkbox" id="testTelegram" checked> Bei Relevanz auch Telegram-Alert senden</label>
     </div>
     <div id="testResult"></div>
+  </div>
+
+  <div class="panel">
+    <h2>Backtest (historische Auswertung)</h2>
+    <div class="subtitle" style="margin-bottom:0.7rem;">
+      Spielt einen Zeitraum durch dieselbe Alarm-Logik wie live und zeigt die
+      Trefferquote je Marktkapitalisierungs-Klasse. Ohne "Ausführen" fällt NIE ein
+      echter Claude-Call an — nur ein Kostenvoranschlag.
+    </div>
+    <div class="row" style="margin-bottom:0.7rem;">
+      <label class="field">Von <input type="date" id="btStart"></label>
+      <label class="field">Bis <input type="date" id="btEnd"></label>
+      <label class="field">Horizont (Handelstage) <input type="number" id="btHorizon" value="3" min="1" max="30"></label>
+      <label class="field">Max. echte Calls <input type="number" id="btMaxCalls" value="30" min="1" max="100"></label>
+    </div>
+    <div class="row">
+      <button id="btDryRunBtn" onclick="runBacktest(false)">💡 Kostenvoranschlag</button>
+      <button id="btExecuteBtn" class="ghost" onclick="runBacktest(true)">⚠️ Ausführen (echte Kosten!)</button>
+    </div>
+    <div id="btResult"></div>
   </div>
 
   <div class="row" style="margin-bottom:0.75rem;">
@@ -568,6 +592,110 @@ async function runTest() {
   }
 }
 
+function todayIso() { return new Date().toISOString().slice(0, 10); }
+function daysAgoIso(n) {
+  const d = new Date();
+  d.setDate(d.getDate() - n);
+  return d.toISOString().slice(0, 10);
+}
+
+function renderBacktestReport(r) {
+  const pct = (v) => (v == null ? '–' : Math.round(v * 100) + '%');
+  const parts = [];
+
+  parts.push(`
+    <div class="tags" style="margin-bottom:0.4rem;">
+      <span class="tag">${r.dry_run ? '💡 Kostenvoranschlag (kein Call)' : '✅ ausgeführt'}</span>
+      <span class="tag">${r.raw_fetched ?? 0} Rohtreffer</span>
+      <span class="tag">${r.after_dedup ?? 0} nach Dedup</span>
+    </div>`);
+
+  if (r.dry_run) {
+    parts.push(`<div class="tags">Geschätzte Kosten für ${r.estimated_calls ?? 0} Calls: ` +
+      `<b>${(r.estimated_cost_usd ?? 0).toFixed(4)} $</b></div>`);
+  } else {
+    parts.push(`
+      <div class="tags">${r.classified ?? 0} Calls ausgeführt` +
+      (r.truncated_by_max_calls ? ' (durch "Max. echte Calls" gekappt)' : '') +
+      ` · tatsächliche Kosten ~<b>${(r.actual_cost_usd ?? 0).toFixed(4)} $</b></div>
+      <div class="tags" style="margin-top:0.3rem;">
+        ${r.alert_worthy ?? 0} alarmwürdig · ${r.ticker_calls_total ?? 0} Ticker-Calls · ` +
+        `${r.outcomes_resolved ?? 0} ausgewertet · ${r.outcomes_pending ?? 0} noch offen (Historie zu kurz)
+      </div>`);
+
+    if (r.hit_rate != null) {
+      parts.push(`
+        <div class="metrics" style="margin-top:0.7rem;">
+          ${metric(pct(r.hit_rate), 'Trefferquote', r.hit_rate >= 0.5 ? 'pos' : 'neg')}
+          ${metric(signed(r.avg_signed_move_pct, 2, '%'), 'Ø Bewegung (Richtung)')}
+        </div>`);
+    }
+
+    if (r.by_tier && Object.keys(r.by_tier).length) {
+      const tierOrder = ['micro', 'small', 'mid', 'large', 'unbekannt'];
+      const rows = Object.keys(r.by_tier)
+        .sort((a, b) => tierOrder.indexOf(a) - tierOrder.indexOf(b))
+        .map(t => {
+          const d = r.by_tier[t];
+          return `<span class="tag">${escapeHtml(t)}: ${pct(d.hit_rate)} ` +
+            `(n=${d.n}, Ø ${signed(d.avg_signed_move_pct, 1, '%')})</span>`;
+        }).join('');
+      parts.push(`<div class="tags" style="margin-top:0.6rem;">Nach Marktkapitalisierung: ${rows}</div>`);
+    }
+  }
+
+  if (r.note) {
+    parts.push(`<div class="tags" style="margin-top:0.6rem; font-style:italic;">${escapeHtml(r.note)}</div>`);
+  }
+  return parts.join('');
+}
+
+async function runBacktest(execute) {
+  const resultEl = document.getElementById('btResult');
+  const start = document.getElementById('btStart').value;
+  const end = document.getElementById('btEnd').value;
+  const horizonDays = parseInt(document.getElementById('btHorizon').value, 10) || 3;
+  const maxCalls = parseInt(document.getElementById('btMaxCalls').value, 10) || 30;
+  if (!start || !end) {
+    resultEl.innerHTML = '<div class="empty">Bitte Start- und Enddatum wählen.</div>';
+    return;
+  }
+
+  // Kostenvoranschlag braucht keine Bestaetigung - erst der echte Claude-Spend.
+  if (execute && !confirm(
+    `Wirklich ausführen? Das macht ECHTE, kostenpflichtige Claude-Calls (max. ${maxCalls}). ` +
+    'Am besten vorher den Kostenvoranschlag geprüft haben.'
+  )) return;
+
+  const dryBtn = document.getElementById('btDryRunBtn');
+  const execBtn = document.getElementById('btExecuteBtn');
+  dryBtn.disabled = true;
+  execBtn.disabled = true;
+  resultEl.innerHTML = `<div class="skeleton">${execute ? 'Klassifiziere' : 'Hole Kostenvoranschlag'}… ` +
+    'kann bei mehreren Tagen etwas dauern.</div>';
+
+  try {
+    const res = await apiFetch('/api/backtest', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        start, end, horizon_days: horizonDays, max_calls: maxCalls, execute,
+      }),
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      resultEl.innerHTML = `<div class="banner error">⛔ ${escapeHtml(data.detail || res.statusText)}</div>`;
+      return;
+    }
+    resultEl.innerHTML = renderBacktestReport(data);
+  } catch (err) {
+    resultEl.innerHTML = `<div class="banner error">⛔ ${escapeHtml(String(err))}</div>`;
+  } finally {
+    dryBtn.disabled = false;
+    execBtn.disabled = false;
+  }
+}
+
 async function refreshAll() {
   await Promise.all([loadFeed(), loadHealth(), loadStats(), loadCalibration(), loadPaper()]);
 }
@@ -593,6 +721,16 @@ document.addEventListener('visibilitychange', () => {
 document.getElementById('apiKeyInput').value = getApiKey();
 syncAccessPanel();
 onlyRelevant.addEventListener('change', loadFeed);
+
+// Sinnvolle Standardwerte: letzte 7 Tage, kein Datum in der Zukunft waehlbar (der
+// Backtest kann per Definition nur Vergangenheit auswerten).
+const btStartEl = document.getElementById('btStart');
+const btEndEl = document.getElementById('btEnd');
+btStartEl.max = todayIso();
+btEndEl.max = todayIso();
+btStartEl.value = daysAgoIso(7);
+btEndEl.value = todayIso();
+
 refreshAll();
 startPolling();
 </script>

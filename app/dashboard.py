@@ -1,9 +1,13 @@
 import asyncio
 import csv
+import datetime
 import hmac
 import io
+import json
 import logging
+import sys
 import time
+from pathlib import Path
 
 from fastapi import Depends, FastAPI, Header, HTTPException
 from fastapi.responses import FileResponse, PlainTextResponse
@@ -49,6 +53,21 @@ _startup_warnings: list[str] = []
 # Maximale Textlaenge fuer /api/test - ohne Cap koennte jemand ein riesiges Dokument
 # einfuegen und damit unnoetig Claude-Tokens/Kosten verursachen.
 MAX_TEST_TEXT_LENGTH = 4000
+
+# Sicherheitsdeckel fuer /api/backtest, UNABHAENGIG davon, was das Formular schickt -
+# schuetzt vor einem (versehentlich) riesigen Zeitraum/Call-Budget ueber die rohe API,
+# nicht nur ueber die UI-Eingabefelder (die dieselben Grenzen als min/max setzen).
+BACKTEST_MAX_CALLS_LIMIT = 100
+BACKTEST_MAX_RANGE_DAYS = 60
+BACKTEST_MAX_HORIZON_DAYS = 30
+# Grosszuegig genug fuer den Standard-Rahmen (60 Tage x taeglicher GDELT-Chunk +
+# BACKTEST_MAX_CALLS_LIMIT Claude-Calls), verhindert aber, dass ein haengender GDELT-
+# oder Claude-Call einen Dashboard-Request auf unbestimmte Zeit offen haelt.
+BACKTEST_TIMEOUT_SECONDS = 600
+# Verhindert, dass ein mehrfacher Klick auf "Ausfuehren" mehrere kostenpflichtige
+# Backtest-Subprozesse gleichzeitig lostreten.
+_backtest_lock = asyncio.Lock()
+_REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
 async def require_api_key(x_api_key: str | None = Header(default=None)):
@@ -377,6 +396,95 @@ async def api_test(req: TestRequest):
         "classification": classification,
         "alert_sent": alert_sent,
     }
+
+
+class BacktestRequest(BaseModel):
+    start: str
+    end: str
+    horizon_days: int = 3
+    max_calls: int = 30
+    execute: bool = False
+
+
+async def _run_backtest_subprocess(cmd: list[str]) -> dict:
+    """Fuehrt app/backtest.py in einem EIGENEN Prozess aus, statt run_backtest()
+    direkt hier zu importieren/aufzurufen. Grund: run_backtest() isoliert sich vom
+    Produktions-Betrieb, indem es die globale app.db.DB_PATH auf eine temporaere Datei
+    umbiegt (siehe app/backtest.py-Docstring) - fuer das eigenstaendige CLI-Tool ist
+    das unproblematisch (frischer Prozess, frischer Modul-Zustand), aber DIESER
+    Dashboard-Prozess laesst gleichzeitig den echten Orchestrator-Loop laufen
+    (run_forever(), siehe startup()), der ueber genau dieselbe globale DB_PATH
+    dauerhaft liest/schreibt. Ein In-Prozess-Aufruf wuerde also fuer die Laufzeit des
+    Backtests (und danach dauerhaft) den Live-Betrieb auf die Backtest-DB umleiten.
+    Ein Subprozess haelt beides sauber getrennt, ohne app/db.py auf eine
+    kontextabhaengige Verbindung umbauen zu muessen."""
+    proc = await asyncio.create_subprocess_exec(
+        *cmd, cwd=str(_REPO_ROOT),
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+    )
+    try:
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=BACKTEST_TIMEOUT_SECONDS)
+    except asyncio.TimeoutError:
+        proc.kill()
+        await proc.wait()
+        raise HTTPException(
+            status_code=504,
+            detail=f"Backtest nach {BACKTEST_TIMEOUT_SECONDS}s abgebrochen (Zeitlimit) - "
+                   "kleineren Zeitraum oder weniger --max-calls versuchen.",
+        )
+    if proc.returncode != 0:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Backtest-Subprozess fehlgeschlagen: {stderr.decode(errors='replace')[-1500:]}",
+        )
+    try:
+        # app.backtest.main() gibt GENAU EIN JSON-Objekt auf stdout aus (siehe
+        # print(json.dumps(report, ...)) dort) - das ist die einzige Ausgabe des CLI-Tools.
+        return json.loads(stdout.decode())
+    except json.JSONDecodeError as exc:
+        raise HTTPException(
+            status_code=500, detail=f"Backtest-Ausgabe nicht als JSON lesbar: {exc}"
+        ) from exc
+
+
+@app.post("/api/backtest", dependencies=[Depends(require_api_key)])
+async def api_backtest(req: BacktestRequest):
+    """Startet app/backtest.py fuer einen Zeitraum und liefert den Report als JSON.
+    Ohne execute=True (Standard) macht das NIE einen echten Claude-Call - siehe
+    app/backtest.py-Docstring. Mit execute=True kostet das echtes Geld, begrenzt durch
+    max_calls (hier zusaetzlich hart gedeckelt, siehe BACKTEST_MAX_CALLS_LIMIT)."""
+    try:
+        start = datetime.date.fromisoformat(req.start)
+        end = datetime.date.fromisoformat(req.end)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=f"Ungueltiges Datum: {exc}") from exc
+    if end < start:
+        raise HTTPException(status_code=400, detail="'end' darf nicht vor 'start' liegen.")
+    if (end - start).days > BACKTEST_MAX_RANGE_DAYS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Zeitraum zu gross (max. {BACKTEST_MAX_RANGE_DAYS} Tage) - schuetzt vor "
+                   "einem versehentlich sehr langen Lauf ueber das Dashboard.",
+        )
+
+    horizon_days = min(max(req.horizon_days, 1), BACKTEST_MAX_HORIZON_DAYS)
+    max_calls = min(max(req.max_calls, 0), BACKTEST_MAX_CALLS_LIMIT)
+
+    if _backtest_lock.locked():
+        raise HTTPException(
+            status_code=409, detail="Es laeuft bereits ein Backtest - bitte warten, bis er fertig ist."
+        )
+
+    cmd = [
+        sys.executable, "-m", "app.backtest",
+        "--start", start.isoformat(), "--end", end.isoformat(),
+        "--horizon-days", str(horizon_days), "--max-calls", str(max_calls),
+    ]
+    if req.execute:
+        cmd.append("--execute")
+
+    async with _backtest_lock:
+        return await _run_backtest_subprocess(cmd)
 
 
 @app.get("/")
