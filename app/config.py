@@ -397,6 +397,25 @@ PAPER_MAX_POSITIONS = _int("PAPER_MAX_POSITIONS", 100)
 # Mindesteinsatz je Position in EUR - faellt der freie Barbestand darunter, wird keine
 # neue Position mehr eroeffnet (kein sinnloser Dust-Trade).
 PAPER_MIN_STAKE = _float("PAPER_MIN_STAKE", 10.0)
+
+# --- Harte Risikogrenzen (Kapitalschutz) ------------------------------------------
+# Zwei Bremsen, die es vorher NICHT gab. Beide greifen VOR dem Eroeffnen und stoppen
+# nur NEUE Positionen - laufende Positionen behalten ihre Stop-/Ziel-Marken, werden
+# also nie mittendrin zwangsliquidiert.
+#
+# 1) Maximaler Drawdown vom bisherigen Hoechststand (nicht vom Startkapital!): faellt
+#    der Depotwert um mehr als diesen Prozentsatz unter seinen eigenen Hoechststand,
+#    werden keine neuen Positionen mehr eroeffnet. Klassische Risk-off-Reissleine gegen
+#    die Abwaertsspirale "Verlust -> aggressiver nachlegen -> groesserer Verlust".
+#    Erholt sich das Depot wieder ueber die Schwelle, laeuft es automatisch weiter.
+#    0 = aus.
+PAPER_MAX_DRAWDOWN_PCT = _float("PAPER_MAX_DRAWDOWN_PCT", 20.0)
+# 2) Maximaler Anteil des Depotwerts, der GLEICHZEITIG in offenen Positionen gebunden
+#    sein darf. Ohne diese Grenze laeuft das Depot voll, bis der freie Barbestand unter
+#    PAPER_MIN_STAKE faellt - also faktisch ~100% investiert, ohne Puffer fuer eine
+#    besonders gute spaetere Gelegenheit und mit voller Marktexposition an einem
+#    schlechten Tag. 0 = aus (altes Verhalten).
+PAPER_MAX_TOTAL_EXPOSURE_PCT = _float("PAPER_MAX_TOTAL_EXPOSURE_PCT", 60.0)
 # Wie oft (Minuten) hoechstens ein Depot-Status ("auf wie viel steht alles") per
 # Telegram geschickt wird, solange Positionen offen sind. Eroeffnungen und (Stop/Ziel-)
 # Schliessungen werden IMMER sofort gemeldet, unabhaengig davon - dieser periodische
