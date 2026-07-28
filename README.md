@@ -358,6 +358,16 @@ python -m app.backtest --start 2026-06-01 --end 2026-06-07 --execute --max-calls
 - Nur GDELT als Quelle (RSS/Truth Social/Fed-Audio haben keine historische Abfrage-API),
   ohne Grenzfall-Eskalation (planbare statt variable Kosten pro Call).
 
+**Auch im Dashboard** (`GET /`): Panel "Backtest (historische Auswertung)" mit
+Von/Bis-Datum, Horizont und Max.-Calls-Feldern. "💡 Kostenvoranschlag" macht — wie die
+CLI ohne `--execute` — nie einen echten Call. "⚠️ Ausführen" fragt vorher per
+Bestätigungsdialog nach, läuft serverseitig in einem **eigenen Subprozess** (nicht im
+Dashboard-Prozess selbst, der ja parallel den Live-Loop fährt — sonst würde die
+DB-Isolation des Backtests kurzzeitig auch den Live-Betrieb umleiten) und zeigt danach
+Trefferquote, Ø-Bewegung und die Aufschlüsselung je Marktkapitalisierungs-Klasse direkt
+im Panel. Serverseitig zusätzlich hart gedeckelt (max. 60 Tage Zeitraum, max. 100 echte
+Calls, 10 Minuten Zeitlimit), unabhängig von den Eingabefeldern.
+
 ## Früher dran sein (Latenz)
 
 Die Alerts kamen zuletzt teils erst, **als die Bewegung schon lief**. Zwei Gegenmaßnahmen:

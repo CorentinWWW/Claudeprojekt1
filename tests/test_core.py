@@ -384,6 +384,38 @@ def test_dashboard_auth():
     )
     check("dashboard: /api/test mit zu langem Text -> 413", resp_413.status_code == 413)
 
+    # /api/backtest: nur die Validierung VOR dem Subprozess-Start ist hier testbar
+    # (kein Netz/Claude-Call in der Test-Suite) - genau das ist aber der wichtige Teil,
+    # da diese Pruefungen einen versehentlich riesigen/kostenpflichtigen Lauf ueber das
+    # Dashboard verhindern sollen, siehe app/dashboard.py.
+    auth_headers = {"X-API-Key": "test-secret-key"}
+    resp_bt_no_key = client.post("/api/backtest", json={"start": "2026-01-01", "end": "2026-01-02"})
+    check("dashboard: /api/backtest ohne Key -> 401", resp_bt_no_key.status_code == 401)
+
+    resp_bt_bad_date = client.post(
+        "/api/backtest", json={"start": "nicht-datum", "end": "2026-01-02"}, headers=auth_headers,
+    )
+    check("dashboard: /api/backtest mit ungueltigem Datum -> 400", resp_bt_bad_date.status_code == 400)
+
+    resp_bt_end_before_start = client.post(
+        "/api/backtest", json={"start": "2026-01-05", "end": "2026-01-01"}, headers=auth_headers,
+    )
+    check(
+        "dashboard: /api/backtest mit end < start -> 400",
+        resp_bt_end_before_start.status_code == 400,
+    )
+
+    resp_bt_too_large = client.post(
+        "/api/backtest",
+        json={"start": "2026-01-01", "end": "2026-12-31"},
+        headers=auth_headers,
+    )
+    check(
+        f"dashboard: /api/backtest ueber {dash.BACKTEST_MAX_RANGE_DAYS} Tage -> 400 "
+        "(schuetzt vor einem sehr langen/teuren Lauf)",
+        resp_bt_too_large.status_code == 400,
+    )
+
     os.unlink(tmp.name)
 
 
