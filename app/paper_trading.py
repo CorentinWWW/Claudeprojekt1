@@ -22,8 +22,10 @@ from app.config import (
     PAPER_COST_BPS,
     PAPER_LOSS_STREAK_SIZE_FACTOR,
     PAPER_LOSS_STREAK_THRESHOLD,
+    PAPER_MAX_DRAWDOWN_PCT,
     PAPER_MAX_HOLDING_HOURS,
     PAPER_MAX_POSITIONS,
+    PAPER_MAX_TOTAL_EXPOSURE_PCT,
     PAPER_MIN_STAKE,
     PAPER_STARTING_CAPITAL,
     PAPER_STATUS_INTERVAL_MINUTES,
@@ -339,6 +341,57 @@ def format_status_message(summary: dict) -> str:
 
 # --- Kontostand ---------------------------------------------------------------------
 
+_HIGH_WATER_META_KEY = "paper_account_high_water"
+
+
+def _account_high_water(account_value: float) -> float:
+    """Hoechststand des Depotwerts (fuer den Drawdown-Stop). Wird bei jedem Aufruf
+    nachgezogen, sobald ein neuer Hoechststand erreicht ist. Bewusst der Hoechststand
+    und nicht das Startkapital als Bezug: sonst waere ein Depot, das erst auf 150%
+    gestiegen und dann auf 110% gefallen ist, formal noch "im Plus" - obwohl es gerade
+    ein Drittel seines Werts verloren hat, also genau die Situation, in der die Bremse
+    greifen soll."""
+    stored = get_meta(_HIGH_WATER_META_KEY)
+    try:
+        peak = float(stored) if stored is not None else PAPER_STARTING_CAPITAL
+    except (TypeError, ValueError):
+        peak = PAPER_STARTING_CAPITAL
+    if account_value > peak:
+        set_meta(_HIGH_WATER_META_KEY, str(account_value))
+        return account_value
+    return peak
+
+
+def risk_block_reason(snap: dict) -> Optional[str]:
+    """Prueft die harten Risikogrenzen VOR dem Eroeffnen einer neuen Position. Gibt einen
+    Klartext-Grund zurueck, wenn nicht eroeffnet werden darf, sonst None.
+
+    Bewusst nur eine Sperre fuer NEUE Positionen: laufende Positionen behalten ihre
+    Stop-/Ziel-Marken und werden nie mittendrin zwangsliquidiert - eine Notbremse, die
+    selbst Verluste realisiert, waere das Gegenteil von Kapitalschutz."""
+    account_value = snap["account_value"]
+
+    if PAPER_MAX_DRAWDOWN_PCT > 0:
+        peak = _account_high_water(account_value)
+        if peak > 0:
+            drawdown_pct = (peak - account_value) / peak * 100.0
+            if drawdown_pct >= PAPER_MAX_DRAWDOWN_PCT:
+                return (
+                    f"Drawdown-Stop aktiv: {drawdown_pct:.1f}% unter Hoechststand "
+                    f"({peak:.2f}€), Grenze {PAPER_MAX_DRAWDOWN_PCT:.0f}%"
+                )
+
+    if PAPER_MAX_TOTAL_EXPOSURE_PCT > 0 and account_value > 0:
+        exposure_pct = snap["open_stake"] / account_value * 100.0
+        if exposure_pct >= PAPER_MAX_TOTAL_EXPOSURE_PCT:
+            return (
+                f"Expositions-Grenze erreicht: {exposure_pct:.0f}% des Depots gebunden, "
+                f"Grenze {PAPER_MAX_TOTAL_EXPOSURE_PCT:.0f}%"
+            )
+
+    return None
+
+
 def account_snapshot() -> dict:
     """Barbestand-Sicht OHNE aktuelle Kurse (fuers Sizing): account_value = Startkapital +
     realisierte Ergebnisse (Cash-Basis), free_cash = davon abzueglich des in offenen
@@ -396,6 +449,17 @@ async def open_positions_for_alert(classification, statement_id, score: Optional
     # Transparenz): macht sichtbar, ob der gemerkte Kurs aus der regulaeren Session oder
     # best-effort ausserhalb (vor-/nachboerslich) stammt.
     session = us_market_session()
+
+    # Harte Risikogrenzen zuerst, EINMAL pro Alert (nicht je Ticker): greift der
+    # Drawdown-Stop oder die Expositions-Grenze, wird gar nichts eroeffnet - und der
+    # Grund geht als normale "keine Position"-Meldung raus, damit die Sperre sichtbar
+    # ist statt still zu wirken.
+    snap_before = account_snapshot()
+    blocked = risk_block_reason(snap_before)
+    if blocked:
+        logger.info("[paper] Risikogrenze greift, keine neue Position: %s", blocked)
+        await send_text(format_no_position_message([f"🛑 {blocked}"], snap_before["free_cash"]))
+        return
 
     opened = 0
     skipped: list[str] = []
