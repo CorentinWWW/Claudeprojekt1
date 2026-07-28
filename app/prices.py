@@ -38,6 +38,15 @@ _STOOQ_HISTORY_URL = "https://stooq.com/q/d/l/?s={symbol}&i=d"
 _YAHOO_CHART_URL = "https://query1.finance.yahoo.com/v8/finance/chart/{ticker}"
 _YAHOO_HEADERS = {"User-Agent": "Mozilla/5.0"}
 
+# Marktkapitalisierung (#Small-Cap-Fokus): der Chart-Endpunkt oben liefert kein
+# marketCap-Feld, dafuer aber Yahoos Batch-Quote-Endpunkt - EIN Call fuer beliebig
+# viele Ticker (Komma-getrennt), statt N Einzelabfragen. Vor allem fuer den Backtest
+# gedacht (app/backtest.py): dort werden viele Ticker auf einmal ausgewertet und in
+# Groessen-Klassen (Small/Mid/Large-Cap) aufgeschluesselt, um die These "Small-Caps
+# haben weniger Verzoegerungs-Nachteil" mit echten Daten zu pruefen statt nur zu
+# behaupten.
+_YAHOO_QUOTE_URL = "https://query1.finance.yahoo.com/v7/finance/quote"
+
 # --- Kurz-Cache + Circuit-Breaker (#13) -------------------------------------------
 # Cache: dieselbe Ticker-Quote wird innerhalb von PRICE_CACHE_TTL_SECONDS nicht erneut
 # vom Kursdienst geholt (spart HTTP-Calls, wenn ein Ticker in einem Zyklus mehrfach
@@ -274,6 +283,86 @@ def parse_yahoo_history_json(data: Optional[dict], max_bars: int = 400) -> Optio
         "close": out_c[-max_bars:],
         "volume": out_v[-max_bars:],
     }
+
+
+def parse_yahoo_market_cap_json(data: Optional[dict]) -> dict[str, float]:
+    """Parst die Antwort von query1.finance.yahoo.com/v7/finance/quote zu
+    {TICKER: marktkapitalisierung_usd}. Ticker ohne gueltiges marketCap-Feld (z.B.
+    unbekanntes Symbol, ETF ohne Market Cap) fehlen im Ergebnis-Dict komplett statt mit
+    None drin zu stehen - Aufrufer pruefen einfach per 'in'/.get()."""
+    try:
+        results = (data or {}).get("quoteResponse", {}).get("result") or []
+    except (AttributeError, TypeError):
+        return {}
+    out: dict[str, float] = {}
+    for row in results:
+        if not isinstance(row, dict):
+            continue
+        symbol = row.get("symbol")
+        cap = row.get("marketCap")
+        if not symbol or not isinstance(cap, (int, float)) or isinstance(cap, bool):
+            continue
+        cap = float(cap)
+        if math.isfinite(cap) and cap > 0:
+            out[symbol.upper()] = cap
+    return out
+
+
+async def get_market_caps(
+    tickers: list[str], client: Optional[httpx.AsyncClient] = None
+) -> dict[str, float]:
+    """Marktkapitalisierung (USD) fuer mehrere Ticker in EINEM Batch-Call (Yahoo erlaubt
+    Komma-getrennte Symbole). Best-effort wie der Rest dieses Moduls: liefert bei jedem
+    Problem ein leeres Dict, nie eine Exception nach aussen. Fehlende Ticker im
+    Ergebnis-Dict = keine Daten verfuegbar, nicht zwingend ein Fehler."""
+    tickers = [t.strip().upper() for t in tickers if t and t.strip()]
+    if not tickers:
+        return {}
+    params = {"symbols": ",".join(dict.fromkeys(tickers))}  # dedupe, Reihenfolge egal
+    try:
+        if client is not None:
+            resp = await client.get(_YAHOO_QUOTE_URL, params=params, headers=_YAHOO_HEADERS)
+        else:
+            async with httpx.AsyncClient(timeout=10, follow_redirects=True) as c:
+                resp = await c.get(_YAHOO_QUOTE_URL, params=params, headers=_YAHOO_HEADERS)
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception:
+        logger.debug("Marktkapitalisierungs-Abfrage fehlgeschlagen (best-effort).", exc_info=True)
+        return {}
+    return parse_yahoo_market_cap_json(data)
+
+
+async def get_market_cap(ticker: str, client: Optional[httpx.AsyncClient] = None) -> Optional[float]:
+    """Einzel-Ticker-Komfortfunktion um get_market_caps() - fuer Stellen, an denen nur
+    ein Ticker gebraucht wird (die Batch-Funktion ist effizienter, wenn mehrere Ticker
+    auf einmal ausgewertet werden, siehe app/backtest.py)."""
+    if not ticker:
+        return None
+    caps = await get_market_caps([ticker], client=client)
+    return caps.get(ticker.strip().upper())
+
+
+# Groessen-Klassen fuer die Backtest-Auswertung (grobe, gebraeuchliche US-Markt-
+# Konvention - keine Anlageberatung, nur eine Analyse-Kategorisierung).
+MARKET_CAP_TIERS = (
+    ("micro", 0, 300_000_000),
+    ("small", 300_000_000, 2_000_000_000),
+    ("mid", 2_000_000_000, 10_000_000_000),
+    ("large", 10_000_000_000, float("inf")),
+)
+
+
+def market_cap_tier(market_cap_usd: Optional[float]) -> Optional[str]:
+    """Ordnet eine Marktkapitalisierung einer groben Groessen-Klasse zu (micro/small/
+    mid/large), fuer die Backtest-Aufschluesselung nach Ticker-Groesse. None bei
+    fehlendem/ungueltigem Wert."""
+    if not isinstance(market_cap_usd, (int, float)) or market_cap_usd <= 0:
+        return None
+    for name, lo, hi in MARKET_CAP_TIERS:
+        if lo <= market_cap_usd < hi:
+            return name
+    return None
 
 
 async def _fetch_quote_by_symbol(
