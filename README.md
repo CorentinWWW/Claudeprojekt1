@@ -293,11 +293,12 @@ GitHub-Actions-Workflow bereits an, abschaltbar über die Repo-Variable `PAPER_T
   echtem Geld nachbauen.
 - Ein **Gegensignal** (z.B. offene Long-Position, neuer Short-Alert auf denselben Ticker)
   **dreht die Position**: die alte wird glattgestellt, die neue eröffnet.
-- Solange Positionen offen sind, kommt **laufend ein Depot-Status** per Telegram — „auf wie
-  viel steht alles": Gesamtwert, freier Bestand und je Position der aktuelle Kurs samt
-  (noch nicht realisiertem) Gewinn/Verlust. Gedrosselt auf `PAPER_STATUS_INTERVAL_MINUTES`
-  (Standard 30 Min), damit es nicht spammt; Eröffnungen und Schließungen melden sich
-  **immer sofort**, unabhängig davon.
+- Optional ein **laufender Depot-Status** per Telegram — „auf wie viel steht alles":
+  Gesamtwert, freier Bestand und je Position der aktuelle Kurs samt (noch nicht
+  realisiertem) Gewinn/Verlust. Gedrosselt auf `PAPER_STATUS_INTERVAL_MINUTES`
+  (**Standard 0 = aus** — Eröffnungen und Schließungen melden sich ohnehin **immer
+  sofort**, unabhängig davon; ein zusätzlicher periodischer Status ist rein optional
+  und muss explizit gesetzt werden, sonst spammt er).
 - Der Depot-Zustand (offene/geschlossene Positionen, realisierter Gewinn) liegt in der
   SQLite-DB und **überlebt einzelne GitHub-Actions-Läufe** über den DB-Cache.
 - **Kapitalerhalt-Modus** (`PAPER_CAPITAL_PRESERVATION`, Standard an): laufen
@@ -305,10 +306,57 @@ GitHub-Actions-Workflow bereits an, abschaltbar über die Repo-Variable `PAPER_T
   wird die Positionsgröße automatisch mit `PAPER_LOSS_STREAK_SIZE_FACTOR` (Standard 0.5 =
   halbiert) verkleinert — Risk-off nach einer Pechsträhne, statt unverändert
   weiterzumachen. Der Depot-Status weist aktives Risk-off mit 🛡 aus.
+- **Harte Risikogrenzen** (Kapitalschutz, unabhängig vom Kapitalerhalt-Modus oben):
+  `PAPER_MAX_DRAWDOWN_PCT` (Standard 20 %) sperrt das Eröffnen **neuer** Positionen,
+  sobald der Depotwert um diesen Prozentsatz vom bisherigen **Höchststand** (nicht vom
+  Startkapital) gefallen ist — selbstheilend, sobald sich das Depot wieder über die
+  Schwelle erholt. `PAPER_MAX_TOTAL_EXPOSURE_PCT` (Standard 60 %) sperrt neue Positionen,
+  sobald so viel vom Depotwert bereits in offenen Positionen gebunden ist. Beide sperren
+  **nur neue** Positionen — laufende werden nie zwangsliquidiert, sie behalten ihre
+  Stop-/Ziel-Marken. Eine gesperrte Eröffnung wird wie jede andere „keine Position"-Lücke
+  sichtbar per Telegram gemeldet (kein stilles Nichtstun). 0 = jeweils aus.
 
 Braucht erreichbare Kursdaten (Stooq, best-effort — wie das Preis-Tracking); ist der
 Kursdienst mal nicht erreichbar, entfällt das Eröffnen/Bewerten still. Telegram muss
 konfiguriert sein, sonst laufen die Positionen nur stumm in der DB mit.
+
+## Backtest (historische Auswertung)
+
+`app/backtest.py` spielt einen selbst gewählten historischen Zeitraum durch **dieselbe**
+Gating-Logik wie die Live-Pipeline (`is_alert_worthy()`/`actionable_tickers()` aus
+`app/orchestrator.py`) und wertet aus, wie sich die aufgerufenen Ticker in den
+Handelstagen danach tatsächlich bewegt haben — aufgeschlüsselt nach
+Marktkapitalisierungs-Klasse (micro/small/mid/large, `app/prices.py`), um zu prüfen, ob
+Small-Caps tatsächlich einen geringeren Verzögerungs-Nachteil haben, statt es nur zu
+behaupten.
+
+```bash
+# 1. Immer zuerst ohne --execute: reiner Kostenvoranschlag, KEIN Claude-Call
+python -m app.backtest --start 2026-06-01 --end 2026-06-07
+
+# 2. Erst nach Prüfung des Voranschlags tatsächlich klassifizieren (max. 30 echte
+#    Calls in diesem Beispiel, unabhängig von der Zeitraumgröße)
+python -m app.backtest --start 2026-06-01 --end 2026-06-07 --execute --max-calls 30
+```
+
+**Wichtig, ehrlich:**
+- **Kostenkontrolle**: Ohne `--execute` wird **niemals** ein echter Claude-Call gemacht
+  — nur ein aus den tatsächlichen Prompt-Bestandteilen hergeleiteter Kostenvoranschlag.
+  Mit `--execute` begrenzt `--max-calls` die Anzahl echter Calls **hart**, unabhängig vom
+  normalen Tages-Limit der Live-Pipeline (das gilt hier nicht — der Backtest läuft immer
+  gegen eine **isolierte** Datenbank, nie gegen die Produktions-DB, siehe `--db-path`).
+- **Historische Abdeckung**: Ob/wie weit GDELTs kostenlose API rückwirkend Daten
+  liefert, ist nicht garantiert — ein leerer `raw_fetched`-Wert für einen weit
+  zurückliegenden Zeitraum ist das ehrliche Signal dafür, kein Bug.
+- **Auswertungs-Horizont**: Die Live-Pipeline bewertet ein Ergebnis über ein kurzes
+  Intraday-Fenster (`PRICE_OUTCOME_HORIZON_MINUTES`, Standard 60 Minuten). Für die
+  Vergangenheit liefern die hier genutzten kostenlosen Quellen aber nur
+  Tages-Schlusskurse — der Backtest misst die Bewegung deshalb zwangsläufig über
+  **Handelstage** (`--horizon-days`, Standard 3), nicht Minuten. Das ist keine
+  gleichwertige Nachbildung des Live-Verhaltens, sondern die beste mit kostenlosen Daten
+  mögliche Näherung.
+- Nur GDELT als Quelle (RSS/Truth Social/Fed-Audio haben keine historische Abfrage-API),
+  ohne Grenzfall-Eskalation (planbare statt variable Kosten pro Call).
 
 ## Früher dran sein (Latenz)
 
