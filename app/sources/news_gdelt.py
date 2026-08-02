@@ -47,6 +47,33 @@ MARKET_KEYWORDS = (
 # dokumentierte, nicht wegprogrammierbare Grenze der kostenlosen API.
 GDELT_MAX_RECORDS_PER_QUERY = 250
 
+# Ein sprechender User-Agent statt des httpx-Defaults ("python-httpx/0.x"). Zwei
+# Gruende: (a) es ist schlicht hoeflich, sich gegenueber einer kostenlosen API zu
+# identifizieren, (b) generische Client-Defaults sind ein gaengiges Signal fuer
+# automatisierten Traffic und werden von Anbietern haerter gedrosselt/gesperrt als
+# identifizierte Clients. Kein Versuch, sich als Browser zu tarnen - der Bot gibt
+# ehrlich an, was er ist.
+GDELT_USER_AGENT = (
+    "MarketImpactPredictor/1.0 (hobby news-monitoring bot; "
+    "https://github.com/CorentinWWW/Claudeprojekt1)"
+)
+GDELT_HEADERS = {"User-Agent": GDELT_USER_AGENT}
+
+# --- Rate-Limit-Schutzschalter (Circuit Breaker) --------------------------------------
+# GDELT antwortet auf Ueberlastung mit HTTP 429 ("Please limit requests to one every 5
+# seconds"). Live beobachtet: sobald diese Sperre einmal greift, liefert sie auch fuer
+# EINZELNE, weit auseinanderliegende Anfragen (>15 Minuten Abstand, simples query=stock)
+# weiterhin 429 - es ist also keine reine Frequenz-Drosselung, sondern eine laenger
+# anhaltende IP-seitige Sperre.
+#
+# Ohne Schutzschalter fragt der Live-Poll trotzdem in JEDEM Zyklus rund um die Uhr
+# weiter an und produziert dabei nichts ausser Fehlern und Log-Rauschen - im besten Fall
+# nutzlos, im schlechtesten verlaengert es die Sperre. Nach einem 429 wird die Quelle
+# deshalb fuer eine wachsende Zeitspanne komplett stillgelegt und meldet das sichtbar
+# (siehe Source.last_failure), statt es still zu tun. Ein einziger Erfolg setzt alles
+# zurueck.
+GDELT_RATE_LIMIT_COOLDOWNS_SECONDS = (15 * 60, 30 * 60, 60 * 60, 120 * 60)
+
 
 def _parse_gdelt_response(data, seen: set) -> list[RawStatement]:
     """Gemeinsamer Parser fuer Live-Poll UND historische Abfragen (app/backtest.py).
@@ -135,9 +162,9 @@ async def fetch_range(
 
     async def _fetch():
         if client is not None:
-            resp = await client.get(url)
+            resp = await client.get(url, headers=GDELT_HEADERS)
         else:
-            async with httpx.AsyncClient(timeout=30) as c:
+            async with httpx.AsyncClient(timeout=30, headers=GDELT_HEADERS) as c:
                 resp = await c.get(url)
         resp.raise_for_status()
         return resp.json()
@@ -154,8 +181,41 @@ class GdeltNewsSource(Source):
 
     def __init__(self):
         self._seen: BoundedSeenSet = BoundedSeenSet(maxlen=5000)
+        # Schutzschalter-Zustand (siehe GDELT_RATE_LIMIT_COOLDOWNS_SECONDS).
+        self._blocked_until: float = 0.0
+        self._rate_limit_strikes: int = 0
+
+    def _enter_cooldown(self) -> float:
+        """Legt die Quelle nach einem 429 fuer eine wachsende Zeitspanne still und gibt
+        die gewaehlte Dauer in Sekunden zurueck."""
+        idx = min(self._rate_limit_strikes, len(GDELT_RATE_LIMIT_COOLDOWNS_SECONDS) - 1)
+        cooldown = GDELT_RATE_LIMIT_COOLDOWNS_SECONDS[idx]
+        self._rate_limit_strikes += 1
+        self._blocked_until = time.time() + cooldown
+        return cooldown
+
+    def _reset_cooldown(self) -> None:
+        self._blocked_until = 0.0
+        self._rate_limit_strikes = 0
 
     async def poll(self) -> list[RawStatement]:
+        remaining = self._blocked_until - time.time()
+        if remaining > 0:
+            # Bewusst ueber note_failure sichtbar gemacht statt still zu ueberspringen -
+            # sonst waere eine pausierte Quelle im Dashboard/Live-Signal von "gerade
+            # keine passenden Nachrichten" nicht zu unterscheiden (genau die Luecke, die
+            # Source.last_failure schliessen soll).
+            self.last_failure = (
+                f"GDELT-Rate-Limit: Abfragen pausiert fuer noch {remaining / 60:.0f} Min "
+                f"(nach {self._rate_limit_strikes} Sperre(n) in Folge). Die Sperre kommt "
+                "von GDELT selbst und loest sich nur durch Abwarten."
+            )
+            logger.info(
+                "[news_gdelt] Rate-Limit-Pause aktiv, ueberspringe Poll (noch %.0f Min).",
+                remaining / 60,
+            )
+            return []
+
         params = {
             # sourcelang:english schraenkt auf englischsprachige Artikel ein - GDELT
             # deckt Nachrichten global in vielen Sprachen ab, und dieselbe Aussage wird
@@ -175,7 +235,7 @@ class GdeltNewsSource(Source):
         url = f"{GDELT_ENDPOINT}?{urlencode(params)}"
 
         async def _fetch():
-            async with httpx.AsyncClient(timeout=20) as client:
+            async with httpx.AsyncClient(timeout=20, headers=GDELT_HEADERS) as client:
                 resp = await client.get(url)
                 resp.raise_for_status()
                 return resp.json()
@@ -185,7 +245,30 @@ class GdeltNewsSource(Source):
             # HTTP-Statusfehler wie 429/403 wuerde sich innerhalb weniger Sekunden
             # ohnehin nicht aendern, das erledigt der naechste Poll-Zyklus.
             data = await retry_async(_fetch, retries=2, backoff_seconds=2.0, retry_on=(httpx.TransportError,))
-            return _parse_gdelt_response(data, seen=self._seen)
+            result = _parse_gdelt_response(data, seen=self._seen)
+            # Erfolg hebt eine zuvor verhaengte Pause vollstaendig auf - eine einmalige
+            # Sperre soll die Quelle nicht dauerhaft auf langen Cooldowns halten.
+            self._reset_cooldown()
+            return result
+        except httpx.HTTPStatusError as exc:
+            if exc.response is not None and exc.response.status_code == 429:
+                cooldown = self._enter_cooldown()
+                # Kein logger.exception(): ein Rate-Limit ist ein erwarteter Zustand
+                # dieser kostenlosen API, kein Programmfehler - ein voller Traceback pro
+                # Zyklus waere reines Log-Rauschen.
+                logger.warning(
+                    "[news_gdelt] Von GDELT rate-limited (429) - pausiere Abfragen fuer "
+                    "%.0f Minuten, statt weiter anzufragen.", cooldown / 60,
+                )
+                self.last_failure = (
+                    f"GDELT-Rate-Limit (429): Abfragen fuer {cooldown / 60:.0f} Min "
+                    "pausiert, um die Sperre nicht zu verlaengern. Loest sich durch "
+                    "Abwarten - siehe README (Rate-Limit)."
+                )
+                return []
+            logger.exception("GDELT-Abfrage fehlgeschlagen")
+            self.note_failure(exc)
+            return []
         except Exception as exc:
             logger.exception("GDELT-Abfrage fehlgeschlagen")
             # Ohne diese Meldung waere ein dauerhaft kaputtes GDELT (Endpoint

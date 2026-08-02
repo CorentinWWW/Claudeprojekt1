@@ -123,6 +123,84 @@ def test_fetch_range_retried_bei_429_und_liefert_am_ende_daten():
           out and out[0].text.startswith("Fed hikes rates"))
 
 
+def test_gdelt_429_pausiert_statt_weiter_zu_hammern():
+    """Regressionstest fuer einen echten Live-Fund: nachdem GDELT die Server-IP wegen
+    Ueberlastung gesperrt hatte, fragte der Live-Poll TROTZDEM in jedem Zyklus rund um
+    die Uhr weiter an - und bekam jedes Mal 429. Das brachte nichts ausser Log-Rauschen
+    und verlaengerte die Sperre eher, als dass es half. Nach einem 429 muss die Quelle
+    sich selbst stilllegen (sichtbar, nicht still) und ein spaeterer Erfolg muss die
+    Pause wieder vollstaendig aufheben."""
+    _fresh()
+    import app.sources.news_gdelt as g
+    importlib.reload(g)
+    import httpx as httpx_mod
+
+    calls = {"n": 0}
+    responses = {"mode": "429"}
+
+    class SwitchableClient:
+        def __init__(self, *a, **kw): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *a): return False
+        async def get(self, url, *a, **kw):
+            calls["n"] += 1
+            req = httpx_mod.Request("GET", url)
+            if responses["mode"] == "429":
+                return httpx_mod.Response(429, request=req, text="rate limited")
+            return httpx_mod.Response(200, request=req, json={
+                "articles": [{
+                    "url": "https://example.com/a", "title": "Fed hikes rates",
+                    "domain": "example.com", "seendate": "20260701120000",
+                }],
+            })
+
+    g.httpx.AsyncClient = SwitchableClient
+    src = g.GdeltNewsSource()
+
+    out = asyncio.run(src.poll())
+    calls_after_first = calls["n"]
+    check("429: liefert leere Liste (Zyklus laeuft weiter)", out == [])
+    check("429: wird als Fehlschlag gemeldet (nicht still)", src.last_failure is not None)
+    check("429: Grund nennt das Rate-Limit",
+          src.last_failure and "Rate-Limit" in src.last_failure)
+
+    # Zweiter Poll direkt danach: darf GDELT gar nicht erst kontaktieren.
+    out2 = asyncio.run(src.poll())
+    check("Pause aktiv: KEINE weitere Anfrage an GDELT", calls["n"] == calls_after_first)
+    check("Pause aktiv: liefert weiterhin leere Liste", out2 == [])
+    check("Pause aktiv: bleibt als Fehlschlag sichtbar",
+          src.last_failure and "pausiert" in src.last_failure.lower())
+
+    # Pause manuell ablaufen lassen + GDELT antwortet wieder normal.
+    src._blocked_until = 0.0
+    responses["mode"] = "ok"
+    out3 = asyncio.run(src.poll())
+    check("nach Ablauf der Pause wird wieder abgefragt", len(out3) == 1)
+    check("Erfolg setzt den Schutzschalter komplett zurueck",
+          src._rate_limit_strikes == 0 and src._blocked_until == 0.0)
+
+
+def test_gdelt_cooldown_waechst_bei_wiederholten_sperren():
+    """Eine einzelne kurze Ueberlastung soll nur kurz pausieren, eine hartnaeckige
+    Sperre laenger - sonst haemmert der Bot bei einer stundenlangen Sperre weiter im
+    Minutentakt dagegen."""
+    _fresh()
+    import app.sources.news_gdelt as g
+    importlib.reload(g)
+
+    src = g.GdeltNewsSource()
+    first = src._enter_cooldown()
+    second = src._enter_cooldown()
+    third = src._enter_cooldown()
+    check("zweite Sperre pausiert laenger als die erste", second > first)
+    check("dritte Sperre pausiert laenger als die zweite", third > second)
+
+    for _ in range(20):
+        capped = src._enter_cooldown()
+    check("Cooldown ist nach oben gedeckelt (waechst nicht unbegrenzt)",
+          capped == max(g.GDELT_RATE_LIMIT_COOLDOWNS_SECONDS))
+
+
 def test_truth_social_ohne_token_und_ohne_fallback():
     """Genau die Konfiguration der Produktions-VM: kein Bearer-Token, Browser-Fallback
     wegen 1 GB RAM abgeschaltet. Diese Quelle liefert dauerhaft nichts - das muss
@@ -238,6 +316,8 @@ def test_orchestrator_uebernimmt_den_fehlschlag():
 def main():
     test_gdelt_meldet_fehlschlag()
     test_fetch_range_retried_bei_429_und_liefert_am_ende_daten()
+    test_gdelt_429_pausiert_statt_weiter_zu_hammern()
+    test_gdelt_cooldown_waechst_bei_wiederholten_sperren()
     test_truth_social_ohne_token_und_ohne_fallback()
     test_leere_antwort_ist_KEIN_fehlschlag()
     test_rss_einzelner_feed_kaputt_ist_kein_quellenausfall()
