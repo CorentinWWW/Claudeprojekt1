@@ -90,6 +90,21 @@ def test_outcome_none_bei_ungueltiger_richtung():
     check("Richtung ausserhalb long/short -> None", o is None)
 
 
+def test_multi_horizon_wertet_alle_gleichzeitig_aus():
+    # _HIST hat 5 Handelstage (Indizes 0-4) - ab Index 0 (2026-01-01) sind die
+    # Horizonte 1-4 auswertbar (exit_idx 1-4 < len=5), Horizont 5 nicht mehr
+    # (exit_idx 5 >= len=5, Historie zu kurz).
+    results = bt.evaluate_ticker_outcomes_multi(
+        "AAA", "long", 0.9, _ts("2026-01-01"), _HIST, [1, 2, 3, 4, 5],
+    )
+    check("Horizonte 1/2/3/4 auswertbar", set(results.keys()) == {1, 2, 3, 4})
+    check("Horizont 5 fehlt (Historie zu kurz), kein Fehler", 5 not in results)
+    check("Horizont 1 nutzt denselben Einstiegskurs wie Horizont 3",
+          results[1].entry_close == results[3].entry_close == 100.0)
+    check("unterschiedliche Horizonte liefern unterschiedliche Ausstiegskurse",
+          results[1].exit_close != results[3].exit_close)
+
+
 def test_outcome_wochenende_springt_zum_naechsten_handelstag():
     # 2026-01-04 (Sonntag) ist kein Handelstag in _HIST - Veroeffentlichung an einem
     # Wochenende muss auf den naechsten verfuegbaren Handelstag (01-06) rutschen.
@@ -201,6 +216,74 @@ def test_execute_liefert_aufgeloeste_ergebnisse_mit_tier():
     check("actual_cost_usd > 0 nach echtem Lauf", report.get("actual_cost_usd", 0) > 0)
 
 
+def test_execute_mit_mehreren_horizonten_liefert_by_horizon():
+    """Der eigentliche Zweck des Multi-Horizont-Umbaus: EIN bezahlter Klassifikations-
+    Call, aber ein Vergleich ueber mehrere Haltezeitraeume - ohne fuer jeden Horizont
+    erneut zu klassifizieren."""
+    orig_fetch_range, orig_classify = bt.fetch_range, bt.classify
+    orig_get_history, orig_get_caps = bt.prices.get_history, bt.prices.get_market_caps
+    calls = {"n": 0}
+
+    async def fake_fetch_range(start, end, client=None):
+        return [
+            RawStatement(
+                source="news_gdelt", source_id="https://x/1",
+                text="Tariffs imposed on AAA imports, shares expected to react.",
+                published_at=_ts("2026-01-01"),
+            )
+        ]
+
+    async def fake_classify(text, recent_context=None, _bypass_daily_cap=False, **kw):
+        calls["n"] += 1
+        return Classification(
+            is_market_relevant=True, sentiment="negative", confidence=0.95,
+            ticker_calls=[{"ticker": "AAA", "direction": "long", "confidence": 0.95}],
+        )
+
+    long_hist = {
+        "date": [f"2026-01-{d:02d}" for d in range(1, 13)],
+        "close": [100.0, 101.0, 102.0, 103.0, 104.0, 105.0, 106.0, 107.0, 108.0, 109.0, 110.0, 111.0],
+    }
+
+    async def fake_get_history(ticker, client=None):
+        return long_hist
+
+    async def fake_get_market_caps(tickers, client=None):
+        return {"AAA": 500_000_000}
+
+    bt.fetch_range = fake_fetch_range
+    bt.classify = fake_classify
+    bt.prices.get_history = fake_get_history
+    bt.prices.get_market_caps = fake_get_market_caps
+    try:
+        report = asyncio.run(bt.run_backtest(
+            datetime.date(2026, 1, 1), datetime.date(2026, 1, 1),
+            execute=True, max_calls=10, horizon_days=[5, 1, 3], db_path=_tmp_db_path(),
+        ))
+    finally:
+        bt.fetch_range, bt.classify = orig_fetch_range, orig_classify
+        bt.prices.get_history, bt.prices.get_market_caps = orig_get_history, orig_get_caps
+
+    check("genau EIN Claude-Call fuer alle Horizonte zusammen", calls["n"] == 1)
+    check("horizon_days im Report als sortierte Liste", report.get("horizon_days") == [1, 3, 5])
+    check(
+        "by_horizon enthaelt alle drei Horizonte",
+        set(report.get("by_horizon", {}).keys()) == {"1", "3", "5"},
+    )
+    check(
+        "jeder Horizont hat genau ein Ergebnis",
+        all(v["n"] == 1 for v in report.get("by_horizon", {}).values()),
+    )
+    check(
+        "laengerer Horizont zeigt bei durchgehend steigendem Kurs groessere Ø-Bewegung",
+        report["by_horizon"]["5"]["avg_signed_move_pct"] > report["by_horizon"]["1"]["avg_signed_move_pct"],
+    )
+    check(
+        "hit_rate/by_tier beziehen sich auf den primaeren (kleinsten) Horizont",
+        report.get("hit_rate") == 1.0 and report.get("by_tier", {}).get("small", {}).get("n") == 1,
+    )
+
+
 def test_max_calls_begrenzt_echte_ausgaben_hart():
     orig_fetch_range, orig_classify = bt.fetch_range, bt.classify
     calls = {"n": 0}
@@ -277,9 +360,11 @@ def main():
     test_outcome_none_ohne_historie()
     test_outcome_none_bei_ungueltiger_richtung()
     test_outcome_wochenende_springt_zum_naechsten_handelstag()
+    test_multi_horizon_wertet_alle_gleichzeitig_aus()
     test_tier_breakdown_gruppiert_und_aggregiert()
     test_dry_run_macht_niemals_einen_claude_call()
     test_execute_liefert_aufgeloeste_ergebnisse_mit_tier()
+    test_execute_mit_mehreren_horizonten_liefert_by_horizon()
     test_max_calls_begrenzt_echte_ausgaben_hart()
     test_explizite_db_path_wird_tatsaechlich_verwendet()
 

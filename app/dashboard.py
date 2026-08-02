@@ -60,6 +60,7 @@ MAX_TEST_TEXT_LENGTH = 4000
 BACKTEST_MAX_CALLS_LIMIT = 100
 BACKTEST_MAX_RANGE_DAYS = 60
 BACKTEST_MAX_HORIZON_DAYS = 30
+BACKTEST_MAX_HORIZONS_COUNT = 6
 # Grosszuegig genug fuer den Standard-Rahmen (60 Tage x taeglicher GDELT-Chunk +
 # BACKTEST_MAX_CALLS_LIMIT Claude-Calls), verhindert aber, dass ein haengender GDELT-
 # oder Claude-Call einen Dashboard-Request auf unbestimmte Zeit offen haelt.
@@ -401,7 +402,10 @@ async def api_test(req: TestRequest):
 class BacktestRequest(BaseModel):
     start: str
     end: str
-    horizon_days: int = 3
+    # Mehrere Horizonte werden aus DERSELBEN Klassifikation ausgewertet (siehe
+    # app/backtest.py: evaluate_ticker_outcomes_multi) - kostet also nicht mehr als ein
+    # einzelner Horizont, beantwortet aber "welcher Haltezeitraum funktioniert besser".
+    horizon_days: list[int] = [1, 3, 5, 10]
     max_calls: int = 30
     execute: bool = False
 
@@ -467,7 +471,13 @@ async def api_backtest(req: BacktestRequest):
                    "einem versehentlich sehr langen Lauf ueber das Dashboard.",
         )
 
-    horizon_days = min(max(req.horizon_days, 1), BACKTEST_MAX_HORIZON_DAYS)
+    # Deckel unabhaengig von den Eingabefeldern: max. Anzahl Horizonte, jeder einzelne
+    # Horizont max. BACKTEST_MAX_HORIZON_DAYS, doppelte/negative Werte bereinigt.
+    horizons = sorted({min(max(int(h), 1), BACKTEST_MAX_HORIZON_DAYS) for h in req.horizon_days})[
+        :BACKTEST_MAX_HORIZONS_COUNT
+    ]
+    if not horizons:
+        horizons = [3]
     max_calls = min(max(req.max_calls, 0), BACKTEST_MAX_CALLS_LIMIT)
 
     if _backtest_lock.locked():
@@ -478,7 +488,7 @@ async def api_backtest(req: BacktestRequest):
     cmd = [
         sys.executable, "-m", "app.backtest",
         "--start", start.isoformat(), "--end", end.isoformat(),
-        "--horizon-days", str(horizon_days), "--max-calls", str(max_calls),
+        "--horizon-days", ",".join(str(h) for h in horizons), "--max-calls", str(max_calls),
     ]
     if req.execute:
         cmd.append("--execute")

@@ -335,7 +335,9 @@ behaupten.
 python -m app.backtest --start 2026-06-01 --end 2026-06-07
 
 # 2. Erst nach Prüfung des Voranschlags tatsächlich klassifizieren (max. 30 echte
-#    Calls in diesem Beispiel, unabhängig von der Zeitraumgröße)
+#    Calls in diesem Beispiel, unabhängig von der Zeitraumgröße). --horizon-days nimmt
+#    eine kommagetrennte Liste (Standard '1,3,5,10') - ALLE Horizonte werden aus
+#    DERSELBEN Klassifikation ausgewertet, kostet also nicht mehr als einer.
 python -m app.backtest --start 2026-06-01 --end 2026-06-07 --execute --max-calls 30
 ```
 
@@ -352,14 +354,19 @@ python -m app.backtest --start 2026-06-01 --end 2026-06-07 --execute --max-calls
   Intraday-Fenster (`PRICE_OUTCOME_HORIZON_MINUTES`, Standard 60 Minuten). Für die
   Vergangenheit liefern die hier genutzten kostenlosen Quellen aber nur
   Tages-Schlusskurse — der Backtest misst die Bewegung deshalb zwangsläufig über
-  **Handelstage** (`--horizon-days`, Standard 3), nicht Minuten. Das ist keine
-  gleichwertige Nachbildung des Live-Verhaltens, sondern die beste mit kostenlosen Daten
-  mögliche Näherung.
+  **Handelstage** (`--horizon-days`), nicht Minuten. Das ist keine gleichwertige
+  Nachbildung des Live-Verhaltens, sondern die beste mit kostenlosen Daten mögliche
+  Näherung.
+- **Mehrere Horizonte gleichzeitig**: `--horizon-days 1,3,5,10` (Standard) wertet
+  denselben klassifizierten Artikel für alle vier Haltezeiträume aus (nur Kursdaten,
+  die sind gratis) und liefert im Report zusätzlich `by_horizon` — beantwortet "welcher
+  Haltezeitraum funktioniert besser" ohne einen zweiten bezahlten Lauf.
+  `hit_rate`/`by_tier` beziehen sich immer auf den ersten (kleinsten) Horizont der Liste.
 - Nur GDELT als Quelle (RSS/Truth Social/Fed-Audio haben keine historische Abfrage-API),
   ohne Grenzfall-Eskalation (planbare statt variable Kosten pro Call).
 
 **Auch im Dashboard** (`GET /`): Panel "Backtest (historische Auswertung)" mit
-Von/Bis-Datum, Horizont und Max.-Calls-Feldern. "💡 Kostenvoranschlag" macht — wie die
+Von/Bis-Datum, Horizonte (kommagetrennt) und Max.-Calls-Feldern. "💡 Kostenvoranschlag" macht — wie die
 CLI ohne `--execute` — nie einen echten Call. "⚠️ Ausführen" fragt vorher per
 Bestätigungsdialog nach, läuft serverseitig in einem **eigenen Subprozess** (nicht im
 Dashboard-Prozess selbst, der ja parallel den Live-Loop fährt — sonst würde die

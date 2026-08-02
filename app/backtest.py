@@ -28,9 +28,12 @@ WICHTIG, ehrlich (keine Beschoenigung):
    Vergangenheit liefern die hier genutzten kostenlosen Quellen (Stooq/Yahoo, siehe
    app/prices.py) aber nur TAGES-Schlusskurse, keine historischen Intraday-Kurse - der
    Backtest misst die Bewegung deshalb zwangslaeufig ueber HANDELSTAGE
-   (--horizon-days, Standard 3), nicht Minuten. Das ist keine gleichwertige
+   (--horizon-days, Standard '1,3,5,10' - kommagetrennt, ALLE aus DERSELBEN
+   Klassifikation ausgewertet, kostet also nicht mehr als ein einzelner Horizont,
+   siehe evaluate_ticker_outcomes_multi), nicht Minuten. Das ist keine gleichwertige
    Nachbildung des Live-Verhaltens, sondern die beste mit kostenlosen Daten moegliche
-   Naeherung - wird im Report als horizon_days explizit ausgewiesen, nicht verschleiert.
+   Naeherung - wird im Report als horizon_days/by_horizon explizit ausgewiesen, nicht
+   verschleiert.
 
 4. Vereinfachungen ggue. der Live-Pipeline (bewusst, fuer vorhersehbare Kosten): keine
    Grenzfall-Eskalation (ENABLE_BORDERLINE_ESCALATION) - haette variable statt
@@ -194,19 +197,43 @@ def evaluate_ticker_outcome(
     )
 
 
+def evaluate_ticker_outcomes_multi(
+    ticker: str,
+    direction: Optional[str],
+    confidence,
+    published_at,
+    history: Optional[dict],
+    horizon_days_list: list[int],
+) -> dict[int, TickerOutcome]:
+    """Wertet denselben Ticker/dieselbe Meldung fuer MEHRERE Horizonte gleichzeitig aus -
+    nutzt dieselbe (ohnehin schon gecachte) Kurshistorie, kostet also KEINEN
+    zusaetzlichen Claude-Call oder Netzwerk-Request pro zusaetzlichem Horizont. Ein
+    einziger bezahlter Klassifikations-Lauf beantwortet damit "welcher Haltezeitraum
+    funktioniert besser" mit, statt dass jeder Horizont separat (und separat bezahlt)
+    ausgewertet werden muesste. {horizon_days: TickerOutcome}, fehlt ein Horizont im
+    Ergebnis, war er (noch) nicht auswertbar (siehe evaluate_ticker_outcome)."""
+    result: dict[int, TickerOutcome] = {}
+    for h in horizon_days_list:
+        outcome = evaluate_ticker_outcome(ticker, direction, confidence, published_at, history, h)
+        if outcome is not None:
+            result[h] = outcome
+    return result
+
+
+def _bucket_summary(outcomes: list[TickerOutcome]) -> dict:
+    return {
+        "n": len(outcomes),
+        "hit_rate": round(sum(o.hit for o in outcomes) / len(outcomes), 3),
+        "avg_signed_move_pct": round(sum(o.signed_move_pct for o in outcomes) / len(outcomes), 2),
+    }
+
+
 def _tier_breakdown(outcomes: list[TickerOutcome]) -> dict:
     by_tier: dict[str, list[TickerOutcome]] = {}
     for o in outcomes:
         key = o.market_cap_tier or "unbekannt"
         by_tier.setdefault(key, []).append(o)
-    result = {}
-    for tier, items in by_tier.items():
-        result[tier] = {
-            "n": len(items),
-            "hit_rate": round(sum(o.hit for o in items) / len(items), 3),
-            "avg_signed_move_pct": round(sum(o.signed_move_pct for o in items) / len(items), 2),
-        }
-    return result
+    return {tier: _bucket_summary(items) for tier, items in by_tier.items()}
 
 
 # --- Historischer Abruf ----------------------------------------------------------------
@@ -255,7 +282,7 @@ async def fetch_all_raw(start: datetime.date, end: datetime.date) -> list:
 async def run_backtest(
     start: datetime.date,
     end: datetime.date,
-    horizon_days: int = 3,
+    horizon_days=3,
     max_calls: int = 30,
     execute: bool = False,
     db_path: Optional[str] = None,
@@ -263,8 +290,21 @@ async def run_backtest(
     """Fuehrt den Backtest aus. Ohne execute=True werden NIEMALS Claude-Calls gemacht -
     Rueckgabe ist dann nur der Kostenvoranschlag (siehe Modul-Docstring Punkt 1). Laeuft
     IMMER gegen eine isolierte DB (db_path oder ein automatisch angelegtes Temp-File),
-    nie gegen die Produktions-Datenbank."""
+    nie gegen die Produktions-Datenbank.
+
+    horizon_days: ein einzelner int (Standard, ein Horizont) ODER eine Liste mehrerer
+    Handelstage-Horizonte (z.B. [1, 3, 5, 10]) - wird ueber evaluate_ticker_outcomes_multi
+    aus DERSELBEN Klassifikation ausgewertet, kostet also nicht mehr als ein einzelner
+    Horizont (siehe dort). Bei mehreren Horizonten liefert der Report zusaetzlich
+    by_horizon; hit_rate/avg_signed_move_pct/by_tier beziehen sich auf den ERSTEN
+    (primaeren) Horizont der Liste - so bleibt der Report auch mit nur einem Horizont
+    unveraendert lesbar."""
     import app.db as db
+
+    horizons = [horizon_days] if isinstance(horizon_days, int) else sorted(
+        {int(h) for h in horizon_days}
+    ) or [3]
+    primary_horizon = horizons[0]
 
     if db_path:
         db.DB_PATH = db_path
@@ -278,7 +318,7 @@ async def run_backtest(
     report: dict = {
         "start": start.isoformat(),
         "end": end.isoformat(),
-        "horizon_days": horizon_days,
+        "horizon_days": horizons,
         "db_path": db.DB_PATH,
         "raw_fetched": len(raw),
     }
@@ -316,7 +356,7 @@ async def run_backtest(
     to_run = to_classify[:max_calls]
     report["truncated_by_max_calls"] = len(to_classify) > max_calls
 
-    outcomes: list[TickerOutcome] = []
+    outcomes_by_horizon: dict[int, list[TickerOutcome]] = {h: [] for h in horizons}
     alert_worthy_count = 0
     ticker_call_count = 0
     history_cache: dict[str, Optional[dict]] = {}
@@ -347,42 +387,65 @@ async def run_backtest(
             ticker = (tc.get("ticker") or "").upper()
             if ticker not in history_cache:
                 history_cache[ticker] = await prices.get_history(ticker)
-            outcome = evaluate_ticker_outcome(
+            per_horizon = evaluate_ticker_outcomes_multi(
                 ticker,
                 tc.get("direction"),
                 tc.get("confidence"),
                 raw_stmt.published_at,
                 history_cache[ticker],
-                horizon_days,
+                horizons,
             )
-            if outcome is not None:
-                outcomes.append(outcome)
+            for h, outcome in per_horizon.items():
+                outcomes_by_horizon[h].append(outcome)
 
     report["classified"] = calls_made
     report["actual_cost_usd"] = round(actual_cost, 4)
     report["alert_worthy"] = alert_worthy_count
     report["ticker_calls_total"] = ticker_call_count
-    report["outcomes_resolved"] = len(outcomes)
-    report["outcomes_pending"] = ticker_call_count - len(outcomes)
+    primary_outcomes = outcomes_by_horizon[primary_horizon]
+    # outcomes_resolved/-pending beziehen sich bewusst auf den PRIMAEREN Horizont (nicht
+    # "irgendeinen"/"alle") - sonst waere die Zahl bei mehreren Horizonten von der
+    # Reihenfolge/Anzahl der angefragten Horizonte abhaengig und nicht mehr konsistent
+    # interpretierbar.
+    report["outcomes_resolved"] = len(primary_outcomes)
+    report["outcomes_pending"] = ticker_call_count - len(primary_outcomes)
 
-    if outcomes:
-        tickers = sorted({o.ticker for o in outcomes})
-        caps = await prices.get_market_caps(tickers)
-        for o in outcomes:
-            o.market_cap_tier = prices.market_cap_tier(caps.get(o.ticker))
+    if any(outcomes_by_horizon.values()):
+        all_tickers = sorted({o.ticker for items in outcomes_by_horizon.values() for o in items})
+        caps = await prices.get_market_caps(all_tickers)
+        for items in outcomes_by_horizon.values():
+            for o in items:
+                o.market_cap_tier = prices.market_cap_tier(caps.get(o.ticker))
 
-        report["hit_rate"] = round(sum(o.hit for o in outcomes) / len(outcomes), 3)
-        report["avg_signed_move_pct"] = round(
-            sum(o.signed_move_pct for o in outcomes) / len(outcomes), 2
-        )
-        report["by_tier"] = _tier_breakdown(outcomes)
+        if len(horizons) > 1:
+            report["by_horizon"] = {
+                str(h): _bucket_summary(items) for h, items in outcomes_by_horizon.items() if items
+            }
+        if primary_outcomes:
+            report["hit_rate"] = round(
+                sum(o.hit for o in primary_outcomes) / len(primary_outcomes), 3
+            )
+            report["avg_signed_move_pct"] = round(
+                sum(o.signed_move_pct for o in primary_outcomes) / len(primary_outcomes), 2
+            )
+            report["by_tier"] = _tier_breakdown(primary_outcomes)
     else:
         report["note"] = report.get("note", "") + (
             " Keine auswertbaren Ergebnisse (kein alarmwuerdiger Ticker hatte "
-            "genug Kurshistorie fuer den gewaehlten Horizont)."
+            "genug Kurshistorie fuer die gewaehlten Horizonte)."
         )
 
     return report
+
+
+def _parse_horizon_list(value: str) -> list[int]:
+    try:
+        horizons = [int(x.strip()) for x in value.split(",") if x.strip()]
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(f"Ungueltige --horizon-days Liste: {value!r}") from exc
+    if not horizons:
+        raise argparse.ArgumentTypeError("--horizon-days darf nicht leer sein")
+    return horizons
 
 
 def main() -> None:
@@ -397,9 +460,12 @@ def main() -> None:
     parser.add_argument("--start", required=True, help="Start YYYY-MM-DD (UTC)")
     parser.add_argument("--end", required=True, help="Ende YYYY-MM-DD (UTC, inklusive)")
     parser.add_argument(
-        "--horizon-days", type=int, default=3,
-        help="Handelstage bis zur Ergebnis-Auswertung (Standard 3 - siehe Modul-Docstring "
-             "Punkt 3 zum Intraday-vs-Handelstage-Unterschied zur Live-Pipeline)",
+        "--horizon-days", type=_parse_horizon_list, default=[1, 3, 5, 10],
+        help="Kommagetrennte Liste von Handelstage-Horizonten (Standard '1,3,5,10') - "
+             "ALLE werden aus DERSELBEN Klassifikation ausgewertet (siehe "
+             "evaluate_ticker_outcomes_multi), kostet also nicht mehr als ein einzelner "
+             "Horizont. Der Report zeigt zusaetzlich by_horizon zum Vergleich; "
+             "hit_rate/by_tier beziehen sich auf den ERSTEN (kleinsten) Horizont.",
     )
     parser.add_argument(
         "--max-calls", type=int, default=30,
