@@ -65,6 +65,64 @@ def test_gdelt_meldet_fehlschlag():
           src.last_failure and "ConnectError" in src.last_failure)
 
 
+def test_fetch_range_retried_bei_429_und_liefert_am_ende_daten():
+    """Regressionstest fuer einen echten Live-Fund: ein Backtest-Lauf ueber 30 Tage
+    bekam bei JEDER EINZELNEN Tagesabfrage ein 429 von GDELT - weil fetch_range()
+    Status-Fehler (429 inklusive) bewusst NICHT retryte. Das war fuer poll()s
+    60-Sekunden-Zyklus richtig (der naechste Zyklus loest ein 429 von selbst), aber
+    falsch fuer den Backtest, wo ein uebersprungener Tag fuer den ganzen Lauf verloren
+    ist. Simuliert: die ersten zwei Versuche liefern 429, der dritte echte Daten -
+    fetch_range() muss durchhalten und am Ende das Ergebnis liefern."""
+    _fresh()
+    import app.sources.news_gdelt as g
+    import app.util as util
+    importlib.reload(g)
+    import httpx as httpx_mod
+    import datetime
+
+    call_count = {"n": 0}
+
+    class FlakyClient:
+        def __init__(self, *a, **kw): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *a): return False
+        async def get(self, url, *a, **kw):
+            call_count["n"] += 1
+            req = httpx_mod.Request("GET", url)
+            if call_count["n"] <= 2:
+                return httpx_mod.Response(429, request=req, text="rate limited")
+            return httpx_mod.Response(200, request=req, json={
+                "articles": [{
+                    "url": "https://example.com/a",
+                    "title": "Fed hikes rates",
+                    "domain": "example.com",
+                    "seendate": "20260701120000",
+                }],
+            })
+
+    g.httpx.AsyncClient = FlakyClient
+    # retry_async()s Backoff (6s, 12s, ...) real durchschlafen wuerde den Test auf
+    # Minuten strecken - das Retry-VERHALTEN wird geprueft, nicht die Wartezeit.
+    orig_sleep = util.asyncio.sleep
+
+    async def fast_sleep(_seconds):
+        return None
+
+    util.asyncio.sleep = fast_sleep
+    try:
+        out = asyncio.run(g.fetch_range(
+            datetime.datetime(2026, 7, 1, tzinfo=datetime.timezone.utc),
+            datetime.datetime(2026, 7, 1, 23, 59, 59, tzinfo=datetime.timezone.utc),
+        ))
+    finally:
+        util.asyncio.sleep = orig_sleep
+
+    check("nach 2x HTTP 429 im 3. Versuch erfolgreich", len(out) == 1)
+    check("insgesamt 3 Versuche gemacht (2 gescheitert + 1 erfolgreich)", call_count["n"] == 3)
+    check("Artikel korrekt geparst trotz vorherigen Fehlschlaegen",
+          out and out[0].text.startswith("Fed hikes rates"))
+
+
 def test_truth_social_ohne_token_und_ohne_fallback():
     """Genau die Konfiguration der Produktions-VM: kein Bearer-Token, Browser-Fallback
     wegen 1 GB RAM abgeschaltet. Diese Quelle liefert dauerhaft nichts - das muss
@@ -179,6 +237,7 @@ def test_orchestrator_uebernimmt_den_fehlschlag():
 
 def main():
     test_gdelt_meldet_fehlschlag()
+    test_fetch_range_retried_bei_429_und_liefert_am_ende_daten()
     test_truth_social_ohne_token_und_ohne_fallback()
     test_leere_antwort_ist_KEIN_fehlschlag()
     test_rss_einzelner_feed_kaputt_ist_kein_quellenausfall()

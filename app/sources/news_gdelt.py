@@ -5,6 +5,7 @@ Signal ("worueber berichten Medien gerade im Marktkontext"), ersetzt aber keine
 woertliche Aussage. Fuer woertliche Trump-Zitate siehe truth_social.py.
 """
 import datetime
+import json
 import logging
 import time
 from typing import Optional
@@ -105,7 +106,17 @@ async def fetch_range(
     behauptet NICHTS ueber die Reichweite; leere Ergebnisse fuer einen weit
     zurueckliegenden Zeitraum sind das ehrliche Signal, dass GDELT dafuer nichts (mehr)
     hat - kein Bug. Der Dry-Run in app/backtest.py macht genau das sichtbar, bevor
-    irgendein Claude-Call bezahlt wird."""
+    irgendein Claude-Call bezahlt wird.
+
+    Rate-Limit (empirisch bestaetigt, nicht nur vermutet): GDELTs kostenlose API
+    limitiert die vielen kurz aufeinanderfolgenden Tages-Abfragen eines Backtests
+    spuerbar staerker als einen einzelnen Live-Poll (siehe die 429-Antworten in echten
+    Backtest-Laeufen) - sowohl per HTTP 429 als auch (seltener) per leerem/nicht als
+    JSON lesbarem 200er-Body unter Last. Anders als beim rollierenden Live-Poll (dort
+    loest sich ein 429 von selbst beim naechsten 60s-Zyklus, siehe poll()) gibt es hier
+    keinen spaeteren Versuch - schlaegt eine Tages-Abfrage fehl, ist dieser Tag fuer den
+    gesamten Lauf verloren. Deshalb wird HIER (nicht bei poll()) mit deutlich mehr
+    Geduld retried."""
     def _fmt(dt: datetime.datetime) -> str:
         return dt.astimezone(datetime.timezone.utc).strftime("%Y%m%d%H%M%S")
 
@@ -129,7 +140,10 @@ async def fetch_range(
         resp.raise_for_status()
         return resp.json()
 
-    data = await retry_async(_fetch, retries=2, backoff_seconds=2.0, retry_on=(httpx.TransportError,))
+    data = await retry_async(
+        _fetch, retries=5, backoff_seconds=6.0,
+        retry_on=(httpx.TransportError, httpx.HTTPStatusError, json.JSONDecodeError),
+    )
     return _parse_gdelt_response(data, seen=set())
 
 

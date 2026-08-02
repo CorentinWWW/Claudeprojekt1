@@ -605,11 +605,18 @@ function renderBacktestReport(r) {
   const pct = (v) => (v == null ? '–' : Math.round(v * 100) + '%');
   const parts = [];
 
+  // days_failed>0: raw_fetched=0 saehe sonst identisch aus wie "GDELT hat fuer den
+  // Zeitraum wirklich nichts" - dieser Tag macht sichtbar, dass es stattdessen ein
+  // unvollstaendiger Abruf war (meist GDELT-Rate-Limit, siehe app/backtest.py).
+  const fetchWarning = r.days_failed
+    ? `<span class="tag" style="color:var(--warn);">⚠️ ${r.days_failed}/${r.days_total} Tage nicht abrufbar</span>`
+    : '';
   parts.push(`
     <div class="tags" style="margin-bottom:0.4rem;">
       <span class="tag">${r.dry_run ? '💡 Kostenvoranschlag (kein Call)' : '✅ ausgeführt'}</span>
       <span class="tag">${r.raw_fetched ?? 0} Rohtreffer</span>
       <span class="tag">${r.after_dedup ?? 0} nach Dedup</span>
+      ${fetchWarning}
     </div>`);
 
   if (r.dry_run) {
