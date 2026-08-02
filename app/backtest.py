@@ -286,13 +286,14 @@ async def fetch_all_raw(start: datetime.date, end: datetime.date) -> tuple[list,
                     continue
                 seen_ids.add(r.source_id)
                 out.append(r)
-            # GDELT ist eine kostenlose, unauthentifizierte API - empirisch bestaetigt
-            # (siehe fetch_range()-Docstring): die vielen kurz aufeinanderfolgenden
-            # Tages-Abfragen eines Backtests werden spuerbar staerker limitiert als ein
-            # einzelner Live-Poll. Eine Sekunde Pause reichte in der Praxis NICHT, um das
-            # zu vermeiden - 3s als konservativerer Default (fetch_range()s eigener
-            # Retry mit Backoff faengt den Rest ab).
-            await asyncio.sleep(3.0)
+            # GDELT nennt das Limit inzwischen SCHWARZ AUF WEISS in seiner eigenen
+            # 429-Antwort: "Please limit requests to one every 5 seconds" - vorher nur
+            # vermutet, jetzt bestaetigt (siehe fetch_range()-Docstring). 3s lagen
+            # UNTER diesem Minimum - das war der eigentliche Grund, warum ein 30-Tage-
+            # Lauf trotz Retries durchgehend scheiterte. 8s als Default (deutliche
+            # Sicherheitsmarge, da derselbe Zeitdeckel vermutlich auch den parallel
+            # laufenden Live-Poll mit einschliesst, nicht nur diesen Prozess).
+            await asyncio.sleep(8.0)
     return out, days_failed, days_total
 
 
@@ -349,9 +350,10 @@ async def run_backtest(
     # zweiten ist es ein unvollstaendiger Lauf, der wiederholt werden sollte.
     fetch_note = (
         f"{days_failed}/{days_total} Tag(e) konnten trotz Retry nicht von GDELT "
-        "abgerufen werden (meist Rate-Limit) - raw_fetched ist dadurch moeglicherweise "
-        "niedriger als die tatsaechliche Abdeckung. Bei einem erneuten Lauf ggf. einen "
-        "kleineren Zeitraum probieren."
+        "abgerufen werden (Rate-Limit, GDELT selbst nennt max. 1 Anfrage/5s) - "
+        "raw_fetched ist dadurch moeglicherweise niedriger als die tatsaechliche "
+        "Abdeckung. Etwas warten (das Limit erholt sich von selbst) und bei einem "
+        "erneuten Lauf ggf. einen kleineren Zeitraum probieren."
         if days_failed else ""
     )
 

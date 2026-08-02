@@ -350,14 +350,16 @@ python -m app.backtest --start 2026-06-01 --end 2026-06-07 --execute --max-calls
 - **Historische Abdeckung**: Ob/wie weit GDELTs kostenlose API rückwirkend Daten
   liefert, ist nicht garantiert — ein leerer `raw_fetched`-Wert für einen weit
   zurückliegenden Zeitraum ist das ehrliche Signal dafür, kein Bug.
-- **Rate-Limit** (empirisch bestätigt, nicht nur vermutet): GDELT limitiert die vielen
-  kurz aufeinanderfolgenden Tages-Abfragen eines Backtests spürbar strenger als einen
-  einzelnen Live-Poll (HTTP 429). `fetch_range()` retried das inzwischen geduldig
-  (5 Versuche, langer Backoff), aber bei einem sehr langen Zeitraum können trotzdem
-  einzelne Tage verloren gehen — der Report weist das über `days_failed`/`days_total`
-  **getrennt** von `raw_fetched` aus, damit "GDELT hat wirklich nichts" nicht mit "der
-  Abruf ist fehlgeschlagen" verwechselt wird. Bei vielen fehlgeschlagenen Tagen hilft
-  ein kleinerer Zeitraum oder ein erneuter Versuch etwas später.
+- **Rate-Limit**: GDELT nennt es direkt in der eigenen 429-Antwort — *"Please limit
+  requests to one every 5 seconds"*. Kein Cloudflare-/IP-Block, ein normaler
+  serverseitiger Deckel, live gegengeprüft. Zwischen den täglichen Chunks wird
+  deshalb mit Sicherheitsmarge pausiert (8s), `fetch_range()` retried zusätzlich
+  geduldig (5 Versuche, langer Backoff) — bei einem sehr langen Zeitraum oder wenn der
+  Live-Poll gleichzeitig dasselbe Limit beansprucht, können trotzdem einzelne Tage
+  verloren gehen. Der Report weist das über `days_failed`/`days_total` **getrennt**
+  von `raw_fetched` aus, damit "GDELT hat wirklich nichts" nicht mit "der Abruf ist
+  fehlgeschlagen" verwechselt wird. Bei vielen fehlgeschlagenen Tagen: warten (das
+  Limit erholt sich von selbst) und einen kleineren Zeitraum probieren.
 - **Auswertungs-Horizont**: Die Live-Pipeline bewertet ein Ergebnis über ein kurzes
   Intraday-Fenster (`PRICE_OUTCOME_HORIZON_MINUTES`, Standard 60 Minuten). Für die
   Vergangenheit liefern die hier genutzten kostenlosen Quellen aber nur

@@ -108,13 +108,15 @@ async def fetch_range(
     hat - kein Bug. Der Dry-Run in app/backtest.py macht genau das sichtbar, bevor
     irgendein Claude-Call bezahlt wird.
 
-    Rate-Limit (empirisch bestaetigt, nicht nur vermutet): GDELTs kostenlose API
-    limitiert die vielen kurz aufeinanderfolgenden Tages-Abfragen eines Backtests
-    spuerbar staerker als einen einzelnen Live-Poll (siehe die 429-Antworten in echten
-    Backtest-Laeufen) - sowohl per HTTP 429 als auch (seltener) per leerem/nicht als
-    JSON lesbarem 200er-Body unter Last. Anders als beim rollierenden Live-Poll (dort
-    loest sich ein 429 von selbst beim naechsten 60s-Zyklus, siehe poll()) gibt es hier
-    keinen spaeteren Versuch - schlaegt eine Tages-Abfrage fehl, ist dieser Tag fuer den
+    Rate-Limit: GDELT nennt es explizit in der eigenen 429-Antwort - "Please limit
+    requests to one every 5 seconds" (Stand: live gegengeprueft, kein Cloudflare-/
+    WAF-Block, ein ganz normaler serverseitiger Deckel). Die vielen kurz
+    aufeinanderfolgenden Tages-Abfragen eines Backtests reissen dieses Limit leicht,
+    wenn Aufrufer nicht bewusst Abstand halten - sowohl per HTTP 429 als auch
+    (seltener) per leerem/nicht als JSON lesbarem 200er-Body unter Last. Anders als
+    beim rollierenden Live-Poll (dort loest sich ein 429 von selbst beim naechsten
+    60s-Zyklus, siehe poll()) gibt es hier keinen spaeteren Versuch - schlaegt eine
+    Tages-Abfrage fehl, ist dieser Tag fuer den
     gesamten Lauf verloren. Deshalb wird HIER (nicht bei poll()) mit deutlich mehr
     Geduld retried."""
     def _fmt(dt: datetime.datetime) -> str:
