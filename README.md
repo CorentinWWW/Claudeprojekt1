@@ -350,16 +350,26 @@ python -m app.backtest --start 2026-06-01 --end 2026-06-07 --execute --max-calls
 - **Historische Abdeckung**: Ob/wie weit GDELTs kostenlose API rückwirkend Daten
   liefert, ist nicht garantiert — ein leerer `raw_fetched`-Wert für einen weit
   zurückliegenden Zeitraum ist das ehrliche Signal dafür, kein Bug.
-- **Rate-Limit**: GDELT nennt es direkt in der eigenen 429-Antwort — *"Please limit
-  requests to one every 5 seconds"*. Kein Cloudflare-/IP-Block, ein normaler
-  serverseitiger Deckel, live gegengeprüft. Zwischen den täglichen Chunks wird
+- **Rate-Limit — der wichtigste Fallstrick**: GDELT nennt in seiner 429-Antwort
+  *"Please limit requests to one every 5 seconds"*. Zwischen den täglichen Chunks wird
   deshalb mit Sicherheitsmarge pausiert (8s), `fetch_range()` retried zusätzlich
-  geduldig (5 Versuche, langer Backoff) — bei einem sehr langen Zeitraum oder wenn der
-  Live-Poll gleichzeitig dasselbe Limit beansprucht, können trotzdem einzelne Tage
-  verloren gehen. Der Report weist das über `days_failed`/`days_total` **getrennt**
-  von `raw_fetched` aus, damit "GDELT hat wirklich nichts" nicht mit "der Abruf ist
-  fehlgeschlagen" verwechselt wird. Bei vielen fehlgeschlagenen Tagen: warten (das
-  Limit erholt sich von selbst) und einen kleineren Zeitraum probieren.
+  geduldig (5 Versuche, langer Backoff).
+
+  **Aber Vorsicht:** Live beobachtet — hat man das Limit einmal deutlich gerissen
+  (z.B. ein 30-Tage-Backtest mit zu kurzer Pause), sperrt GDELT die **IP** für längere
+  Zeit und antwortet danach selbst auf *einzelne*, weit auseinanderliegende Anfragen
+  (>15 Min Abstand, simpelste Query) weiterhin mit 429. Das trifft dann auch den
+  **Live-Poll** des Bots, nicht nur den Backtest. Dagegen gibt es einen
+  Schutzschalter (`GDELT_RATE_LIMIT_COOLDOWNS_SECONDS`): nach einem 429 legt die Quelle
+  sich selbst für 15 → 30 → 60 → 120 Minuten still, statt weiter dagegen zu hämmern
+  (das verlängert die Sperre nur). Der Zustand ist in `/api/health` unter
+  `sources.news_gdelt.last_error` sichtbar; ein einziger Erfolg setzt alles zurück.
+
+  Der Backtest-Report weist fehlgeschlagene Tage über `days_failed`/`days_total`
+  **getrennt** von `raw_fetched` aus, damit "GDELT hat wirklich nichts" nicht mit "der
+  Abruf ist fehlgeschlagen" verwechselt wird. Bei vielen fehlgeschlagenen Tagen:
+  **abwarten** (nur das hilft) und danach mit einem deutlich kleineren Zeitraum
+  wieder anfangen.
 - **Auswertungs-Horizont**: Die Live-Pipeline bewertet ein Ergebnis über ein kurzes
   Intraday-Fenster (`PRICE_OUTCOME_HORIZON_MINUTES`, Standard 60 Minuten). Für die
   Vergangenheit liefern die hier genutzten kostenlosen Quellen aber nur
