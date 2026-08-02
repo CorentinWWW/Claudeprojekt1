@@ -249,21 +249,36 @@ def _daterange_chunks(start: datetime.date, end: datetime.date):
         day += datetime.timedelta(days=1)
 
 
-async def fetch_all_raw(start: datetime.date, end: datetime.date) -> list:
+async def fetch_all_raw(start: datetime.date, end: datetime.date) -> tuple[list, int, int]:
     """Holt alle GDELT-Artikel im Zeitraum, taeglich gechunked (siehe
     _daterange_chunks), dedupliziert ueber Chunk-Grenzen hinweg per URL. Ein
     fehlschlagender einzelner Tag ueberspringt nur diesen Tag (best-effort, wie der Rest
-    der Kursquellen in diesem Projekt) statt den gesamten Lauf abzubrechen."""
+    der Kursquellen in diesem Projekt) statt den gesamten Lauf abzubrechen.
+
+    Rueckgabe (raw_statements, days_failed, days_total): days_failed macht im Report
+    sichtbar, ob ein raw_fetched=0 an fehlender historischer GDELT-Abdeckung liegt
+    (Punkt 2 im Modul-Docstring, days_failed=0) oder daran, dass der Abruf trotz Retries
+    fehlgeschlagen ist (days_failed>0, meist Rate-Limit) - beides saehe in raw_fetched
+    allein identisch aus, bedeutet aber etwas komplett anderes fuer die Interpretation
+    des Ergebnisses."""
     seen_ids: set = set()
     out = []
+    days_failed = 0
+    days_total = 0
     async with httpx.AsyncClient(timeout=30) as client:
         for chunk_start, chunk_end in _daterange_chunks(start, end):
+            days_total += 1
             try:
                 batch = await fetch_range(chunk_start, chunk_end, client=client)
-            except Exception:
-                logger.exception(
-                    "GDELT-Abfrage fuer %s fehlgeschlagen, ueberspringe diesen Tag.",
-                    chunk_start.date(),
+            except Exception as exc:
+                days_failed += 1
+                # logger.warning() statt logger.exception(): fetch_range() hat schon mit
+                # 5 Retries + langem Backoff versucht (siehe dort) - landet ein Tag
+                # trotzdem hier, ist das erwartet-selten und braucht keinen vollen
+                # Traceback pro Tag (bei einem laengeren Zeitraum sonst Bildschirmfuellend).
+                logger.warning(
+                    "GDELT-Abfrage fuer %s fehlgeschlagen (nach Retries), ueberspringe "
+                    "diesen Tag: %s", chunk_start.date(), exc,
                 )
                 continue
             for r in batch:
@@ -271,11 +286,14 @@ async def fetch_all_raw(start: datetime.date, end: datetime.date) -> list:
                     continue
                 seen_ids.add(r.source_id)
                 out.append(r)
-            # GDELT ist eine kostenlose, unauthentifizierte API ohne dokumentiertes
-            # Rate-Limit - kurze Pause zwischen taeglichen Chunks als freundlicher
-            # Default, um sie nicht zu hammern.
-            await asyncio.sleep(1.0)
-    return out
+            # GDELT ist eine kostenlose, unauthentifizierte API - empirisch bestaetigt
+            # (siehe fetch_range()-Docstring): die vielen kurz aufeinanderfolgenden
+            # Tages-Abfragen eines Backtests werden spuerbar staerker limitiert als ein
+            # einzelner Live-Poll. Eine Sekunde Pause reichte in der Praxis NICHT, um das
+            # zu vermeiden - 3s als konservativerer Default (fetch_range()s eigener
+            # Retry mit Backoff faengt den Rest ab).
+            await asyncio.sleep(3.0)
+    return out, days_failed, days_total
 
 
 # --- Hauptlauf ---------------------------------------------------------------------
@@ -314,14 +332,28 @@ async def run_backtest(
         db.DB_PATH = tmp.name
     db.init_db()
 
-    raw = await fetch_all_raw(start, end)
+    raw, days_failed, days_total = await fetch_all_raw(start, end)
     report: dict = {
         "start": start.isoformat(),
         "end": end.isoformat(),
         "horizon_days": horizons,
         "db_path": db.DB_PATH,
         "raw_fetched": len(raw),
+        "days_failed": days_failed,
+        "days_total": days_total,
     }
+    # Macht den Unterschied zwischen "GDELT hat fuer den Zeitraum nichts" und "der
+    # Abruf ist trotz Retries fehlgeschlagen" sichtbar - beides sieht in raw_fetched
+    # allein identisch aus (siehe fetch_all_raw()-Docstring), bedeutet aber etwas
+    # komplett anderes: im ersten Fall ist raw_fetched=0 das ehrliche Endergebnis, im
+    # zweiten ist es ein unvollstaendiger Lauf, der wiederholt werden sollte.
+    fetch_note = (
+        f"{days_failed}/{days_total} Tag(e) konnten trotz Retry nicht von GDELT "
+        "abgerufen werden (meist Rate-Limit) - raw_fetched ist dadurch moeglicherweise "
+        "niedriger als die tatsaechliche Abdeckung. Bei einem erneuten Lauf ggf. einen "
+        "kleineren Zeitraum probieren."
+        if days_failed else ""
+    )
 
     kept = [r for r in raw if looks_market_relevant(r.text)]
     report["after_prefilter"] = len(kept)
@@ -332,7 +364,7 @@ async def run_backtest(
         report["dry_run"] = not execute
         report["note"] = (
             "Keine Artikel nach dem Vorfilter uebrig - siehe raw_fetched fuer die "
-            "GDELT-Rohtreffer im Zeitraum."
+            "GDELT-Rohtreffer im Zeitraum." + (f" {fetch_note}" if fetch_note else "")
         )
         return report
 
@@ -349,6 +381,7 @@ async def run_backtest(
         report["note"] = (
             "Dry-Run: KEIN Claude-Call ausgefuehrt. Mit --execute (und --max-calls als "
             "harter Obergrenze fuer echte Calls) tatsaechlich klassifizieren."
+            + (f" {fetch_note}" if fetch_note else "")
         )
         return report
 
@@ -434,6 +467,12 @@ async def run_backtest(
             " Keine auswertbaren Ergebnisse (kein alarmwuerdiger Ticker hatte "
             "genug Kurshistorie fuer die gewaehlten Horizonte)."
         )
+
+    # Deckt den Erfolgspfad ab (oben nur bei den fruehen return-Pfaden inline
+    # angehaengt) - ein teilweise fehlgeschlagener Abruf soll sichtbar bleiben, selbst
+    # wenn der Rest des Laufs ganz normal Ergebnisse liefert.
+    if fetch_note:
+        report["note"] = (report.get("note", "") + " " + fetch_note).strip()
 
     return report
 

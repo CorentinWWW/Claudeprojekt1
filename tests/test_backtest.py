@@ -169,6 +169,45 @@ def test_dry_run_macht_niemals_einen_claude_call():
     check("kein actual_cost_usd im Dry-Run-Report", "actual_cost_usd" not in report)
 
 
+def test_fehlgeschlagene_tage_werden_sichtbar_nicht_mit_leerer_historie_verwechselt():
+    """Regressionstest: raw_fetched=0 sieht identisch aus, egal ob GDELT fuer den
+    Zeitraum wirklich nichts hat ODER der Abruf trotz Retries fehlgeschlagen ist (siehe
+    fetch_all_raw()-Docstring) - days_failed/days_total machen den Unterschied im
+    Report sichtbar, statt einen unvollstaendigen Lauf wie ein sauberes
+    Leer-Ergebnis aussehen zu lassen."""
+    orig_fetch_range = bt.fetch_range
+
+    async def flaky_fetch_range(start, end, client=None):
+        # Tag 1 schlaegt (trotz fetch_range()-eigener Retries) komplett fehl, Tag 2
+        # liefert normal Daten.
+        if start.date() == datetime.date(2026, 1, 1):
+            raise Exception("GDELT dauerhaft 429 trotz Retries")
+        return [
+            RawStatement(
+                source="news_gdelt", source_id=f"https://x/{start.date()}",
+                text="Central bank hints at surprise rate move, markets react sharply.",
+                published_at=start.timestamp(),
+            )
+        ]
+
+    bt.fetch_range = flaky_fetch_range
+    try:
+        report = asyncio.run(bt.run_backtest(
+            datetime.date(2026, 1, 1), datetime.date(2026, 1, 2),
+            execute=False, db_path=_tmp_db_path(),
+        ))
+    finally:
+        bt.fetch_range = orig_fetch_range
+
+    check("days_total zaehlt beide Tage im Zeitraum", report.get("days_total") == 2)
+    check("days_failed zaehlt genau den einen fehlgeschlagenen Tag", report.get("days_failed") == 1)
+    check("raw_fetched trotzdem korrekt (nur der erfolgreiche Tag)", report.get("raw_fetched") == 1)
+    check(
+        "Hinweis auf fehlgeschlagenen Abruf im Report, nicht stillschweigend uebergangen",
+        "Rate-Limit" in report.get("note", ""),
+    )
+
+
 def test_execute_liefert_aufgeloeste_ergebnisse_mit_tier():
     orig_fetch_range, orig_classify = bt.fetch_range, bt.classify
     orig_get_history, orig_get_caps = bt.prices.get_history, bt.prices.get_market_caps
@@ -363,6 +402,7 @@ def main():
     test_multi_horizon_wertet_alle_gleichzeitig_aus()
     test_tier_breakdown_gruppiert_und_aggregiert()
     test_dry_run_macht_niemals_einen_claude_call()
+    test_fehlgeschlagene_tage_werden_sichtbar_nicht_mit_leerer_historie_verwechselt()
     test_execute_liefert_aufgeloeste_ergebnisse_mit_tier()
     test_execute_mit_mehreren_horizonten_liefert_by_horizon()
     test_max_calls_begrenzt_echte_ausgaben_hart()
