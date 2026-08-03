@@ -364,15 +364,29 @@ behaupten.
 
 **Quellenwahl (`--source`):**
 
-| | `alphavantage` (empfohlen) | `gdelt` |
-|---|---|---|
-| Historie | Jahre | unklar |
-| API-Key | ja, **kostenlos** ohne Kreditkarte | nein |
-| Rate-Limit | wenige Abfragen/Tag, aber **1000 Artikel je Abfrage** → 3 Monate mit ~13 Abfragen | 1 Anfrage/5 s, sperrt bei Verstoß die **IP für Stunden** (siehe unten) |
+| | `alphavantage` (empfohlen) | `finnhub` | `gdelt` |
+|---|---|---|---|
+| Historie | Jahre | Jahre | unklar |
+| Abdeckung | marktweit | **nur vorgegebene Ticker** (`--tickers`, Standard `DEFAULT_FINNHUB_TICKERS`) | marktweit |
+| API-Key | ja, **kostenlos** ohne Kreditkarte | ja, **kostenlos** ohne Kreditkarte | nein |
+| Rate-Limit | wenige Abfragen/Tag, aber **1000 Artikel je Abfrage** → 3 Monate mit ~13 Abfragen | **~60 Abfragen/Minute**, aber 1 Abfrage je Ticker | 1 Anfrage/5 s, sperrt bei Verstoß die **IP für Stunden** (siehe unten) |
 
 Für Zeiträume über wenige Tage ist `--source alphavantage` praktisch alternativlos —
 GDELTs IP-Sperre macht längere Läufe unbrauchbar. Key in die `.env` als
 `ALPHAVANTAGE_API_KEY` (siehe `.env.example`).
+
+`--source finnhub` ist der Ausweg, wenn Alpha Vantages Tageskontingent (~25
+Abfragen/Tag) an EINEM Tag schon durch vorherige Test-/Diagnoseläufe aufgebraucht ist —
+Finnhubs Gratis-Tarif erlaubt stattdessen ~60 Abfragen/Minute, genug für mehrere
+Neuansätze am selben Tag. Der ehrliche Unterschied: Finnhubs `company-news` ist **nur
+pro Ticker** abrufbar, kein marktweiter Endpunkt auf dem Gratis-Tarif. Statt dass Claude
+den betroffenen Ticker selbst aus einem allgemeinen Artikel ableitet, wird hier vorab
+eine Ticker-Liste abgefragt (Standard: 24 Ticker über micro/small/mid/large-Cap
+gestreut, siehe `app.backtest.DEFAULT_FINNHUB_TICKERS`, überschreibbar per
+`--tickers AAPL,MSFT,...`). Das trägt ein echtes, von Menschen kuratiertes
+Auswahl-Risiko — der Report weist die tatsächlich genutzte Liste deshalb offen als
+`tickers` aus, statt es zu verschleiern. Key in die `.env` als `FINNHUB_API_KEY`
+(siehe `.env.example`, kostenlos unter finnhub.io/register).
 
 **Kostenlimit (`--budget-usd`)** — wichtiger als `--max-calls`, weil in Geld statt in
 Stückzahl gedacht: Passen nicht alle gefundenen Artikel ins Budget, wird eine
@@ -385,6 +399,13 @@ derselbe Aufruf dieselbe Stichprobe liefert.
 ```bash
 # 3 Monate abdecken, aber hoechstens 3 $ ausgeben (~800 Klassifikationen):
 python -m app.backtest --source alphavantage \
+  --start 2026-05-05 --end 2026-08-03 --budget-usd 3.0 --max-calls 0 --execute
+```
+
+```bash
+# Gleiches Budget, aber ueber Finnhub (z.B. weil das Alpha-Vantage-Tageskontingent
+# gerade aufgebraucht ist) - Standard-Tickerliste, optional per --tickers ersetzbar:
+python -m app.backtest --source finnhub \
   --start 2026-05-05 --end 2026-08-03 --budget-usd 3.0 --max-calls 0 --execute
 ```
 

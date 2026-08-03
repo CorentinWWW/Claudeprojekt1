@@ -614,6 +614,14 @@ DB_PATH = os.getenv("DB_PATH", "trump_monitor.db")
 # unveraendert weiter. Kostenlos unter alphavantage.co/support/#api-key.
 ALPHAVANTAGE_API_KEY = _str("ALPHAVANTAGE_API_KEY")
 
+# Ebenfalls nur fuer den historischen Backtest-Abruf (--source finnhub), aus demselben
+# Grund wie ALPHAVANTAGE_API_KEY: fuer den Live-Betrieb ungeeignet, fuer einen
+# einmaligen Lauf ausreichend. Zweite Quelle NEBEN Alpha Vantage, weil deren Gratis-
+# Tarif nur 25 Anfragen/TAG erlaubt (bei mehreren Testlaeufen am selben Tag schnell
+# aufgebraucht) - Finnhubs Gratis-Tarif erlaubt stattdessen ~60/MINUTE. Kostenlos ohne
+# Kreditkarte: finnhub.io/register
+FINNHUB_API_KEY = _str("FINNHUB_API_KEY")
+
 
 def validate() -> tuple[list[str], list[str]]:
     """Prueft die Konfiguration. Gibt (fatal_errors, warnings) zurueck.

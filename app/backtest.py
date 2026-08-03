@@ -64,6 +64,8 @@ from app.orchestrator import _partition_duplicates, actionable_tickers, is_alert
 from app.prefilter import looks_market_relevant
 from app.sources.news_alphavantage import AlphaVantageError
 from app.sources.news_alphavantage import fetch_range as av_fetch_range
+from app.sources.news_finnhub import FinnhubError
+from app.sources.news_finnhub import fetch_ticker_range as finnhub_fetch_ticker_range
 from app.sources.news_gdelt import fetch_range
 
 logger = logging.getLogger(__name__)
@@ -349,6 +351,59 @@ async def fetch_all_raw_alphavantage(
     return out, failed, total
 
 
+# Bewusst ueber Marktkapitalisierungs-Groessenklassen gestreut (grobe, menschliche
+# Einschaetzung zum Zeitpunkt der Auswahl, KEINE Zusicherung - die tatsaechliche
+# Einordnung uebernimmt weiterhin prices.market_cap_tier() zur Laufzeit), damit die
+# Tier-Aufschluesselung des Reports ueberhaupt in mehreren Klassen Daten hat, nicht nur
+# in "large". Das ist eine echte, von Menschen kuratierte Auswahl - ein Auswahl-Risiko,
+# das der Modul-Docstring oben ausdruecklich benennt statt zu verschleiern.
+DEFAULT_FINNHUB_TICKERS = (
+    "AAPL,MSFT,GOOGL,AMZN,NVDA,META,TSLA,JPM,XOM,"
+    "DASH,ROKU,ETSY,PINS,SNAP,RBLX,DKNG,"
+    "FVRR,UPST,SOFI,CHPT,PLUG,GPRO,OPEN,AFRM"
+)
+
+
+async def fetch_all_raw_finnhub(
+    start: datetime.date, end: datetime.date, tickers: list[str]
+) -> tuple[list, int, int]:
+    """Historischer Abruf ueber Finnhub, EIN Request je Ticker fuer den GESAMTEN
+    Zeitraum (kein Chunking noetig wie bei GDELT/Alpha Vantage - company-news braucht
+    keine Datumsspanne-Aufteilung). Rueckgabe wie fetch_all_raw(): (statements,
+    ticker_failed, ticker_total)."""
+    seen_ids: set = set()
+    out = []
+    failed = 0
+    total = 0
+    async with httpx.AsyncClient(timeout=30) as client:
+        for ticker in tickers:
+            total += 1
+            try:
+                batch = await finnhub_fetch_ticker_range(ticker, start, end, client=client)
+            except Exception as exc:
+                failed += 1
+                logger.warning("Finnhub-Abfrage fuer %s fehlgeschlagen: %s", ticker, exc)
+                if isinstance(exc, FinnhubError):
+                    # Wie bei Alpha Vantage: ein grundsaetzliches Problem (kein Key,
+                    # kaputte Antwortform) trifft jeden weiteren Ticker genauso -
+                    # Weitermachen wuerde nur dieselbe Meldung x-mal wiederholen.
+                    logger.error(
+                        "Finnhub meldet ein grundsaetzliches Problem - breche den "
+                        "Abruf ab, statt es fuer jeden weiteren Ticker zu wiederholen."
+                    )
+                    break
+                continue
+            for r in batch:
+                if r.source_id in seen_ids:
+                    continue
+                seen_ids.add(r.source_id)
+                out.append(r)
+            # Deutlich unter Finnhubs ~60/Minute-Gratislimit, aber schnell genug, dass
+            # ein Dutzend Ticker nicht minutenlang dauert.
+            await asyncio.sleep(1.1)
+    return out, failed, total
+
+
 async def fetch_all_raw(start: datetime.date, end: datetime.date) -> tuple[list, int, int]:
     """Holt alle GDELT-Artikel im Zeitraum, taeglich gechunked (siehe
     _daterange_chunks), dedupliziert ueber Chunk-Grenzen hinweg per URL. Ein
@@ -407,6 +462,7 @@ async def run_backtest(
     db_path: Optional[str] = None,
     source: str = "gdelt",
     budget_usd: float = 0.0,
+    tickers: Optional[list[str]] = None,
 ) -> dict:
     """Fuehrt den Backtest aus. Ohne execute=True werden NIEMALS Claude-Calls gemacht -
     Rueckgabe ist dann nur der Kostenvoranschlag (siehe Modul-Docstring Punkt 1). Laeuft
@@ -435,8 +491,12 @@ async def run_backtest(
         db.DB_PATH = tmp.name
     db.init_db()
 
+    finnhub_tickers: Optional[list[str]] = None
     if source == "alphavantage":
         raw, days_failed, days_total = await fetch_all_raw_alphavantage(start, end)
+    elif source == "finnhub":
+        finnhub_tickers = tickers or DEFAULT_FINNHUB_TICKERS.split(",")
+        raw, days_failed, days_total = await fetch_all_raw_finnhub(start, end, finnhub_tickers)
     else:
         raw, days_failed, days_total = await fetch_all_raw(start, end)
     report: dict = {
@@ -449,19 +509,41 @@ async def run_backtest(
         "days_failed": days_failed,
         "days_total": days_total,
     }
-    # Macht den Unterschied zwischen "GDELT hat fuer den Zeitraum nichts" und "der
+    if finnhub_tickers is not None:
+        # Offen ausgewiesen, nicht verschleiert (siehe news_finnhub.py-Docstring): die
+        # Ticker-Liste ist eine kuratierte Auswahl, kein marktweiter Abruf.
+        report["tickers"] = finnhub_tickers
+
+    # Macht den Unterschied zwischen "die Quelle hat fuer den Zeitraum nichts" und "der
     # Abruf ist trotz Retries fehlgeschlagen" sichtbar - beides sieht in raw_fetched
-    # allein identisch aus (siehe fetch_all_raw()-Docstring), bedeutet aber etwas
-    # komplett anderes: im ersten Fall ist raw_fetched=0 das ehrliche Endergebnis, im
-    # zweiten ist es ein unvollstaendiger Lauf, der wiederholt werden sollte.
-    fetch_note = (
-        f"{days_failed}/{days_total} Tag(e) konnten trotz Retry nicht von GDELT "
-        "abgerufen werden (Rate-Limit, GDELT selbst nennt max. 1 Anfrage/5s) - "
-        "raw_fetched ist dadurch moeglicherweise niedriger als die tatsaechliche "
-        "Abdeckung. Etwas warten (das Limit erholt sich von selbst) und bei einem "
-        "erneuten Lauf ggf. einen kleineren Zeitraum probieren."
-        if days_failed else ""
-    )
+    # allein identisch aus, bedeutet aber etwas komplett anderes: im ersten Fall ist
+    # raw_fetched=0 das ehrliche Endergebnis, im zweiten ist es ein unvollstaendiger
+    # Lauf, der wiederholt werden sollte. Text ist bewusst quellenspezifisch - eine
+    # pauschale "GDELT"-Meldung waere bei --source alphavantage/finnhub schlicht falsch.
+    if not days_failed:
+        fetch_note = ""
+    elif source == "alphavantage":
+        fetch_note = (
+            f"{days_failed}/{days_total} Zeitraum-Abschnitt(e) konnten trotz Retry nicht "
+            "von Alpha Vantage abgerufen werden (Rate-Limit oder ungueltiger Key) - "
+            "raw_fetched ist dadurch moeglicherweise niedriger als die tatsaechliche "
+            "Abdeckung. Alpha Vantages Gratis-Tarif erlaubt nur ~25 Anfragen/Tag - bei "
+            "einem erneuten Lauf ggf. einen Tag warten oder --source finnhub probieren."
+        )
+    elif source == "finnhub":
+        fetch_note = (
+            f"{days_failed}/{days_total} Ticker konnten trotz Retry nicht von Finnhub "
+            "abgerufen werden (Rate-Limit oder ungueltiger Key) - raw_fetched ist "
+            "dadurch moeglicherweise niedriger als die tatsaechliche Abdeckung."
+        )
+    else:
+        fetch_note = (
+            f"{days_failed}/{days_total} Tag(e) konnten trotz Retry nicht von GDELT "
+            "abgerufen werden (Rate-Limit, GDELT selbst nennt max. 1 Anfrage/5s) - "
+            "raw_fetched ist dadurch moeglicherweise niedriger als die tatsaechliche "
+            "Abdeckung. Etwas warten (das Limit erholt sich von selbst) und bei einem "
+            "erneuten Lauf ggf. einen kleineren Zeitraum probieren."
+        )
 
     kept = [r for r in raw if looks_market_relevant(r.text)]
     report["after_prefilter"] = len(kept)
@@ -472,7 +554,7 @@ async def run_backtest(
         report["dry_run"] = not execute
         report["note"] = (
             "Keine Artikel nach dem Vorfilter uebrig - siehe raw_fetched fuer die "
-            "GDELT-Rohtreffer im Zeitraum." + (f" {fetch_note}" if fetch_note else "")
+            "Rohtreffer der gewaehlten Quelle im Zeitraum." + (f" {fetch_note}" if fetch_note else "")
         )
         return report
 
@@ -650,10 +732,17 @@ def main() -> None:
              "dann zaehlt nur --budget-usd). Nur mit --execute relevant.",
     )
     parser.add_argument(
-        "--source", choices=("gdelt", "alphavantage"), default="gdelt",
+        "--source", choices=("gdelt", "alphavantage", "finnhub"), default="gdelt",
         help="Historische Nachrichtenquelle. 'alphavantage' braucht ALPHAVANTAGE_API_KEY "
-             "in der .env (kostenlos) und reicht Jahre zurueck; 'gdelt' braucht keinen "
-             "Key, ist aber anfaellig fuer laengere IP-Sperren (siehe README).",
+             "in der .env (kostenlos), ist marktweit, aber auf ~25 Anfragen/TAG begrenzt; "
+             "'finnhub' braucht FINNHUB_API_KEY (kostenlos, ~60 Anfragen/MINUTE), ist "
+             "dafuer NUR pro Ticker abrufbar (siehe --tickers) statt marktweit; 'gdelt' "
+             "braucht keinen Key, ist aber anfaellig fuer laengere IP-Sperren (siehe README).",
+    )
+    parser.add_argument(
+        "--tickers", type=str, default=None,
+        help="Nur mit --source finnhub relevant: kommagetrennte Ticker-Liste statt der "
+             "24 Standard-Ticker (app.backtest.DEFAULT_FINNHUB_TICKERS).",
     )
     parser.add_argument(
         "--budget-usd", type=float, default=0.0,
@@ -680,11 +769,14 @@ def main() -> None:
     if end < start:
         parser.error("--end darf nicht vor --start liegen")
 
+    tickers = (
+        [t.strip() for t in args.tickers.split(",") if t.strip()] if args.tickers else None
+    )
     report = asyncio.run(
         run_backtest(
             start, end, horizon_days=args.horizon_days, max_calls=args.max_calls,
             execute=args.execute, db_path=args.db_path,
-            source=args.source, budget_usd=args.budget_usd,
+            source=args.source, budget_usd=args.budget_usd, tickers=tickers,
         )
     )
     print(json.dumps(report, indent=2, ensure_ascii=False, default=str))
