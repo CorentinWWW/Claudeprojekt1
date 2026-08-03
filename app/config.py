@@ -614,11 +614,17 @@ DB_PATH = os.getenv("DB_PATH", "trump_monitor.db")
 # unveraendert weiter. Kostenlos unter alphavantage.co/support/#api-key.
 ALPHAVANTAGE_API_KEY = _str("ALPHAVANTAGE_API_KEY")
 
-# Ebenfalls nur fuer den historischen Backtest-Abruf (--source finnhub), aus demselben
-# Grund wie ALPHAVANTAGE_API_KEY: fuer den Live-Betrieb ungeeignet, fuer einen
-# einmaligen Lauf ausreichend. Zweite Quelle NEBEN Alpha Vantage, weil deren Gratis-
-# Tarif nur 25 Anfragen/TAG erlaubt (bei mehreren Testlaeufen am selben Tag schnell
-# aufgebraucht) - Finnhubs Gratis-Tarif erlaubt stattdessen ~60/MINUTE. Kostenlos ohne
+# Zwei Verwendungszwecke, beide optional, beide NICHT fuer den Live-Betrieb:
+# 1. Historischer Backtest-Abruf (--source finnhub), NEBEN Alpha Vantage, weil dessen
+#    Gratis-Tarif nur 25 Anfragen/TAG erlaubt (bei mehreren Testlaeufen am selben Tag
+#    schnell aufgebraucht) - Finnhubs Gratis-Tarif erlaubt stattdessen ~60/MINUTE.
+# 2. Marktkapitalisierung fuer die Backtest-/Replay-Groessenklassen-Aufschluesselung
+#    (app/prices.py:get_market_caps, micro/small/mid/large-Cap) - live gefunden: die
+#    fruehere Quelle (Yahoos v7/finance/quote) liefert seitdem durchgehend HTTP 401
+#    Unauthorized (dauerhaft, kein Netzwerkproblem). Finnhubs stock/profile2 ersetzt
+#    sie vollstaendig.
+# Ohne Key: --source finnhub nicht nutzbar, und die Groessenklassen-Aufschluesselung
+# bleibt leer ("unbekannt") - alles andere laeuft unveraendert weiter. Kostenlos ohne
 # Kreditkarte: finnhub.io/register
 FINNHUB_API_KEY = _str("FINNHUB_API_KEY")
 

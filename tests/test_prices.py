@@ -194,6 +194,89 @@ def main():
 
     asyncio.run(_run_fallback_orchestration_tests())
 
+    # --- Marktkapitalisierung: Finnhub statt Yahoo (live gefunden: Yahoos frueherer
+    # v7/finance/quote-Endpunkt liefert seit einem Backtest-Lauf durchgehend 401
+    # Unauthorized - kein Netzwerkproblem, sondern eine dauerhafte Aenderung bei
+    # Yahoo. Finnhubs stock/profile2 ersetzt ihn komplett, siehe app/prices.py.) ----
+    from app.prices import parse_finnhub_profile_market_cap
+
+    check("Finnhub: marketCapitalization (Millionen) -> USD umgerechnet",
+          parse_finnhub_profile_market_cap({"marketCapitalization": 3000000.0})
+          == 3000000.0 * 1_000_000.0)
+    check("Finnhub: unbekanntes Symbol (leeres Objekt) -> None, kein Fehler",
+          parse_finnhub_profile_market_cap({}) is None)
+    check("Finnhub: None-Antwort -> None", parse_finnhub_profile_market_cap(None) is None)
+    check("Finnhub: fehlendes marketCapitalization-Feld -> None",
+          parse_finnhub_profile_market_cap({"name": "Foo Inc"}) is None)
+    check("Finnhub: negativer/kaputter Wert wird verworfen",
+          parse_finnhub_profile_market_cap({"marketCapitalization": -5.0}) is None)
+    check("Finnhub: Nicht-Zahl wird verworfen",
+          parse_finnhub_profile_market_cap({"marketCapitalization": "viel"}) is None)
+
+    async def _run_market_cap_tests():
+        prices = _fresh_prices_module()
+
+        # Ohne Key: sofort leeres Dict, kein Netzwerkversuch, keine Exception (best-effort,
+        # FINNHUB_API_KEY ist optional - siehe .env.example).
+        prices.config.FINNHUB_API_KEY = ""
+        caps_no_key = await prices.get_market_caps(["AAPL"])
+        check("ohne FINNHUB_API_KEY: leeres Dict statt Fehler", caps_no_key == {})
+
+        # Mit Key: EIN Request je Ticker (kein Batch-Endpunkt mehr, siehe Modul-Docstring),
+        # ein einzelner fehlschlagender/unbekannter Ticker darf die anderen nicht verwerfen.
+        prices.config.FINNHUB_API_KEY = "dummy-key"
+        calls = []
+
+        class FakeResp:
+            def __init__(self, payload):
+                self._payload = payload
+            def raise_for_status(self):
+                pass
+            def json(self):
+                return self._payload
+
+        class FakeClient:
+            async def get(self, url, params=None, **kw):
+                calls.append(params.get("symbol"))
+                if params.get("symbol") == "NVDA":
+                    raise RuntimeError("simulierter Netzfehler nur fuer NVDA")
+                payload = {
+                    "AAPL": {"marketCapitalization": 3000000.0},
+                    "SOFI": {"marketCapitalization": 12000.0},
+                    "UNBEKANNT": {},
+                }.get(params.get("symbol"), {})
+                return FakeResp(payload)
+
+        orig_sleep = prices.asyncio.sleep
+        prices.asyncio.sleep = AsyncMock(return_value=None)  # Test nicht ausbremsen
+        try:
+            caps = await prices.get_market_caps(
+                ["AAPL", "NVDA", "SOFI", "UNBEKANNT"], client=FakeClient()
+            )
+        finally:
+            prices.asyncio.sleep = orig_sleep
+
+        check("EIN Request je Ticker abgesetzt", calls == ["AAPL", "NVDA", "SOFI", "UNBEKANNT"])
+        check("AAPL korrekt in USD umgerechnet", caps.get("AAPL") == 3000000.0 * 1_000_000.0)
+        check("SOFI korrekt in USD umgerechnet", caps.get("SOFI") == 12000.0 * 1_000_000.0)
+        check("NVDA (Netzfehler) fehlt im Ergebnis, wirft aber NICHT nach aussen",
+              "NVDA" not in caps)
+        check("UNBEKANNT (leeres Finnhub-Objekt) fehlt im Ergebnis",
+              "UNBEKANNT" not in caps)
+        check("nur die zwei erfolgreichen Ticker im Ergebnis", len(caps) == 2)
+
+        # Dedupe: derselbe Ticker mehrfach in der Anfrageliste -> nur EIN Request.
+        calls.clear()
+        prices.asyncio.sleep = AsyncMock(return_value=None)
+        try:
+            await prices.get_market_caps(["AAPL", "aapl", " AAPL "], client=FakeClient())
+        finally:
+            prices.asyncio.sleep = orig_sleep
+        check("doppelte/verschieden geschriebene Ticker werden dedupliziert (1 statt 3 Requests)",
+              calls == ["AAPL"])
+
+    asyncio.run(_run_market_cap_tests())
+
     print()
     if failures:
         print(f"{len(failures)} FEHLGESCHLAGEN:")

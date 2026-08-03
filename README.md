@@ -360,7 +360,11 @@ Gating-Logik wie die Live-Pipeline (`is_alert_worthy()`/`actionable_tickers()` a
 Handelstagen danach tatsächlich bewegt haben — aufgeschlüsselt nach
 Marktkapitalisierungs-Klasse (micro/small/mid/large, `app/prices.py`), um zu prüfen, ob
 Small-Caps tatsächlich einen geringeren Verzögerungs-Nachteil haben, statt es nur zu
-behaupten.
+behaupten. **Braucht dafür `FINNHUB_API_KEY`** (unabhängig von `--source`) — ohne Key
+bleibt die Aufschlüsselung leer (`"unbekannt"`). Live gefunden: die frühere Quelle
+(Yahoos `v7/finance/quote`) liefert seit einem Backtest-Lauf durchgehend
+`401 Unauthorized` (dauerhaft, kein Netzwerkproblem) — `app/prices.py:get_market_caps`
+nutzt deshalb Finnhubs `stock/profile2` statt Yahoo.
 
 **Quellenwahl (`--source`):**
 

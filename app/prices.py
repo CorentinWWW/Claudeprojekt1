@@ -7,6 +7,7 @@ unbekanntes Symbol), wird None zurueckgegeben und das jeweilige Feature entfaell
 still - der Poll-Zyklus darf daran NIE scheitern. Deshalb ist das gesamte Preis-Tracking
 per ENABLE_PRICE_TRACKING standardmaessig aus.
 """
+import asyncio
 import logging
 import math
 import time
@@ -38,14 +39,15 @@ _STOOQ_HISTORY_URL = "https://stooq.com/q/d/l/?s={symbol}&i=d"
 _YAHOO_CHART_URL = "https://query1.finance.yahoo.com/v8/finance/chart/{ticker}"
 _YAHOO_HEADERS = {"User-Agent": "Mozilla/5.0"}
 
-# Marktkapitalisierung (#Small-Cap-Fokus): der Chart-Endpunkt oben liefert kein
-# marketCap-Feld, dafuer aber Yahoos Batch-Quote-Endpunkt - EIN Call fuer beliebig
-# viele Ticker (Komma-getrennt), statt N Einzelabfragen. Vor allem fuer den Backtest
-# gedacht (app/backtest.py): dort werden viele Ticker auf einmal ausgewertet und in
-# Groessen-Klassen (Small/Mid/Large-Cap) aufgeschluesselt, um die These "Small-Caps
-# haben weniger Verzoegerungs-Nachteil" mit echten Daten zu pruefen statt nur zu
-# behaupten.
-_YAHOO_QUOTE_URL = "https://query1.finance.yahoo.com/v7/finance/quote"
+# Marktkapitalisierung (#Small-Cap-Fokus): urspruenglich ueber Yahoos Batch-Quote-
+# Endpunkt (v7/finance/quote) geholt - der liefert seit einem live beobachteten
+# Backtest-Lauf durchgehend HTTP 401 Unauthorized (Yahoo verlangt fuer genau diesen
+# Endpunkt inzwischen eine Authentifizierung, die wir nicht haben; anders als der
+# Chart-Endpunkt oben, der weiterhin ohne Key funktioniert). Kein voruebergehendes
+# Problem, sondern dauerhaft - deshalb komplett ersetzt durch Finnhubs
+# stock/profile2 (siehe get_market_caps unten), das ohnehin schon fuer die
+# historische Newsquelle (app/sources/news_finnhub.py) im Projekt ist.
+_FINNHUB_PROFILE_URL = "https://finnhub.io/api/v1/stock/profile2"
 
 # --- Kurz-Cache + Circuit-Breaker (#13) -------------------------------------------
 # Cache: dieselbe Ticker-Quote wird innerhalb von PRICE_CACHE_TTL_SECONDS nicht erneut
@@ -285,52 +287,75 @@ def parse_yahoo_history_json(data: Optional[dict], max_bars: int = 400) -> Optio
     }
 
 
-def parse_yahoo_market_cap_json(data: Optional[dict]) -> dict[str, float]:
-    """Parst die Antwort von query1.finance.yahoo.com/v7/finance/quote zu
-    {TICKER: marktkapitalisierung_usd}. Ticker ohne gueltiges marketCap-Feld (z.B.
-    unbekanntes Symbol, ETF ohne Market Cap) fehlen im Ergebnis-Dict komplett statt mit
-    None drin zu stehen - Aufrufer pruefen einfach per 'in'/.get()."""
-    try:
-        results = (data or {}).get("quoteResponse", {}).get("result") or []
-    except (AttributeError, TypeError):
-        return {}
-    out: dict[str, float] = {}
-    for row in results:
-        if not isinstance(row, dict):
-            continue
-        symbol = row.get("symbol")
-        cap = row.get("marketCap")
-        if not symbol or not isinstance(cap, (int, float)) or isinstance(cap, bool):
-            continue
-        cap = float(cap)
-        if math.isfinite(cap) and cap > 0:
-            out[symbol.upper()] = cap
-    return out
+def parse_finnhub_profile_market_cap(data: Optional[dict]) -> Optional[float]:
+    """Parst die Antwort von finnhub.io/api/v1/stock/profile2 zur Marktkapitalisierung
+    in USD. Finnhub liefert 'marketCapitalization' in MILLIONEN USD, nicht in USD
+    direkt - live an AAPL geprueft (Wert lag um 3 Groessenordnungen unter der
+    tatsaechlichen Marktkapitalisierung, ohne die Umrechnung). Unbekanntes Symbol ->
+    Finnhub antwortet mit einem LEEREN Objekt (kein Fehlerstatus) -> None, kein Fehler."""
+    if not isinstance(data, dict):
+        return None
+    cap = data.get("marketCapitalization")
+    if not isinstance(cap, (int, float)) or isinstance(cap, bool):
+        return None
+    cap_usd = float(cap) * 1_000_000.0
+    return cap_usd if math.isfinite(cap_usd) and cap_usd > 0 else None
 
 
 async def get_market_caps(
     tickers: list[str], client: Optional[httpx.AsyncClient] = None
 ) -> dict[str, float]:
-    """Marktkapitalisierung (USD) fuer mehrere Ticker in EINEM Batch-Call (Yahoo erlaubt
-    Komma-getrennte Symbole). Best-effort wie der Rest dieses Moduls: liefert bei jedem
-    Problem ein leeres Dict, nie eine Exception nach aussen. Fehlende Ticker im
-    Ergebnis-Dict = keine Daten verfuegbar, nicht zwingend ein Fehler."""
-    tickers = [t.strip().upper() for t in tickers if t and t.strip()]
+    """Marktkapitalisierung (USD) fuer mehrere Ticker. Ueber Finnhubs stock/profile2 -
+    KEIN Batch-Endpunkt wie das fruehere Yahoo v7/finance/quote (das seit einem live
+    beobachteten 401 Unauthorized dauerhaft nicht mehr ohne Auth erreichbar ist, siehe
+    _FINNHUB_PROFILE_URL-Kommentar), daher EIN Request je Ticker mit kurzer Pause
+    dazwischen (Finnhubs Gratis-Tarif: ~60 Anfragen/Minute). Fuer die hier ueblichen
+    Ticker-Mengen (Handvoll bis Dutzend, siehe app/backtest.py) im Bereich weniger
+    Sekunden.
+
+    Best-effort wie der Rest dieses Moduls: ein einzelner fehlschlagender Ticker
+    (unbekanntes Symbol, Netzfehler) ueberspringt nur diesen, bricht nicht die
+    gesamte Abfrage ab. Ohne FINNHUB_API_KEY (optional - siehe .env.example) ein
+    leeres Dict, keine Exception. Fehlende Ticker im Ergebnis-Dict = keine Daten
+    verfuegbar, nicht zwingend ein Fehler."""
+    tickers = list(dict.fromkeys(t.strip().upper() for t in tickers if t and t.strip()))
     if not tickers:
         return {}
-    params = {"symbols": ",".join(dict.fromkeys(tickers))}  # dedupe, Reihenfolge egal
-    try:
-        if client is not None:
-            resp = await client.get(_YAHOO_QUOTE_URL, params=params, headers=_YAHOO_HEADERS)
-        else:
-            async with httpx.AsyncClient(timeout=10, follow_redirects=True) as c:
-                resp = await c.get(_YAHOO_QUOTE_URL, params=params, headers=_YAHOO_HEADERS)
-        resp.raise_for_status()
-        data = resp.json()
-    except Exception:
-        logger.debug("Marktkapitalisierungs-Abfrage fehlgeschlagen (best-effort).", exc_info=True)
+    if not config.FINNHUB_API_KEY:
+        logger.debug("FINNHUB_API_KEY nicht gesetzt - Marktkapitalisierung entfaellt (best-effort).")
         return {}
-    return parse_yahoo_market_cap_json(data)
+
+    out: dict[str, float] = {}
+
+    async def _fetch_one(c: httpx.AsyncClient, ticker: str) -> None:
+        try:
+            resp = await c.get(
+                _FINNHUB_PROFILE_URL,
+                params={"symbol": ticker, "token": config.FINNHUB_API_KEY},
+            )
+            resp.raise_for_status()
+            cap = parse_finnhub_profile_market_cap(resp.json())
+        except Exception:
+            logger.debug(
+                "Marktkapitalisierungs-Abfrage fuer %s fehlgeschlagen (best-effort).",
+                ticker, exc_info=True,
+            )
+            return
+        if cap is not None:
+            out[ticker] = cap
+
+    if client is not None:
+        for i, ticker in enumerate(tickers):
+            await _fetch_one(client, ticker)
+            if i < len(tickers) - 1:
+                await asyncio.sleep(1.05)
+    else:
+        async with httpx.AsyncClient(timeout=10, follow_redirects=True) as c:
+            for i, ticker in enumerate(tickers):
+                await _fetch_one(c, ticker)
+                if i < len(tickers) - 1:
+                    await asyncio.sleep(1.05)
+    return out
 
 
 async def get_market_cap(ticker: str, client: Optional[httpx.AsyncClient] = None) -> Optional[float]:
