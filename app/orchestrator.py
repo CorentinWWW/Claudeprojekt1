@@ -1416,6 +1416,29 @@ async def _evaluate_alert_outcomes():
         if not alert_price:
             continue
         followup_price = quote["price"]
+        # Eine Nachmessung, bei der sich der Kurs auf den Cent GENAU nicht bewegt hat,
+        # ist ausserhalb der Handelszeiten keine Messung, sondern der eingefrorene
+        # letzte Schlusskurs: die kostenlosen Kursquellen (Stooq/Yahoo) liefern dann
+        # exakt denselben Wert wie beim Alarm.
+        #
+        # Ohne diese Pruefung wurde so ein Nicht-Ereignis als "Richtung nicht
+        # eingetreten" und damit als FALSCHE Vorhersage gebucht (correct ist unten nur
+        # bei return_pct > 0 bzw. < 0 wahr - exakt 0.0 faellt durch beide Raster). In
+        # der Praxis waren dadurch 8 von 10 ausgewerteten Alerts solche Schein-
+        # Fehlschlaege, was die Trefferquote auf 10% drueckte und - da die Statistik
+        # ueber ENABLE_HISTORICAL_PERFORMANCE_GATE und das Ensemble-Modell auf kuenftige
+        # Alarm-Entscheidungen zurueckwirkt - das System auf Basis von Artefakten
+        # gegen sich selbst arbeiten liess.
+        #
+        # Solche Faelle werden NICHT gebucht: followup_price bleibt NULL, der Datensatz
+        # bleibt damit in get_outcomes_awaiting_followup() und wird im naechsten Zyklus
+        # erneut versucht, sobald der Markt wieder handelt.
+        if followup_price == alert_price and us_market_session() != "open":
+            logger.debug(
+                "[outcome] %s: Kurs unveraendert bei geschlossenem Markt - keine echte "
+                "Messung, bleibt offen fuer den naechsten Versuch.", o["ticker"],
+            )
+            continue
         return_pct = (followup_price - alert_price) / alert_price * 100.0
         # "correct", wenn sich der Kurs in die eingeschaetzte Richtung bewegt hat.
         correct = (return_pct > 0 and o["direction"] == "long") or (

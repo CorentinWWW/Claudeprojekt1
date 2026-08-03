@@ -79,6 +79,55 @@ def main():
           stats["by_direction"].get("short", {}).get("hit_rate") == 0.0)
     check("keine offenen mehr in pending", stats["pending"] == 0)
 
+    # --- Unveraenderter Kurs bei geschlossenem Markt ist KEINE Messung ---------------
+    # Regressionstest fuer einen Live-Fund: bei geschlossenem Markt liefert die
+    # Kursquelle beim Nachmessen exakt denselben Kurs wie beim Alarm. return_pct ist
+    # dann 0.0 und fiel durch beide correct-Raster (>0 / <0) - das Nicht-Ereignis wurde
+    # also als FALSCHE Vorhersage gebucht. In der Produktion waren dadurch 8 von 10
+    # ausgewerteten Alerts Schein-Fehlschlaege (Trefferquote scheinbar 10%).
+    tmp_c, db_c, orch_c = _fresh()
+    old_c = time.time() - 3600
+    db_c.record_alert_baseline(201, "AAPL", "long", 0.95, old_c, 150.0)
+    db_c.record_alert_baseline(202, "MSFT", "long", 0.95, old_c, 300.0)
+
+    async def frozen_quote(ticker):
+        # AAPL exakt unveraendert (eingefrorener Schlusskurs), MSFT hat sich bewegt.
+        return {"AAPL": {"price": 150.0}, "MSFT": {"price": 303.0}}.get(ticker)
+
+    orig_c = orch_c.prices.get_quote
+    orig_session = orch_c.us_market_session
+    orch_c.prices.get_quote = frozen_quote
+    orch_c.us_market_session = lambda *a, **kw: "closed"
+    try:
+        asyncio.run(orch_c._evaluate_alert_outcomes())
+    finally:
+        orch_c.prices.get_quote = orig_c
+        orch_c.us_market_session = orig_session
+
+    stats_c = db_c.get_calibration_stats()
+    check("Markt zu + Kurs unveraendert: NICHT als Fehlschlag gebucht",
+          stats_c["evaluated"] == 1)
+    check("Markt zu + Kurs unveraendert: bleibt offen fuer den naechsten Versuch",
+          len(db_c.get_outcomes_awaiting_followup(60)) == 1)
+    check("bewegter Kurs wird trotz geschlossenem Markt normal ausgewertet",
+          stats_c["hits"] == 1 and stats_c["hit_rate"] == 1.0)
+
+    # Gegenprobe: bei OFFENEM Markt ist ein unveraenderter Kurs eine echte Aussage
+    # (keine Bewegung in die erwartete Richtung) und wird ganz normal gebucht.
+    tmp_o, db_o, orch_o = _fresh()
+    db_o.record_alert_baseline(301, "AAPL", "long", 0.95, time.time() - 3600, 150.0)
+    orig_o = orch_o.prices.get_quote
+    orig_session_o = orch_o.us_market_session
+    orch_o.prices.get_quote = frozen_quote
+    orch_o.us_market_session = lambda *a, **kw: "open"
+    try:
+        asyncio.run(orch_o._evaluate_alert_outcomes())
+    finally:
+        orch_o.prices.get_quote = orig_o
+        orch_o.us_market_session = orig_session_o
+    check("Markt OFFEN + Kurs unveraendert: wird normal als Fehlschlag gebucht",
+          db_o.get_calibration_stats()["evaluated"] == 1)
+
     # --- _fetch_ticker_context: Baseline erfassen + heutige Bewegung liefern ---
     tmp2, db2, orch2 = _fresh()
     from app.db import Classification
