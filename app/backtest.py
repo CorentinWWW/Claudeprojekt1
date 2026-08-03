@@ -49,6 +49,7 @@ import asyncio
 import datetime
 import json
 import logging
+import random
 import tempfile
 from dataclasses import dataclass
 from typing import Optional
@@ -61,6 +62,8 @@ from app.config import CLAUDE_MODEL
 from app.market_hours import current_market_date
 from app.orchestrator import _partition_duplicates, actionable_tickers, is_alert_worthy, is_high_priority
 from app.prefilter import looks_market_relevant
+from app.sources.news_alphavantage import AlphaVantageError
+from app.sources.news_alphavantage import fetch_range as av_fetch_range
 from app.sources.news_gdelt import fetch_range
 
 logger = logging.getLogger(__name__)
@@ -228,6 +231,47 @@ def _bucket_summary(outcomes: list[TickerOutcome]) -> dict:
     }
 
 
+def sample_within_budget(
+    statements: list, budget_usd: float, safety_margin: float = 0.9, seed: int = 42
+) -> tuple[list, bool]:
+    """Zieht eine ZUFAELLIGE Stichprobe, die in `budget_usd` passt.
+
+    Zufaellig und nicht "die ersten N": bei einem chronologisch sortierten Zeitraum
+    wuerde ein Schnitt am Anfang nur die ersten Tage abdecken und den Rest des
+    Zeitraums komplett verlieren - die Stichprobe waere dann systematisch verzerrt
+    (z.B. auf eine einzelne Marktphase). Fester Seed, damit derselbe Aufruf dasselbe
+    Ergebnis liefert und ein Lauf nachvollziehbar bleibt.
+
+    safety_margin: es wird nur bis 90% des Budgets geplant. Die Kostenschaetzung ist
+    eine Naeherung aus der Zeichenlaenge (siehe estimate_call_cost_usd), kein echter
+    Token-Zaehler - der Puffer verhindert, dass ein paar ungewoehnlich lange Artikel
+    das zugesagte Limit reissen.
+
+    Rueckgabe (stichprobe, wurde_gekuerzt)."""
+    if budget_usd <= 0 or not statements:
+        return statements, False
+    effective = budget_usd * safety_margin
+    total = sum(estimate_call_cost_usd(s.text) for s in statements)
+    if total <= effective:
+        return statements, False
+
+    shuffled = list(statements)
+    random.Random(seed).shuffle(shuffled)
+    picked = []
+    spent = 0.0
+    for s in shuffled:
+        cost = estimate_call_cost_usd(s.text)
+        if spent + cost > effective:
+            continue
+        picked.append(s)
+        spent += cost
+    # Chronologie wiederherstellen: der Replay soll die Meldungen in der Reihenfolge
+    # verarbeiten, in der sie erschienen sind (published_at kann None sein - dann ans
+    # Ende, statt beim Sortieren abzustuerzen).
+    picked.sort(key=lambda s: s.published_at or float("inf"))
+    return picked, True
+
+
 def _tier_breakdown(outcomes: list[TickerOutcome]) -> dict:
     by_tier: dict[str, list[TickerOutcome]] = {}
     for o in outcomes:
@@ -247,6 +291,62 @@ def _daterange_chunks(start: datetime.date, end: datetime.date):
         chunk_end = datetime.datetime.combine(day, datetime.time.max, tzinfo=datetime.timezone.utc)
         yield chunk_start, chunk_end
         day += datetime.timedelta(days=1)
+
+
+async def fetch_all_raw_alphavantage(
+    start: datetime.date, end: datetime.date, chunk_days: int = 7
+) -> tuple[list, int, int]:
+    """Historischer Abruf ueber Alpha Vantage (siehe app/sources/news_alphavantage.py).
+
+    Bewusst in WOCHEN-Chunks statt taeglich wie bei GDELT: der Endpunkt liefert bis zu
+    1000 Artikel pro Abfrage, und der kostenlose Tarif erlaubt nur sehr wenige Abfragen
+    pro Tag - drei Monate kosten so ~13 Abfragen statt ~90. Rueckgabe wie
+    fetch_all_raw(): (statements, chunks_failed, chunks_total)."""
+    seen_ids: set = set()
+    out = []
+    failed = 0
+    total = 0
+    async with httpx.AsyncClient(timeout=60) as client:
+        day = start
+        while day <= end:
+            chunk_end_day = min(day + datetime.timedelta(days=chunk_days - 1), end)
+            total += 1
+            chunk_start = datetime.datetime.combine(
+                day, datetime.time.min, tzinfo=datetime.timezone.utc
+            )
+            chunk_end = datetime.datetime.combine(
+                chunk_end_day, datetime.time.max, tzinfo=datetime.timezone.utc
+            )
+            try:
+                batch = await av_fetch_range(chunk_start, chunk_end, client=client)
+            except Exception as exc:
+                failed += 1
+                logger.warning(
+                    "Alpha-Vantage-Abfrage fuer %s bis %s fehlgeschlagen: %s",
+                    day, chunk_end_day, exc,
+                )
+                # Ein Rate-Limit/Key-Fehler trifft jede weitere Abfrage genauso - dann
+                # ist Weitermachen sinnlos und wuerde die restlichen Chunks nur mit
+                # derselben Fehlermeldung fluten (Lehre aus dem GDELT-Vorfall).
+                if isinstance(exc, AlphaVantageError):
+                    logger.error(
+                        "Alpha Vantage meldet ein grundsaetzliches Problem - breche den "
+                        "Abruf ab, statt es fuer jeden weiteren Zeitraum zu wiederholen."
+                    )
+                    break
+                day = chunk_end_day + datetime.timedelta(days=1)
+                continue
+            for r in batch:
+                if r.source_id in seen_ids:
+                    continue
+                seen_ids.add(r.source_id)
+                out.append(r)
+            day = chunk_end_day + datetime.timedelta(days=1)
+            if day <= end:
+                # Freundlicher Abstand zwischen Abfragen (kein dokumentiertes
+                # Sekunden-Limit, aber nach dem GDELT-Vorfall bewusst konservativ).
+                await asyncio.sleep(2.0)
+    return out, failed, total
 
 
 async def fetch_all_raw(start: datetime.date, end: datetime.date) -> tuple[list, int, int]:
@@ -305,6 +405,8 @@ async def run_backtest(
     max_calls: int = 30,
     execute: bool = False,
     db_path: Optional[str] = None,
+    source: str = "gdelt",
+    budget_usd: float = 0.0,
 ) -> dict:
     """Fuehrt den Backtest aus. Ohne execute=True werden NIEMALS Claude-Calls gemacht -
     Rueckgabe ist dann nur der Kostenvoranschlag (siehe Modul-Docstring Punkt 1). Laeuft
@@ -333,10 +435,14 @@ async def run_backtest(
         db.DB_PATH = tmp.name
     db.init_db()
 
-    raw, days_failed, days_total = await fetch_all_raw(start, end)
+    if source == "alphavantage":
+        raw, days_failed, days_total = await fetch_all_raw_alphavantage(start, end)
+    else:
+        raw, days_failed, days_total = await fetch_all_raw(start, end)
     report: dict = {
         "start": start.isoformat(),
         "end": end.isoformat(),
+        "source": source,
         "horizon_days": horizons,
         "db_path": db.DB_PATH,
         "raw_fetched": len(raw),
@@ -371,8 +477,27 @@ async def run_backtest(
         return report
 
     to_classify, _dupes = _partition_duplicates(kept)
-    to_classify.sort(key=is_high_priority, reverse=True)
     report["after_dedup"] = len(to_classify)
+    report["cost_without_budget_usd"] = round(
+        sum(estimate_call_cost_usd(r.text) for r in to_classify), 4
+    )
+
+    # Budget-Stichprobe VOR der Prioritaets-Sortierung: sonst wuerde die Zufallsauswahl
+    # aus einer bereits nach Wichtigkeit vorsortierten Liste ziehen und die Stichprobe
+    # waere nicht mehr repraesentativ fuer das, was die Pipeline im Alltag sieht.
+    if budget_usd > 0:
+        to_classify, was_sampled = sample_within_budget(to_classify, budget_usd)
+        report["budget_usd"] = budget_usd
+        report["budget_sampled"] = was_sampled
+        if was_sampled:
+            report["budget_note"] = (
+                f"Zufallsstichprobe: {len(to_classify)} von {report['after_dedup']} "
+                f"Artikeln passen ins Budget von {budget_usd:.2f} $ (mit Sicherheitspuffer). "
+                "Zufaellig ueber den GESAMTEN Zeitraum gezogen, nicht die ersten N - "
+                "sonst waere nur der Anfang des Zeitraums abgedeckt."
+            )
+
+    to_classify.sort(key=is_high_priority, reverse=True)
     report["estimated_calls"] = len(to_classify)
     report["estimated_cost_usd"] = round(
         sum(estimate_call_cost_usd(r.text) for r in to_classify), 4
@@ -381,15 +506,15 @@ async def run_backtest(
     if not execute:
         report["dry_run"] = True
         report["note"] = (
-            "Dry-Run: KEIN Claude-Call ausgefuehrt. Mit --execute (und --max-calls als "
-            "harter Obergrenze fuer echte Calls) tatsaechlich klassifizieren."
+            "Dry-Run: KEIN Claude-Call ausgefuehrt. Mit --execute (und --max-calls bzw. "
+            "--budget-usd als harter Obergrenze) tatsaechlich klassifizieren."
             + (f" {fetch_note}" if fetch_note else "")
         )
         return report
 
     report["dry_run"] = False
-    to_run = to_classify[:max_calls]
-    report["truncated_by_max_calls"] = len(to_classify) > max_calls
+    to_run = to_classify[:max_calls] if max_calls > 0 else to_classify
+    report["truncated_by_max_calls"] = max_calls > 0 and len(to_classify) > max_calls
 
     outcomes_by_horizon: dict[int, list[TickerOutcome]] = {h: [] for h in horizons}
     alert_worthy_count = 0
@@ -399,6 +524,17 @@ async def run_backtest(
     calls_made = 0
 
     for raw_stmt in to_run:
+        # Zweite, UNABHAENGIGE Reissleine: sample_within_budget() plant im Voraus anhand
+        # einer Schaetzung - hier wird waehrend des Laufs mitgezaehlt und hart gestoppt.
+        # Ohne das koennte eine zu niedrige Schaetzung das zugesagte Limit ueberschreiten,
+        # und der Nutzer haette echtes Geld ausgegeben, das er nicht freigegeben hat.
+        if budget_usd > 0 and actual_cost + estimate_call_cost_usd(raw_stmt.text) > budget_usd:
+            report["stopped_by_budget"] = True
+            logger.warning(
+                "Budget von %.2f $ erreicht (%.4f $ ausgegeben) - breche nach %d Calls ab.",
+                budget_usd, actual_cost, calls_made,
+            )
+            break
         try:
             classification = await classify(raw_stmt.text, recent_context=[], _bypass_daily_cap=True)
         except DailyCapExceeded:
@@ -510,7 +646,21 @@ def main() -> None:
     )
     parser.add_argument(
         "--max-calls", type=int, default=30,
-        help="Harte Obergrenze fuer ECHTE Claude-Calls pro Lauf (nur mit --execute relevant)",
+        help="Harte Obergrenze fuer ECHTE Claude-Calls pro Lauf (0 = keine Anzahl-Grenze, "
+             "dann zaehlt nur --budget-usd). Nur mit --execute relevant.",
+    )
+    parser.add_argument(
+        "--source", choices=("gdelt", "alphavantage"), default="gdelt",
+        help="Historische Nachrichtenquelle. 'alphavantage' braucht ALPHAVANTAGE_API_KEY "
+             "in der .env (kostenlos) und reicht Jahre zurueck; 'gdelt' braucht keinen "
+             "Key, ist aber anfaellig fuer laengere IP-Sperren (siehe README).",
+    )
+    parser.add_argument(
+        "--budget-usd", type=float, default=0.0,
+        help="Hartes Kostenlimit in USD (0 = aus). Passen nicht alle Artikel hinein, wird "
+             "eine ZUFAELLIGE Stichprobe ueber den gesamten Zeitraum gezogen (nicht die "
+             "ersten N - das wuerde nur den Anfang abdecken). Wirkt doppelt: bei der "
+             "Planung und als Abbruch waehrend des Laufs.",
     )
     parser.add_argument(
         "--execute", action="store_true",
@@ -534,6 +684,7 @@ def main() -> None:
         run_backtest(
             start, end, horizon_days=args.horizon_days, max_calls=args.max_calls,
             execute=args.execute, db_path=args.db_path,
+            source=args.source, budget_usd=args.budget_usd,
         )
     )
     print(json.dumps(report, indent=2, ensure_ascii=False, default=str))

@@ -607,6 +607,13 @@ DASHBOARD_API_KEY = _str("DASHBOARD_API_KEY")
 
 DB_PATH = os.getenv("DB_PATH", "trump_monitor.db")
 
+# Nur fuer den HISTORISCHEN Abruf im Backtest (app/sources/news_alphavantage.py), nicht
+# fuer den Live-Betrieb: der kostenlose Tarif erlaubt zu wenige Abfragen pro Tag fuer
+# einen Minuten-Poll, reicht fuer einen einmaligen Backtest-Lauf aber locker. Ohne Key
+# ist schlicht die Quelle --source alphavantage nicht nutzbar; alles andere laeuft
+# unveraendert weiter. Kostenlos unter alphavantage.co/support/#api-key.
+ALPHAVANTAGE_API_KEY = _str("ALPHAVANTAGE_API_KEY")
+
 
 def validate() -> tuple[list[str], list[str]]:
     """Prueft die Konfiguration. Gibt (fatal_errors, warnings) zurueck.

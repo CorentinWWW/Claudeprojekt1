@@ -58,7 +58,11 @@ MAX_TEST_TEXT_LENGTH = 4000
 # schuetzt vor einem (versehentlich) riesigen Zeitraum/Call-Budget ueber die rohe API,
 # nicht nur ueber die UI-Eingabefelder (die dieselben Grenzen als min/max setzen).
 BACKTEST_MAX_CALLS_LIMIT = 100
-BACKTEST_MAX_RANGE_DAYS = 60
+# 100 Tage: deckt den fuer eine belastbare Stichprobe angepeilten Zeitraum von drei
+# Monaten ab. Der Deckel schuetzt nicht mehr primaer vor Kosten (das macht seit dem
+# Budget-Limit --budget-usd bzw. BACKTEST_MAX_CALLS_LIMIT), sondern vor einem
+# versehentlich sehr LANGEN Lauf, der den Dashboard-Request blockiert.
+BACKTEST_MAX_RANGE_DAYS = 100
 BACKTEST_MAX_HORIZON_DAYS = 30
 BACKTEST_MAX_HORIZONS_COUNT = 6
 # Grosszuegig genug fuer den Standard-Rahmen (60 Tage x taeglicher GDELT-Chunk +

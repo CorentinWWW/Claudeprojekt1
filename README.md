@@ -362,6 +362,32 @@ Marktkapitalisierungs-Klasse (micro/small/mid/large, `app/prices.py`), um zu pr�
 Small-Caps tatsächlich einen geringeren Verzögerungs-Nachteil haben, statt es nur zu
 behaupten.
 
+**Quellenwahl (`--source`):**
+
+| | `alphavantage` (empfohlen) | `gdelt` |
+|---|---|---|
+| Historie | Jahre | unklar |
+| API-Key | ja, **kostenlos** ohne Kreditkarte | nein |
+| Rate-Limit | wenige Abfragen/Tag, aber **1000 Artikel je Abfrage** → 3 Monate mit ~13 Abfragen | 1 Anfrage/5 s, sperrt bei Verstoß die **IP für Stunden** (siehe unten) |
+
+Für Zeiträume über wenige Tage ist `--source alphavantage` praktisch alternativlos —
+GDELTs IP-Sperre macht längere Läufe unbrauchbar. Key in die `.env` als
+`ALPHAVANTAGE_API_KEY` (siehe `.env.example`).
+
+**Kostenlimit (`--budget-usd`)** — wichtiger als `--max-calls`, weil in Geld statt in
+Stückzahl gedacht: Passen nicht alle gefundenen Artikel ins Budget, wird eine
+**zufällige Stichprobe über den gesamten Zeitraum** gezogen (nicht die ersten N — das
+würde nur den Anfang abdecken und die Auswertung auf eine einzelne Marktphase
+verzerren). Das Limit greift **doppelt**: bei der Planung *und* als harter Abbruch
+während des Laufs, falls die Kostenschätzung danebenliegt. Fester Zufalls-Seed, damit
+derselbe Aufruf dieselbe Stichprobe liefert.
+
+```bash
+# 3 Monate abdecken, aber hoechstens 3 $ ausgeben (~800 Klassifikationen):
+python -m app.backtest --source alphavantage \
+  --start 2026-05-05 --end 2026-08-03 --budget-usd 3.0 --max-calls 0 --execute
+```
+
 ```bash
 # 1. Immer zuerst ohne --execute: reiner Kostenvoranschlag, KEIN Claude-Call
 python -m app.backtest --start 2026-06-01 --end 2026-06-07
