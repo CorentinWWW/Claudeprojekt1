@@ -32,13 +32,23 @@ logger = logging.getLogger(__name__)
 
 ALPHAVANTAGE_ENDPOINT = "https://www.alphavantage.co/query"
 
-# Marktweite Themen - bewusst breit gewaehlt, damit das Material dem aehnelt, was die
-# Live-Quellen (RSS) liefern: allgemeine Wirtschafts-/Marktnachrichten, aus denen Claude
-# selbst den betroffenen Ticker ableiten muss. Eine ticker-spezifische Abfrage waere ein
-# anderes Experiment (der Ticker waere dann schon vorgegeben).
-DEFAULT_TOPICS = (
-    "financial_markets,earnings,mergers_and_acquisitions,economy_macro,economy_monetary"
-)
+# KEIN Themenfilter, mit Absicht - live gegengeprueft (nicht nur vermutet): Alpha
+# Vantage behandelt mehrere kommagetrennte "topics" als UND, nicht ODER. Ein Artikel
+# musste dann GLEICHZEITIG zu allen fuenf Themen passen - Test gegen die echte API ergab
+# dadurch nur 2 Treffer/Monat statt der erwarteten Hunderten (ein einzelnes Thema oder
+# GAR KEIN Filter lieferten im selben Test jeweils die volle Menge).
+#
+# Fuenf separate Abfragen (eine je Thema) waeren keine Lösung gewesen: bei
+# wochenweisem Chunking braeuchte ein 3-Monats-Lauf dann ~65 statt ~13 Abfragen - weit
+# ueber dem taeglichen Gratis-Kontingent (Groessenordnung 25).
+#
+# Also: KEIN Vorfilter ueber Themen, dafuer volle Breite - genau wie bei GDELT in
+# diesem Projekt (siehe news_gdelt.py: "Die eigentliche Praezision entsteht nicht hier,
+# sondern nachgelagert durch die strenge Claude-Klassifikation"). Alpha Vantages
+# NEWS_SENTIMENT ist ohnehin ein Finanznachrichten-Feed, kein allgemeiner Newsfeed -
+# "kein Filter" bedeutet hier nicht "beliebige Nachrichten", nur "nicht zusaetzlich
+# eingeschraenkt".
+DEFAULT_TOPICS: Optional[str] = None
 
 # Maximum des Endpunkts pro Abfrage.
 MAX_LIMIT_PER_QUERY = 1000
@@ -111,10 +121,14 @@ async def fetch_range(
     start: datetime.datetime,
     end: datetime.datetime,
     client: Optional[httpx.AsyncClient] = None,
-    topics: str = DEFAULT_TOPICS,
+    topics: Optional[str] = DEFAULT_TOPICS,
     limit: int = MAX_LIMIT_PER_QUERY,
 ) -> list[RawStatement]:
     """Historische Nachrichten fuer einen Zeitraum. `start`/`end` muessen UTC-aware sein.
+
+    topics: EIN einzelnes Thema (kein Komma) oder None fuer keinen Themenfilter
+    (Standard, siehe DEFAULT_TOPICS-Kommentar). Mehrere kommagetrennte Themen NICHT
+    verwenden - siehe dort, warum das fast keine Treffer liefert.
 
     Wirft AlphaVantageError, wenn kein Key konfiguriert ist oder die API eine Erklaerung
     statt Daten liefert - beides darf NICHT als "keine Artikel" durchgehen."""
@@ -129,7 +143,6 @@ async def fetch_range(
 
     params = {
         "function": "NEWS_SENTIMENT",
-        "topics": topics,
         "time_from": _fmt(start),
         "time_to": _fmt(end),
         "limit": str(min(limit, MAX_LIMIT_PER_QUERY)),
@@ -139,6 +152,10 @@ async def fetch_range(
         "sort": "EARLIEST",
         "apikey": ALPHAVANTAGE_API_KEY,
     }
+    if topics:
+        # Nur setzen, wenn tatsaechlich ein Wert da ist - urlencode() wuerde ein
+        # topics=None sonst als woertlichen String "None" an die API schicken.
+        params["topics"] = topics
     url = f"{ALPHAVANTAGE_ENDPOINT}?{urlencode(params)}"
 
     async def _fetch():

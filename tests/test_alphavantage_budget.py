@@ -105,6 +105,46 @@ def test_fehlender_key_wirft_sofort():
         av.ALPHAVANTAGE_API_KEY = orig
 
 
+def test_kein_mehrfach_themenfilter_mehr():
+    """Regressionstest fuer einen echten Live-Fund: mehrere kommagetrennte 'topics'
+    werden von Alpha Vantage als UND behandelt (ein Artikel muesste zu ALLEN Themen
+    gleichzeitig passen) - live gegen die echte API geprueft, ein Thema/kein Thema
+    lieferten je 50 Treffer im selben Zeitraum, fuenf Themen kommagetrennt nur 2.
+    DEFAULT_TOPICS muss deshalb None bleiben, und ein None-Wert darf NIE als woertlicher
+    String 'None' in der Anfrage landen."""
+    check("DEFAULT_TOPICS ist None (kein Mehrfach-Themenfilter mehr)",
+          av.DEFAULT_TOPICS is None)
+    check("kein bereits vorhandener Default enthaelt ein Komma (waere wieder UND-verknuepft)",
+          not (av.DEFAULT_TOPICS and "," in av.DEFAULT_TOPICS))
+
+    captured_urls = []
+
+    class CapturingClient:
+        def __init__(self, *a, **kw): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *a): return False
+        async def get(self, url, *a, **kw):
+            captured_urls.append(url)
+            req = __import__("httpx").Request("GET", url)
+            return __import__("httpx").Response(200, request=req, json={"feed": []})
+
+    orig_key = av.ALPHAVANTAGE_API_KEY
+    av.ALPHAVANTAGE_API_KEY = "dummy-key"
+    try:
+        asyncio.run(av.fetch_range(
+            datetime.datetime(2026, 1, 1, tzinfo=datetime.timezone.utc),
+            datetime.datetime(2026, 1, 2, tzinfo=datetime.timezone.utc),
+            client=CapturingClient(),
+        ))
+    finally:
+        av.ALPHAVANTAGE_API_KEY = orig_key
+
+    check("tatsaechlicher Request enthaelt KEIN topics= (Standardaufruf ohne Filter)",
+          captured_urls and "topics=" not in captured_urls[0])
+    check("und erst recht kein woertliches 'topics=None'",
+          captured_urls and "None" not in captured_urls[0])
+
+
 # --- Budget ---------------------------------------------------------------------------
 def _statements(n: int, day_offset_start: int = 0) -> list:
     base = datetime.datetime(2026, 5, 1, tzinfo=datetime.timezone.utc)
@@ -223,6 +263,7 @@ def main():
     test_feed_parsing()
     test_200_mit_fehlertext_wird_zur_exception()
     test_fehlender_key_wirft_sofort()
+    test_kein_mehrfach_themenfilter_mehr()
     test_budget_stichprobe_deckt_ganzen_zeitraum_ab()
     test_budget_reproduzierbar_und_abschaltbar()
     test_budget_stoppt_auch_zur_laufzeit()
