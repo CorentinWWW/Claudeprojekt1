@@ -320,6 +320,38 @@ Braucht erreichbare Kursdaten (Stooq, best-effort — wie das Preis-Tracking); i
 Kursdienst mal nicht erreichbar, entfällt das Eröffnen/Bewerten still. Telegram muss
 konfiguriert sein, sonst laufen die Positionen nur stumm in der DB mit.
 
+## Replay (Auswertung der eigenen Klassifikationen) — kostenlos
+
+**In den meisten Fällen der bessere Weg als der Backtest unten.** `app/replay.py` wertet
+die **bereits vorhandenen** Claude-Klassifikationen aus der Produktions-Datenbank gegen
+echte Kursverläufe aus — ohne einen einzigen neuen Claude-Call und ohne GDELT:
+
+```bash
+python -m app.replay --db-path /data/trump_monitor.db
+```
+
+Warum das dem Backtest überlegen ist, wo es geht:
+
+- **Kosten: null.** Die teure Arbeit (Klassifikation) hat der Live-Bot für jedes
+  gespeicherte Statement längst erledigt. Ausgewertet wurden bisher aber nur die wenigen,
+  die durch *alle* Alarm-Gates kamen — die große Mehrheit lag ungenutzt herum.
+- **Echtes Out-of-Sample.** Die Einschätzungen wurden **live** getroffen, bevor sich der
+  Kurs bewegt hat. Ein klassischer Backtest klassifiziert alte Nachrichten mit dem
+  heutigen Modell und trägt damit ein Lookahead-Risiko (das Modell könnte den Ausgang
+  aus seinem Training kennen). Dieses Risiko gibt es hier prinzipiell nicht.
+- **Beantwortet Fragen, die der Backtest nicht kann:** Korreliert Claudes Konfidenz
+  überhaupt mit der Trefferquote (`nach_konfidenz` — Ticker-Calls über die *ganze*
+  Spanne, nicht nur die, die das 90 %-Gate passiert haben)? Und bringen die Alarm-Gates
+  etwas (`alarmiert_vs_unterdrueckt`)?
+
+Die Produktions-DB wird **strikt lesend** geöffnet (SQLite `mode=ro`) — ein
+Schreibversuch würde von SQLite selbst abgelehnt, der laufende Bot kann durch einen
+Auswertungslauf nicht gestört werden.
+
+**Grenzen:** reicht nur so weit zurück wie der Bot läuft, nur die tatsächlich genutzten
+Quellen, und wie beim Backtest nur Tages-Schlusskurse (Horizont in Handelstagen, nicht
+in Minuten wie im Live-Betrieb).
+
 ## Backtest (historische Auswertung)
 
 `app/backtest.py` spielt einen selbst gewählten historischen Zeitraum durch **dieselbe**
