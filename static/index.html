@@ -164,6 +164,7 @@
   <div id="banners">
     <div id="authBanner"></div>
     <div id="healthBanners"></div>
+    <div id="sourceBanners"></div>
   </div>
 
   <div class="panel" id="paperPanel" hidden>
@@ -179,6 +180,7 @@
   <div class="panel">
     <h2>Trefferquote (Backtesting)</h2>
     <div class="metrics" id="calibrationRow"><span class="skeleton">lädt…</span></div>
+    <div id="calibrationNote" style="margin-top:0.8rem;"></div>
   </div>
 
   <div class="panel">
@@ -468,13 +470,32 @@ async function loadHealth() {
       <span>Letzter Zyklus ${timeAgo(health.last_cycle_at)}</span></div>`);
   }
 
+  // Quellen-Status. Wichtig ist die Unterscheidung zwischen "hakt gerade" und "hat
+  // noch NIE funktioniert": letzteres ist praktisch immer ein dauerhaftes Problem
+  // (Sperre, kaputter Endpunkt, fehlender Token) und keine Momentaufnahme - das war
+  // vorher optisch nicht auseinanderzuhalten (beides gelb) und der Grund stand
+  // ueberhaupt nirgends im Dashboard, sondern nur in /api/health.
+  const brokenSources = [];
   Object.entries(health.sources || {}).forEach(([name, s]) => {
+    const failing = !!s.last_error && (s.last_error_at || 0) > (s.last_success_at || 0);
+    const neverWorked = !s.last_success_at;
     let dotClass = 'unknown';
     if (s.last_success_at) dotClass = 'ok';
-    if (s.last_error && (s.last_error_at || 0) > (s.last_success_at || 0)) dotClass = 'warn';
-    chips.push(`<div class="chip"><span class="dot ${dotClass}"></span>
+    if (failing) dotClass = neverWorked ? 'error' : 'warn';
+    if (failing && neverWorked) brokenSources.push({ name, error: s.last_error });
+    // title-Attribut: voller Fehlertext beim Draufzeigen, ohne die Chip-Zeile zu sprengen.
+    const title = failing ? ` title="${escapeAttr(s.last_error)}"` : '';
+    chips.push(`<div class="chip"${title}><span class="dot ${dotClass}"></span>
       <span>${escapeHtml(name)} · ${timeAgo(s.last_poll_at)} · ${s.total_fetched} gesamt</span></div>`);
   });
+
+  // Eine Quelle, die noch nie etwas geliefert hat, bekommt einen ausgeschriebenen
+  // Hinweis MIT Grund - sonst muesste man sich per SSH einloggen und /api/health
+  // abfragen, um ueberhaupt zu erfahren, warum nichts ankommt.
+  const sourceBanner = document.getElementById('sourceBanners');
+  sourceBanner.innerHTML = brokenSources.map(b =>
+    `<div class="banner warning">⚠️ Quelle <b>${escapeHtml(b.name)}</b> liefert nichts: ${escapeHtml(b.error)}</div>`
+  ).join('');
 
   // Kostentransparenz: wie viel vom Tages-Kostendeckel (MAX_CLASSIFICATIONS_PER_DAY)
   // ist heute schon verbraucht? Grün < 80%, gelb ab 80% des normalen Limits bzw. im
@@ -519,6 +540,10 @@ async function loadStats() {
 
 async function loadCalibration() {
   const el = document.getElementById('calibrationRow');
+  // Zuerst leeren: bei den fruehen return-Pfaden unten (Abruffehler, noch keine Daten)
+  // wuerde sonst eine Warnung aus einem frueheren Durchlauf stehen bleiben und sich auf
+  // Zahlen beziehen, die gar nicht mehr angezeigt werden.
+  document.getElementById('calibrationNote').innerHTML = '';
   let cal;
   try {
     const res = await apiFetch('/api/calibration');
@@ -548,6 +573,24 @@ async function loadCalibration() {
     metric(pct(short.hit_rate), `Short korrekt (${short.n || 0})`, 'neg') +
     metric(avg, 'Ø Bewegung') +
     metric(cal.pending || 0, 'offen (Horizont läuft)');
+
+  // Eine grosse Prozentzahl liest sich wie ein Urteil - bei einer Handvoll Messungen
+  // ist sie aber reines Rauschen (bei 2 Messungen ist "50%" exakt dasselbe wie ein
+  // Muenzwurf). Da diese Anzeige die Grundlage dafuer ist, ob jemand dem System echtes
+  // Geld anvertraut, wird die Stichprobengroesse hier ausdruecklich eingeordnet statt
+  // nur klein in der Beschriftung zu stehen. Schwelle wie ENSEMBLE_MIN_TRAINING_SAMPLES
+  // (app/config.py): ab dort haelt das Projekt die Datenlage fuer modellierbar.
+  //
+  // Fester Container statt insertAdjacentHTML: loadCalibration() laeuft alle 15s, ein
+  // Anhaengen wuerde die Warnung bei jedem Durchlauf erneut einfuegen.
+  const MIN_MEANINGFUL_SAMPLES = 30;
+  const note = document.getElementById('calibrationNote');
+  note.innerHTML = (cal.evaluated || 0) < MIN_MEANINGFUL_SAMPLES
+    ? `<div class="banner warning">⚠️ Nur ${cal.evaluated || 0} ausgewertete Alerts — ` +
+      `<b>statistisch bedeutungslos</b>. Aussagekraft entsteht frühestens ab ` +
+      `~${MIN_MEANINGFUL_SAMPLES} Messungen; bis dahin ist die Trefferquote oben Zufall, ` +
+      `keine Signalqualität.</div>`
+    : '';
 }
 
 async function runTest() {
