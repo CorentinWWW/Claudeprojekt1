@@ -34,9 +34,15 @@ Immer in dieser Reihenfolge, jeder Schritt als eigene Code-Box:
 
 1. Einloggen (siehe oben)
 2. `cd ~/trump-market-monitor`
-3. Auto-Update-Cron PAUSIEREN (er baut sonst mitten im Lauf neu und killt ihn):
+3. Auto-Update-Cron PAUSIEREN (er baut sonst mitten im Lauf neu und killt ihn).
+   **NICHT** über eine Backup-Datei sichern/wiederherstellen (`crontab -l >
+   backup.txt` + `crontab backup.txt`) - live gescheitert: ein einziger fehlgeschlagener
+   Wiederherstellungsversuch (z.B. Tippfehler im Dateinamen) macht die naechste
+   "Sicherung" selbst schon leer, und der Fehler pflanzt sich unbemerkt fort (so
+   ist der Cron zwischen zwei Backtest-Laeufen tatsaechlich dauerhaft leer
+   geblieben, ohne dass ein Fehler aufgefallen ist). Es gibt ohnehin nur EINEN
+   Cron-Eintrag in diesem Projekt - direkt entfernen/neu setzen, nichts zu sichern:
    ```bash
-   crontab -l > ~/crontab_backup.txt
    crontab -l | grep -v auto_update.sh | crontab -
    ```
 4. Aktuellen Branch holen und bauen (nur nötig, wenn sich Code geändert hat):
@@ -60,7 +66,9 @@ Immer in dieser Reihenfolge, jeder Schritt als eigene Code-Box:
    ```bash
    sudo docker compose top trump-monitor
    ```
-7. Später: Status prüfen, Report holen, **Cron unbedingt wieder aktivieren**:
+7. Später: Status prüfen, Report holen, **Cron unbedingt wieder aktivieren** - die
+   Zeile direkt neu setzen (idempotent zu pruefen mit `crontab -l` DAVOR, damit sie
+   nicht doppelt landet, falls sie doch noch da war):
    ```bash
    sudo docker compose exec -T trump-monitor sh -c "grep -q FERTIG /data/backtestN.log && echo 'FERTIG' || echo 'laeuft noch'"
    ```
@@ -68,8 +76,13 @@ Immer in dieser Reihenfolge, jeder Schritt als eigene Code-Box:
    sudo docker compose cp trump-monitor:/data/backtest_finnhub_report.json ./backtest_finnhub_report.json
    ```
    ```bash
-   crontab ~/crontab_backup.txt
+   (crontab -l 2>/dev/null | grep -v auto_update.sh; echo "*/15 * * * * /home/ubuntu/trump-market-monitor/deploy/auto_update.sh") | crontab -
    ```
+   ```bash
+   crontab -l
+   ```
+   Die letzte Zeile MUSS `*/15 * * * * /home/ubuntu/trump-market-monitor/deploy/auto_update.sh`
+   zeigen - nicht einfach als erledigt annehmen, wirklich die Ausgabe pruefen.
 
 `sudo docker compose top trump-monitor` zeigt Host-PIDs (nicht die interne PID im
 Container) - zum Killen eines hängenden Prozesses also `sudo kill -9 <PID>` DIREKT
