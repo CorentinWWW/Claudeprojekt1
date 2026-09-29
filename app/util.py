@@ -76,12 +76,27 @@ async def retry_async(
 _MAX_COMPARE_LENGTH = 500
 
 
-def text_similarity(a: str, b: str) -> float:
+def text_similarity(a: str, b: str, min_ratio: Optional[float] = None) -> float:
+    """Aehnlichkeit zweier Texte (0..1).
+
+    min_ratio (optional): interessiert nur, OB die Aehnlichkeit diese Schwelle
+    erreicht - dann darf abgekuerzt werden. SequenceMatcher.real_quick_ratio() und
+    .quick_ratio() sind laut stdlib garantierte OBERGRENZEN von .ratio() und um
+    Groessenordnungen billiger (Laengen- bzw. Zeichenmengen-Vergleich statt der
+    O(n*m)-Matching-Suche). Liegt schon die Obergrenze unter der Schwelle, KANN
+    .ratio() sie nicht mehr erreichen - das Ergebnis ist also exakt dasselbe wie ohne
+    Abkuerzung, nur ohne die teure Berechnung. Rueckgabe ist dann 0.0 statt des echten
+    Werts; das ist fuer einen ">= min_ratio"-Vergleich gleichwertig, fuer alles andere
+    NICHT - dafuer min_ratio weglassen."""
     norm_a = " ".join(a.lower().split())[:_MAX_COMPARE_LENGTH]
     norm_b = " ".join(b.lower().split())[:_MAX_COMPARE_LENGTH]
     if not norm_a or not norm_b:
         return 0.0
-    return SequenceMatcher(None, norm_a, norm_b).ratio()
+    matcher = SequenceMatcher(None, norm_a, norm_b)
+    if min_ratio is not None:
+        if matcher.real_quick_ratio() < min_ratio or matcher.quick_ratio() < min_ratio:
+            return 0.0
+    return matcher.ratio()
 
 
 class BoundedSeenSet:

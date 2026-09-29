@@ -1,20 +1,29 @@
-"""Klassifiziert einen Statement-Text mit Claude: marktrelevant? Sentiment? betroffene
+"""Klassifiziert einen Statement-Text per KI: marktrelevant? Sentiment? betroffene
 Ticker mit Long/Short-Einschaetzung? Ist es dasselbe Thema wie eine heute schon
 gemeldete Meldung, und falls ja, eskaliert es genug fuer einen erneuten Alert?
+
+Welche KI antwortet, entscheidet die Anbieter-Kette aus app/llm.py: kostenlose,
+OpenAI-kompatible Anbieter (Gemini, Groq, Mistral, ...) zuerst, Claude nur noch
+optional. Faellt einer aus (Limit, Stoerung, kaputter Key), uebernimmt der naechste.
 """
+import asyncio
+import dataclasses
 import datetime
 import logging
 import math
 import re
 from typing import Optional
 
+import anthropic
 from anthropic import APIStatusError, AsyncAnthropic
 
+from app import llm
 from app.config import (
     ANTHROPIC_API_KEY,
     CLAUDE_MAX_RETRIES,
     CLAUDE_MODEL,
     CLAUDE_TIMEOUT_SECONDS,
+    LLM_MAX_WAIT_SECONDS,
     MAX_CLASSIFICATIONS_PER_DAY,
     PRIORITY_CLASSIFICATIONS_PER_DAY,
 )
@@ -221,6 +230,30 @@ def _system_prompt() -> str:
     )
 
 
+# Fuer die OpenAI-kompatiblen Gratis-Anbieter (JSON-Modus statt Anthropic-Tool-Use):
+# bewusst KOMPAKT statt des vollen CLASSIFY_TOOL-Schemas (~1500 Tokens). Groqs
+# Gratis-Tarif erlaubt nur 200K Tokens/Tag pro Modell - jeder gesparte Token pro Call
+# ist direkt mehr Klassifikationen pro Tag. Die Bedeutung der Felder erklaert der
+# System-Prompt ohnehin schon. Ein Test prueft, dass hier jedes Schema-Feld vorkommt.
+JSON_OUTPUT_INSTRUCTIONS = (
+    "\n\nANTWORTFORMAT: Antworte AUSSCHLIESSLICH mit EINEM gueltigen JSON-Objekt - "
+    "kein Markdown, keine Erklaerung davor oder danach. Felder:\n"
+    '{"is_market_relevant": true|false, '
+    '"sentiment": "positive"|"negative"|"neutral", '
+    '"confidence": 0.0-1.0, '
+    '"ticker_calls": [{"ticker": "US-Kuerzel wie NVDA", "direction": "long"|"short", '
+    '"confidence": 0.0-1.0, "reasoning": "ein kurzer Satz"}], '
+    '"sectors": ["z.B. Halbleiter"], '
+    '"reasoning": "1-2 Saetze auf Deutsch", '
+    '"related_topic_id": ID eines bereits gemeldeten Themas oder null, '
+    '"is_major_escalation": true|false, '
+    '"expected_move_pct": erwartete Bewegung des staerksten Tickers in Prozent '
+    "(Betrag ohne Vorzeichen) oder null, "
+    '"expected_horizon": "Stunden"|"Tage"|"Wochen"|null}\n'
+    "ticker_calls bleibt [] wenn kein konkretes Unternehmen sicher betroffen ist."
+)
+
+
 # Kontext-Snippet-Laenge: reicht, um ein Thema wiederzuerkennen (Tier-2-Dedup), spart
 # aber gegenueber dem frueheren Wert (150) Input-Tokens pro Call - ohne die Anzahl der
 # sichtbaren Themen (TOPIC_CONTEXT_MAX_ITEMS) zu reduzieren, die Dedup-Abdeckung bleibt
@@ -306,6 +339,38 @@ def _normalize_ticker(symbol) -> Optional[str]:
     return None
 
 
+_DIRECTION_SYNONYMS = {"buy": "long", "bullish": "long", "sell": "short", "bearish": "short"}
+_SENTIMENT_SYNONYMS = {"bullish": "positive", "bearish": "negative", "mixed": "neutral"}
+
+
+def _normalize_direction(value):
+    """'Short'/' LONG '/'sell' -> 'short'/'long'/'short'. Nachgelagert zaehlt nur exakt
+    'long'/'short' (actionable_tickers) - ein Gratis-Modell, das 'Short' schreibt, wuerde
+    sonst stillschweigend verworfen. Fehlt der Wert: 'long' wie bisher."""
+    if not value:
+        return "long"
+    v = str(value).strip().lower()
+    return _DIRECTION_SYNONYMS.get(v, v)
+
+
+def _as_bool(value) -> bool:
+    """bool("false") ist True - kleinere Modelle liefern Wahrheitswerte gern als Text."""
+    if isinstance(value, str):
+        return value.strip().lower() in ("true", "yes", "ja", "1")
+    return bool(value)
+
+
+def _as_int_or_none(value) -> Optional[int]:
+    if isinstance(value, bool) or value is None:
+        return None
+    if isinstance(value, int):
+        return value
+    try:
+        return int(str(value).strip())
+    except (TypeError, ValueError):
+        return None
+
+
 def _clean_ticker_calls(raw_ticker_calls) -> list[dict]:
     """Normalisiert/validiert die Ticker und dedupliziert sie (bei mehrfach genanntem
     Kuerzel gewinnt der Eintrag mit der hoechsten Ticker-Konfidenz)."""
@@ -318,7 +383,7 @@ def _clean_ticker_calls(raw_ticker_calls) -> list[dict]:
             continue
         entry = {
             "ticker": ticker,
-            "direction": tc.get("direction") or "long",
+            "direction": _normalize_direction(tc.get("direction")),
             "confidence": _clamped_confidence(tc.get("confidence")),
             "reasoning": tc.get("reasoning", ""),
         }
@@ -344,19 +409,34 @@ def _parse_expected_move(value) -> Optional[float]:
     return min(100.0, abs(parsed))
 
 
+def _normalize_sentiment(value) -> str:
+    v = str(value or "").strip().lower()
+    v = _SENTIMENT_SYNONYMS.get(v, v)
+    return v if v in ("positive", "negative", "neutral") else "neutral"
+
+
+def _normalize_sectors(value) -> list:
+    # Ein einzelner String statt Liste wuerde spaeter Zeichen fuer Zeichen iteriert.
+    if isinstance(value, str):
+        return [value] if value.strip() else []
+    if isinstance(value, list):
+        return [str(s) for s in value if s]
+    return []
+
+
 def _classification_from_tool_input(data: dict) -> Classification:
     ticker_calls = _clean_ticker_calls(data.get("ticker_calls") or [])
     confidence = _clamped_confidence(data.get("confidence"))
     horizon = data.get("expected_horizon")
     return Classification(
-        is_market_relevant=bool(data.get("is_market_relevant", False)),
-        sentiment=data.get("sentiment") or "neutral",
+        is_market_relevant=_as_bool(data.get("is_market_relevant", False)),
+        sentiment=_normalize_sentiment(data.get("sentiment")),
         confidence=confidence,
         ticker_calls=ticker_calls,
-        sectors=data.get("sectors") or [],
+        sectors=_normalize_sectors(data.get("sectors")),
         reasoning=data.get("reasoning") or "",
-        related_topic_id=data.get("related_topic_id"),
-        is_major_escalation=bool(data.get("is_major_escalation", False)),
+        related_topic_id=_as_int_or_none(data.get("related_topic_id")),
+        is_major_escalation=_as_bool(data.get("is_major_escalation", False)),
         expected_move_pct=_parse_expected_move(data.get("expected_move_pct")),
         expected_horizon=horizon.strip() if isinstance(horizon, str) and horizon.strip() else None,
     )
@@ -383,6 +463,192 @@ def _parse_response(response) -> Classification:
     return FALLBACK_CLASSIFICATION
 
 
+NO_PROVIDER_MESSAGE = (
+    "Kein KI-Anbieter konfiguriert - Klassifikation kann nicht laufen. Kostenlos z.B. "
+    "GEMINI_API_KEY (https://aistudio.google.com/apikey) und/oder GROQ_API_KEY "
+    "(https://console.groq.com/keys) in .env eintragen, siehe .env.example."
+)
+
+
+def _chain() -> list[str]:
+    return llm.chain_order(anthropic_available=_client is not None)
+
+
+def _secret_for(entry: str) -> Optional[str]:
+    if entry == llm.ANTHROPIC:
+        return ANTHROPIC_API_KEY
+    spec = llm.provider_spec(entry)
+    return spec.api_key if spec else None
+
+
+def _target_configured(entry: str) -> bool:
+    if entry == llm.ANTHROPIC:
+        return _client is not None
+    return llm.provider_spec(entry) is not None
+
+
+def model_available(model_spec: str) -> bool:
+    """Ist das Modell (z.B. CLAUDE_ESCALATION_MODEL) konfiguriert und gerade nicht
+    pausiert? Fuer die Grenzfall-Zweitmeinung: ohne Anthropic-Guthaben/-Key soll sie
+    still entfallen, statt pro Grenzfall einen Tages-Slot und einen Fehler zu kosten."""
+    entry, _model = llm.resolve_model_spec(model_spec)
+    return _target_configured(entry) and llm.is_available(entry)
+
+
+def _anthropic_error_kind(exc: BaseException) -> str:
+    if isinstance(exc, anthropic.RateLimitError):
+        return llm.RATE_LIMIT
+    if isinstance(exc, (anthropic.AuthenticationError, anthropic.PermissionDeniedError)):
+        return llm.AUTH
+    if isinstance(exc, anthropic.NotFoundError):
+        return llm.NOT_FOUND
+    if isinstance(exc, anthropic.BadRequestError):
+        # Leeres Guthaben/erreichtes Ausgabenlimit kommt bei Anthropic als 400 - live
+        # erlebt: "You have reached your specified API usage limits."
+        if re.search(r"credit balance|usage limit|billing", str(exc), re.IGNORECASE):
+            return llm.QUOTA
+        return llm.BAD_REQUEST
+    if isinstance(exc, anthropic.APIStatusError):
+        return llm.SERVER
+    if isinstance(exc, anthropic.APIConnectionError):
+        return llm.NETWORK
+    if isinstance(exc, RuntimeError) and "max_tokens" in str(exc):
+        return llm.INVALID_OUTPUT
+    return llm.SERVER
+
+
+def _user_message(text: str, context_block: str) -> str:
+    return f'Aussage:\n"""\n{text}\n"""{context_block}'
+
+
+async def _call_anthropic(text: str, context_block: str, model: Optional[str]) -> Classification:
+    response = await _client.messages.create(
+        # model kann fuer die Zweitmeinung bei Grenzfaellen (orchestrator: Borderline-
+        # Eskalation) durch ein staerkeres Modell ueberschrieben werden.
+        model=model or CLAUDE_MODEL,
+        max_tokens=2048,
+        system=_system_prompt(),
+        tools=[CLASSIFY_TOOL],
+        tool_choice={"type": "tool", "name": "classify_statement"},
+        messages=[{"role": "user", "content": _user_message(text, context_block)}],
+    )
+    if response.stop_reason == "max_tokens":
+        # Die Tool-Use-Antwort wurde mitten im JSON abgeschnitten (z.B. bei vielen
+        # ticker_calls mit langen Begruendungen) - ein Parse-Versuch koennte
+        # scheitern ODER (schlimmer) ein unvollstaendiges/korruptes Ergebnis als
+        # gueltig durchgehen lassen. Lieber sauber als Fehler behandeln, dann
+        # greift dieselbe Retry-/Skip-Logik wie bei jedem anderen Klassifikations-
+        # fehler (siehe orchestrator.py: _classify_and_store).
+        raise RuntimeError(
+            "Claude-Antwort wurde bei max_tokens abgeschnitten - Ergebnis waere "
+            "unvollstaendig. Statement wird diesen Zyklus uebersprungen."
+        )
+    return _parse_response(response)
+
+
+async def _call_openai(entry: str, text: str, context_block: str,
+                       model_override: Optional[str] = None) -> Classification:
+    data, model = await llm.chat_json(
+        entry,
+        system=_system_prompt() + JSON_OUTPUT_INSTRUCTIONS,
+        user=_user_message(text, context_block),
+        model_override=model_override,
+    )
+    if "is_market_relevant" not in data:
+        raise llm.ProviderError(llm.INVALID_OUTPUT, "JSON ohne Pflichtfeld is_market_relevant")
+    try:
+        result = _classification_from_tool_input(data)
+    except (TypeError, ValueError, AttributeError) as exc:
+        raise llm.ProviderError(llm.INVALID_OUTPUT, f"JSON passt nicht zum Schema: {exc}") from exc
+    name, _ = llm.parse_entry(entry)
+    return dataclasses.replace(result, model_used=f"{name}:{model}")
+
+
+async def _classify_single(entry: str, model: str, text: str, context_block: str) -> Classification:
+    """Genau EIN Anbieter/Modell, ohne Kette - fuer die Grenzfall-Zweitmeinung."""
+    if entry == llm.ANTHROPIC:
+        try:
+            result = await _call_anthropic(text, context_block, model)
+        except Exception as exc:
+            llm.mark_failure(
+                entry, llm.ProviderError(_anthropic_error_kind(exc), f"{type(exc).__name__}: {exc}"),
+                ANTHROPIC_API_KEY,
+            )
+            raise
+        if result is FALLBACK_CLASSIFICATION:
+            return result
+        llm.mark_success(entry)
+        return dataclasses.replace(result, model_used=model)
+    try:
+        result = await _call_openai(entry, text, context_block)
+    except llm.ProviderError as err:
+        llm.mark_failure(entry, err, _secret_for(entry))
+        raise llm.LLMUnavailable(f"{entry}: {err.message}") from err
+    llm.mark_success(entry)
+    return result
+
+
+async def _classify_chain(chain: list[str], text: str, context_block: str) -> Classification:
+    """Probiert die Anbieter der Reihe nach; der erste, der liefert, gewinnt."""
+    # Nur Claude konfiguriert (alter Betriebsmodus): Fehler unveraendert als Original-
+    # Exception weiterreichen - der Orchestrator unterscheidet daran permanente
+    # (401/403/404) von voruebergehenden Fehlern.
+    only_anthropic = chain == [llm.ANTHROPIC]
+    errors: dict[str, llm.ProviderError] = {}
+    for round_no in range(2):
+        for entry in chain:
+            if not llm.is_available(entry):
+                continue
+            if entry == llm.ANTHROPIC:
+                try:
+                    result = await _call_anthropic(text, context_block, None)
+                except Exception as exc:
+                    err = llm.ProviderError(_anthropic_error_kind(exc), f"{type(exc).__name__}: {exc}")
+                    llm.mark_failure(entry, err, ANTHROPIC_API_KEY)
+                    if only_anthropic:
+                        raise
+                    errors[entry] = err
+                    continue
+                if result is FALLBACK_CLASSIFICATION:
+                    if only_anthropic:
+                        return result
+                    err = llm.ProviderError(llm.INVALID_OUTPUT, "keine gueltige tool_use-Antwort")
+                    llm.mark_failure(entry, err)
+                    errors[entry] = err
+                    continue
+                llm.mark_success(entry)
+                return dataclasses.replace(result, model_used=CLAUDE_MODEL)
+            try:
+                result = await _call_openai(entry, text, context_block)
+            except llm.ProviderError as err:
+                llm.mark_failure(entry, err, _secret_for(entry))
+                errors[entry] = err
+                continue
+            llm.mark_success(entry)
+            return result
+
+        # Niemand hat geliefert. Ist ein Anbieter nur kurz pausiert (typisch: das
+        # Minutenlimit), lohnt sich EIN kurzes Warten mehr als das Statement fallen
+        # zu lassen. Tageslimits/kaputte Keys (lange Pause) -> sofort aufgeben.
+        wait = llm.seconds_until_available(chain)
+        if round_no == 0 and wait is not None and wait <= LLM_MAX_WAIT_SECONDS:
+            if wait > 0:
+                logger.info("Alle KI-Anbieter kurz pausiert - warte %.0fs auf den naechsten freien.", wait)
+                await asyncio.sleep(wait)
+            continue
+        break
+
+    summary = "; ".join(f"{entry}: {err.kind}" for entry, err in errors.items()) or (
+        "alle Anbieter pausieren gerade (Limits/Stoerung), siehe /api/health -> llm_providers"
+    )
+    if errors and all(err.kind == llm.INVALID_OUTPUT for err in errors.values()):
+        logger.warning("Kein Anbieter lieferte gueltiges JSON (%s) - fallback auf neutral.", summary)
+        return FALLBACK_CLASSIFICATION
+    if llm.all_permanently_broken(chain):
+        raise llm.LLMConfigError(f"Alle KI-Anbieter scheitern dauerhaft (Key/Modell pruefen): {summary}")
+    raise llm.LLMUnavailable(f"Kein KI-Anbieter konnte liefern: {summary}")
+
+
 async def classify(
     text: str,
     recent_context: Optional[list[dict]] = None,
@@ -390,8 +656,19 @@ async def classify(
     priority: bool = False,
     model: Optional[str] = None,
 ) -> Classification:
-    if _client is None:
-        raise RuntimeError("ANTHROPIC_API_KEY ist nicht gesetzt")
+    # Erst pruefen, OB ueberhaupt ein Anbieter in Frage kommt - sonst wuerde ein
+    # aussichtsloser Aufruf trotzdem einen Slot des Tages-Kostendeckels verbrauchen.
+    if model:
+        target_entry, target_model = llm.resolve_model_spec(model)
+        if not _target_configured(target_entry):
+            raise llm.LLMUnavailable(f"Modell {model!r}: Anbieter nicht konfiguriert")
+        if not llm.is_available(target_entry):
+            raise llm.LLMUnavailable(f"Modell {model!r}: Anbieter pausiert gerade")
+        chain = None
+    else:
+        chain = _chain()
+        if not chain:
+            raise llm.LLMConfigError(NO_PROVIDER_MESSAGE)
 
     # Zentraler Kostendeckel: JEDER Aufrufer (Orchestrator, Dashboard-/api/test,
     # manueller Test in run_once.py) laeuft ueber diese eine Funktion, daher genuegt
@@ -424,43 +701,26 @@ async def classify(
             )
 
     context_block = _build_context_block(recent_context)
-    response = await _client.messages.create(
-        # model kann fuer die Zweitmeinung bei Grenzfaellen (orchestrator: Borderline-
-        # Eskalation) durch ein staerkeres Modell ueberschrieben werden.
-        model=model or CLAUDE_MODEL,
-        max_tokens=2048,
-        system=_system_prompt(),
-        tools=[CLASSIFY_TOOL],
-        tool_choice={"type": "tool", "name": "classify_statement"},
-        messages=[
-            {
-                "role": "user",
-                "content": f'Aussage:\n"""\n{text}\n"""{context_block}',
-            }
-        ],
-    )
-    if response.stop_reason == "max_tokens":
-        # Die Tool-Use-Antwort wurde mitten im JSON abgeschnitten (z.B. bei vielen
-        # ticker_calls mit langen Begruendungen) - ein Parse-Versuch koennte
-        # scheitern ODER (schlimmer) ein unvollstaendiges/korruptes Ergebnis als
-        # gueltig durchgehen lassen. Lieber sauber als Fehler behandeln, dann
-        # greift dieselbe Retry-/Skip-Logik wie bei jedem anderen Klassifikations-
-        # fehler (siehe orchestrator.py: _classify_and_store).
-        raise RuntimeError(
-            "Claude-Antwort wurde bei max_tokens abgeschnitten - Ergebnis waere "
-            "unvollstaendig. Statement wird diesen Zyklus uebersprungen."
-        )
-    return _parse_response(response)
+    if chain is None:
+        return await _classify_single(target_entry, target_model, text, context_block)
+    return await _classify_chain(chain, text, context_block)
+
+
+class SelftestTransientError(RuntimeError):
+    """Selbsttest gescheitert, aber nur voruebergehend (alle Anbieter gerade im
+    Limit/gestoert). Der Monitoring-Loop soll trotzdem starten - Gratis-Minutenlimits
+    erholen sich von selbst, ein nicht gestarteter Loop dagegen nie (bis zum naechsten
+    Neustart war der Bot sonst komplett tot)."""
 
 
 async def selftest() -> None:
-    """Wirft eine Exception mit klarer Ursache, falls Claude nicht erreichbar/konfiguriert ist.
+    """Wirft eine Exception mit klarer Ursache, falls keine KI erreichbar/konfiguriert ist.
 
     Wird beim Start aufgerufen, damit ein falscher/fehlender API-Key sofort auffaellt
     statt erst beim ersten echten Statement irgendwann spaeter im Log unterzugehen.
     """
-    if _client is None:
-        raise RuntimeError("ANTHROPIC_API_KEY ist nicht gesetzt")
+    if not _chain():
+        raise RuntimeError(NO_PROVIDER_MESSAGE)
 
     try:
         result = await classify(
@@ -468,13 +728,20 @@ async def selftest() -> None:
             _bypass_daily_cap=True,
         )
     except APIStatusError as exc:
+        # Nur im reinen Claude-Betrieb erreicht die Original-Exception den Aufrufer.
         raise RuntimeError(
             f"Claude-API antwortete mit Fehler (Status {exc.status_code}): {exc.message}. "
-            "Pruefe ANTHROPIC_API_KEY und CLAUDE_MODEL in .env."
+            "Pruefe ANTHROPIC_API_KEY und CLAUDE_MODEL in .env - oder trage einen "
+            "kostenlosen Anbieter ein (GEMINI_API_KEY/GROQ_API_KEY, siehe .env.example)."
         ) from exc
+    except llm.LLMConfigError as exc:
+        raise RuntimeError(str(exc)) from exc
+    except llm.LLMUnavailable as exc:
+        raise SelftestTransientError(str(exc)) from exc
 
     if result is FALLBACK_CLASSIFICATION:
         raise RuntimeError(
-            "Claude-Selftest lieferte keine gueltige strukturierte Antwort. "
-            "Pruefe CLAUDE_MODEL in .env."
+            "KI-Selftest lieferte keine gueltige strukturierte Antwort. Modell-"
+            "Einstellungen in .env pruefen (CLAUDE_MODEL bzw. <ANBIETER>_MODEL)."
         )
+    logger.info("KI-Selftest erfolgreich mit %s.", result.model_used or CLAUDE_MODEL)

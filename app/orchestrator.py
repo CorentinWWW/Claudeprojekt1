@@ -8,7 +8,14 @@ from typing import Optional
 
 from anthropic import AuthenticationError, NotFoundError, PermissionDeniedError
 
-from app.classifier import CONTEXT_SNIPPET_MAX_CHARS, DailyCapExceeded, FALLBACK_CLASSIFICATION, classify
+from app.classifier import (
+    CONTEXT_SNIPPET_MAX_CHARS,
+    DailyCapExceeded,
+    FALLBACK_CLASSIFICATION,
+    classify,
+    model_available,
+)
+from app.llm import LLMConfigError
 from app.config import (
     ALERT_CONFIDENCE_THRESHOLD,
     ALERT_DIGEST_THRESHOLD,
@@ -19,6 +26,7 @@ from app.config import (
     CLAUDE_ESCALATION_MODEL,
     CLAUDE_MODEL,
     DEDUP_SIMILARITY_THRESHOLD,
+    DEDUP_WINDOW_SECONDS,
     DIVERGENCE_WARN_PCT,
     ENABLE_BORDERLINE_ESCALATION,
     ENABLE_CONVICTION_SCORE,
@@ -157,7 +165,10 @@ except Exception:  # pragma: no cover - nur falls die Zeitzonendaten fehlen
 # (401), fehlende Berechtigung (403) oder ein nicht (mehr) existierendes Modell (404)
 # reparieren sich nicht von selbst - im Gegensatz zu transienten Fehlern (Timeouts,
 # 429, 529), die das SDK selbst retried und die den Lauf nicht abbrechen sollen.
-PERMANENT_CLAUDE_ERRORS = (AuthenticationError, PermissionDeniedError, NotFoundError)
+# LLMConfigError: dasselbe fuer die Anbieter-Kette (app/llm.py) - ALLE konfigurierten
+# Anbieter scheitern an Key/Modell. Scheitert nur EINER, uebernimmt der naechste und
+# es ist kein permanenter Fehler des Monitors.
+PERMANENT_CLAUDE_ERRORS = (AuthenticationError, PermissionDeniedError, NotFoundError, LLMConfigError)
 
 logger = logging.getLogger(__name__)
 
@@ -380,6 +391,14 @@ def build_sources():
     return sources
 
 
+# Obergrenze der (teuren) Aehnlichkeitsvergleiche je Statement gegen die eigene Charge.
+# Bewusst derselbe Wert wie das Limit des DB-Pendants (db.get_dedup_candidates:
+# limit=500) - dieselbe Aufgabe, dieselbe Groessenordnung. Im Live-Betrieb nie erreicht
+# (eine Charge ist ein Poll-Zyklus), relevant nur bei sehr grossen Chargen wie im
+# Backtest.
+DEDUP_BATCH_MAX_COMPARISONS = 500
+
+
 def _partition_duplicates(raw_statements: list):
     """Trennt eine Charge frischer Statements in (zu klassifizierende, Duplikate).
 
@@ -394,6 +413,14 @@ def _partition_duplicates(raw_statements: list):
     Gibt (to_classify, duplicate_pairs) zurueck: duplicate_pairs enthaelt
     (duplicate_raw, primary_raw) - primary_raw ist entweder ein Element aus
     to_classify (noch nicht in der DB) oder hat bereits eine DB-ID (siehe Aufrufer).
+
+    Der Chargen-interne Vergleich ist auf DEDUP_WINDOW_SECONDS begrenzt - dieselbe
+    Regel, die der DB-Teil ueber get_dedup_candidates() ohnehin schon anwendet. Fuer
+    den Live-Betrieb aendert das nichts (eine Charge ist ein Poll-Zyklus, alle
+    Meldungen liegen Minuten auseinander); fuer eine sehr grosse Charge wie im
+    Backtest ueber Monate ist es der Unterschied zwischen Sekunden und Stunden - und
+    sachlich richtiger, weil zwei wortgleiche Meldungen im Abstand von Monaten zwei
+    Ereignisse sind, keine Syndizierung.
     """
     # Batch statt einer DB-Verbindung/Query pro Statement (relevant bei einem
     # Nachrichtenschub mit vielen gleichzeitigen Statements in einem Zyklus).
@@ -402,7 +429,19 @@ def _partition_duplicates(raw_statements: list):
 
     to_classify = []
     duplicate_pairs = []  # (duplicate_raw, primary_raw_or_dbrow)
-    batch: list[tuple] = []  # (text, raw) bereits akzeptierter Statements dieser Charge
+    # Bereits akzeptierte Statements dieser Charge, NACH ZEITFENSTER GEBUCKETET:
+    # {fenster_index: [(text, raw), ...]}. Eine flache Liste waere hier eine
+    # Zeitbombe - jedes neue Statement wuerde gegen ALLE vorherigen verglichen (O(n^2)
+    # teure SequenceMatcher-Aufrufe). Im Live-Betrieb faellt das nie auf (eine Charge
+    # ist ein Poll-Zyklus, also eine Handvoll Meldungen), im Backtest ueber Monate
+    # dagegen schon: gemessen ~46s fuer 500 Statements, ~50 Minuten fuer 4000 - der
+    # Lauf verbrennt Stunden CPU, bevor auch nur EIN Claude-Call passiert.
+    batch_by_window: dict = {}
+
+    def _window_index(published_at) -> Optional[int]:
+        if not published_at:
+            return None
+        return int(published_at // DEDUP_WINDOW_SECONDS)
 
     for raw in raw_statements:
         if raw.source_id in known_ids:
@@ -410,17 +449,58 @@ def _partition_duplicates(raw_statements: list):
 
         db_duplicate = None
         for cand in candidates:
-            if text_similarity(raw.text, cand["text"]) >= DEDUP_SIMILARITY_THRESHOLD:
+            if text_similarity(
+                raw.text, cand["text"], min_ratio=DEDUP_SIMILARITY_THRESHOLD
+            ) >= DEDUP_SIMILARITY_THRESHOLD:
                 db_duplicate = cand
                 break
         if db_duplicate is not None:
             duplicate_pairs.append((raw, db_duplicate))
             continue
 
+        # Nur gegen Statements aus demselben und dem angrenzenden Zeitfenster
+        # vergleichen - liegen zwei Meldungen weiter als DEDUP_WINDOW_SECONDS
+        # auseinander, sind sie per Definition keine Duplikate mehr (genau dieselbe
+        # Regel, die der DB-Teil oben ueber get_dedup_candidates() laengst anwendet;
+        # die Charge war bisher als einziger Pfad davon ausgenommen). Meldungen ohne
+        # Zeitstempel (None) landen in einem eigenen Eimer und werden weiterhin gegen
+        # alle anderen zeitlosen geprueft, statt still durchzurutschen.
+        idx = _window_index(raw.published_at)
+        if idx is None:
+            neighbourhood = [batch_by_window.get(None, [])]
+        else:
+            # Eigenes Fenster ZUERST: eine syndizierte Kopie erscheint zeitnah, der
+            # Treffer liegt also am wahrscheinlichsten hier - wichtig, weil die
+            # Vergleiche unten gedeckelt sind.
+            neighbourhood = [
+                batch_by_window.get(i, []) for i in (idx, idx - 1, idx + 1)
+            ]
+            neighbourhood.append(batch_by_window.get(None, []))
+
         batch_duplicate = None
-        for seen_text, seen_raw in batch:
-            if text_similarity(raw.text, seen_text) >= DEDUP_SIMILARITY_THRESHOLD:
-                batch_duplicate = seen_raw
+        # Harte Obergrenze der Vergleiche pro Statement, analog zum DB-Teil (siehe
+        # db.get_dedup_candidates: limit=500). Ohne sie bleibt es innerhalb eines
+        # Zeitfensters quadratisch - an einem sehr nachrichtenreichen Tag (oder bei
+        # einem Backtest mit vielen Tickern) waere der Lauf sonst wieder ausgebremst.
+        compared = 0
+        for bucket in neighbourhood:
+            # reversed(): zuletzt hinzugefuegte (= zeitlich naechste) zuerst, damit der
+            # Deckel die aussichtsreichsten Kandidaten behaelt und nicht die aeltesten.
+            for seen_text, seen_raw in reversed(bucket):
+                if compared >= DEDUP_BATCH_MAX_COMPARISONS:
+                    break
+                if idx is not None and seen_raw.published_at:
+                    # Der Eimer-Vergleich ist bewusst grosszuegig (bis zu 2 Fenster
+                    # Spanne) - hier exakt auf das konfigurierte Fenster nachschaerfen.
+                    if abs(raw.published_at - seen_raw.published_at) > DEDUP_WINDOW_SECONDS:
+                        continue
+                compared += 1
+                if text_similarity(
+                    raw.text, seen_text, min_ratio=DEDUP_SIMILARITY_THRESHOLD
+                ) >= DEDUP_SIMILARITY_THRESHOLD:
+                    batch_duplicate = seen_raw
+                    break
+            if batch_duplicate is not None or compared >= DEDUP_BATCH_MAX_COMPARISONS:
                 break
 
         if batch_duplicate is not None:
@@ -428,7 +508,7 @@ def _partition_duplicates(raw_statements: list):
             continue
 
         to_classify.append(raw)
-        batch.append((raw.text, raw))
+        batch_by_window.setdefault(idx, []).append((raw.text, raw))
 
     return to_classify, duplicate_pairs
 
@@ -484,6 +564,15 @@ async def _maybe_escalate(text, recent_context, priority, classification):
     strongest = _strongest_ticker_confidence(classification)
     if not (ALERT_MIN_TICKER_CONFIDENCE - ESCALATION_BAND <= strongest
             <= ALERT_MIN_TICKER_CONFIDENCE + ESCALATION_BAND):
+        return classification
+    if not model_available(CLAUDE_ESCALATION_MODEL):
+        # Z.B. Default claude-sonnet-5, aber kein (bezahlter) Anthropic-Key mehr, oder
+        # der Anbieter ist gerade im Limit: Zweitmeinung still auslassen statt pro
+        # Grenzfall einen Fehler zu loggen.
+        logger.debug(
+            "[borderline] Eskalations-Modell %s nicht verfuegbar - behalte Erstbewertung.",
+            CLAUDE_ESCALATION_MODEL,
+        )
         return classification
     try:
         second = await classify(
@@ -553,6 +642,10 @@ async def _classify_and_store(raw, semaphore: asyncio.Semaphore, recent_context:
             if escalated is not classification:
                 model_used = CLAUDE_ESCALATION_MODEL
             classification = escalated
+            # Bei der Anbieter-Kette weiss nur classify(), wer tatsaechlich geliefert hat
+            # (z.B. "groq:openai/gpt-oss-120b").
+            if classification.model_used:
+                model_used = classification.model_used
         except DailyCapExceeded as exc:
             # Kein logger.exception() (kein Traceback-Spam): sobald das Tages-Limit
             # erreicht ist, trifft das jedes weitere Statement in diesem und allen

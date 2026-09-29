@@ -55,8 +55,55 @@ pip install -r requirements.txt
 playwright install chromium   # fuer den Truth-Social-Browser-Fallback
 
 cp .env.example .env
-# .env ausfüllen: mindestens ANTHROPIC_API_KEY
+# .env ausfüllen: mindestens EIN KI-Anbieter, z.B. kostenlos GEMINI_API_KEY und/oder GROQ_API_KEY
 ```
+
+### KI-Anbieter: kostenlos statt Claude (Anbieter-Kette)
+
+Die Klassifikation läuft über eine **Kette von KI-Anbietern** (`app/llm.py`), nicht mehr
+fest über die kostenpflichtige Claude-API. Der erste Anbieter, der antwortet, gewinnt; ist
+einer im Limit, gestört oder sein Key kaputt, übernimmt automatisch der nächste. Ein
+Anbieter ist aktiv, sobald sein Key in der `.env` steht.
+
+| Reihenfolge (Standard) | Anbieter | Kosten | Gratis-Limit (Stand 2026-09) | Key |
+|---|---|---|---|---|
+| 1 | Google Gemini (`gemini-3.5-flash-lite`) | kostenlos, keine Kreditkarte | ~500 Anfragen/Tag | https://aistudio.google.com/apikey |
+| 2 | Groq (`openai/gpt-oss-120b`) | kostenlos, keine Kreditkarte | 1000 Anfragen / 200K Tokens pro Tag **pro Modell** | https://console.groq.com/keys |
+| 3 | Groq (`openai/gpt-oss-20b`) | kostenlos | eigenes zweites Kontingent | (derselbe Key) |
+| 4 | Mistral (`mistral-small-latest`) | Free-Plan: 10 $/Monat Guthaben | reicht bei diesem Volumen | https://console.mistral.ai/api-keys |
+| 5 | Cloudflare Workers AI (`gemma-4-26b`) | kostenlos | 10.000 Neurons/Tag | https://dash.cloudflare.com/profile/api-tokens |
+| 6 | OpenRouter (`:free`-Modelle) | kostenlos | 50 Anfragen/Tag | https://openrouter.ai/keys |
+| 7 | eigener Endpunkt (z.B. Ollama) | – | – | `CUSTOM_LLM_BASE_URL` |
+| 8 | Claude (Anthropic) | **kostenpflichtig** | – | nur als letzter Ausweg |
+
+Der Bot braucht höchstens ~130 Klassifikationen/Tag (`MAX_CLASSIFICATIONS_PER_DAY` +
+Prioritäts-Reserve) — Gemini allein deckt das, Groq ist die ausfallsichere Reserve.
+Zwei kostenlose Keys (Gemini + Groq) reichen in der Praxis.
+
+- **Pacing:** je Anbieter ein Mindestabstand zwischen Anfragen, damit Minutenlimits gar
+  nicht erst reißen.
+- **Cooldown:** Minutenlimit → kurze Pause (bzw. die vom Anbieter genannte Wartezeit),
+  Tageslimit → ≥ 30 Min, ungültiger Key/eingestelltes Modell → ≥ 1 Std. Ein Erfolg setzt
+  den Anbieter sofort zurück.
+- **Sichtbarkeit:** `/api/health` → `llm_providers` zeigt je Anbieter Modell, Erfolge,
+  Fehler, aktuelle Pause und den letzten Fehlertext (**ohne** Keys — der Endpunkt ist
+  öffentlich). `statements.claude_model` speichert, welches Modell tatsächlich geliefert
+  hat (z.B. `groq:openai/gpt-oss-120b`), `/api/model-performance` vergleicht die Anbieter.
+- **Ausfallsicherer Start:** Sind beim Start alle Anbieter nur vorübergehend im Limit,
+  startet der Monitoring-Loop trotzdem (Warnung statt Totalausfall). Nur ohne jeden
+  konfigurierten Anbieter bzw. bei durchweg ungültigen Keys bleibt er aus.
+- **Ehrlich zur Qualität:** Die Gratis-Modelle sind gut, aber nicht auf Claude-Niveau bei
+  Ticker-Treffsicherheit. Die Antworten werden deshalb streng normalisiert (`"false"` als
+  Text, `"Short"`, `"$xom"` usw.) und bei unbrauchbarem JSON wird der nächste Anbieter
+  gefragt. Ob sich die Trefferquote ändert, zeigt `/api/model-performance` nach einigen
+  Wochen.
+- Gratis-Tarife ändern sich laufend. Ein eingestelltes Modell kostet nur einen
+  Log-Eintrag: das Kettenglied pausiert, der nächste Anbieter übernimmt. Modell
+  überschreiben mit `<ANBIETER>_MODEL` (z.B. `GEMINI_MODEL`), Reihenfolge mit
+  `LLM_PROVIDERS`.
+- Selbst hosten (Ollama auf Oracle ARM) lohnt sich aktuell nicht: Oracle hat das
+  Always-Free-ARM-Kontingent 2026 auf 2 OCPU/12 GB halbiert, das wären 1–4 Minuten pro
+  Meldung. Über `CUSTOM_LLM_*` bleibt es als Option möglich.
 
 ### Telegram-Alerts einrichten (optional, aber empfohlen)
 
@@ -360,7 +407,11 @@ Gating-Logik wie die Live-Pipeline (`is_alert_worthy()`/`actionable_tickers()` a
 Handelstagen danach tatsächlich bewegt haben — aufgeschlüsselt nach
 Marktkapitalisierungs-Klasse (micro/small/mid/large, `app/prices.py`), um zu prüfen, ob
 Small-Caps tatsächlich einen geringeren Verzögerungs-Nachteil haben, statt es nur zu
-behaupten.
+behaupten. **Braucht dafür `FINNHUB_API_KEY`** (unabhängig von `--source`) — ohne Key
+bleibt die Aufschlüsselung leer (`"unbekannt"`). Live gefunden: die frühere Quelle
+(Yahoos `v7/finance/quote`) liefert seit einem Backtest-Lauf durchgehend
+`401 Unauthorized` (dauerhaft, kein Netzwerkproblem) — `app/prices.py:get_market_caps`
+nutzt deshalb Finnhubs `stock/profile2` statt Yahoo.
 
 **Quellenwahl (`--source`):**
 
@@ -883,7 +934,8 @@ zwischen Läufen wird über den GitHub-Actions-Cache mitgeschleppt.
 
 1. Repo auf GitHub forken/nutzen (dieser Branch: `claude/trump-market-impact-analyzer-dbjvu5`)
 2. **Settings → Secrets and variables → Actions → New repository secret** und dort anlegen:
-   - `ANTHROPIC_API_KEY` (Pflicht)
+   - mindestens ein KI-Anbieter: `GEMINI_API_KEY` und/oder `GROQ_API_KEY` (kostenlos),
+     optional `ANTHROPIC_API_KEY` (kostenpflichtig) - siehe „KI-Anbieter" oben
    - `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` (optional, aber empfohlen für Alerts)
 3. Fertig - der Workflow läuft automatisch alle 30 Min. Zum sofortigen Testen:
    Tab **Actions** → *Market Impact Predictor* → **Run workflow** (manueller Trigger).
@@ -938,7 +990,7 @@ kostenlos bleibt. So richtest du ihn ein:
    per Cron ein (siehe unten).
 5. **Konfigurieren und starten**:
    ```bash
-   nano ~/trump-market-monitor/.env   # ANTHROPIC_API_KEY (+ optional Telegram) eintragen
+   nano ~/trump-market-monitor/.env   # GEMINI_API_KEY/GROQ_API_KEY (+ optional Telegram) eintragen
    cd ~/trump-market-monitor && sudo docker compose up -d --build
    ```
 6. Dashboard unter `http://<Server-IP>:8000` aufrufen, im Test-Panel einen Beispieltext

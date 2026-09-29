@@ -55,6 +55,12 @@ ANTHROPIC_API_KEY = _str("ANTHROPIC_API_KEY")
 CLAUDE_MODEL = _str("CLAUDE_MODEL", "claude-haiku-4-5")
 CLAUDE_MAX_RETRIES = _int("CLAUDE_MAX_RETRIES", 3)
 CLAUDE_TIMEOUT_SECONDS = _float("CLAUDE_TIMEOUT_SECONDS", 30)
+# Kostenlose KI-Anbieter (siehe app/llm.py, .env.example): Keys wie GEMINI_API_KEY /
+# GROQ_API_KEY werden dort zur Laufzeit gelesen. Hier nur, wie lange eine
+# Klassifikation hoechstens wartet, wenn ALLE Anbieter gerade kurz pausieren (typisch:
+# Minutenlimit des Gratis-Tarifs) - laenger pausierte (Tageslimit) werden nicht
+# abgewartet, das Statement wird dann diesen Zyklus uebersprungen.
+LLM_MAX_WAIT_SECONDS = _float("LLM_MAX_WAIT_SECONDS", 65)
 
 TELEGRAM_BOT_TOKEN = _str("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = _str("TELEGRAM_CHAT_ID")
@@ -614,11 +620,17 @@ DB_PATH = os.getenv("DB_PATH", "trump_monitor.db")
 # unveraendert weiter. Kostenlos unter alphavantage.co/support/#api-key.
 ALPHAVANTAGE_API_KEY = _str("ALPHAVANTAGE_API_KEY")
 
-# Ebenfalls nur fuer den historischen Backtest-Abruf (--source finnhub), aus demselben
-# Grund wie ALPHAVANTAGE_API_KEY: fuer den Live-Betrieb ungeeignet, fuer einen
-# einmaligen Lauf ausreichend. Zweite Quelle NEBEN Alpha Vantage, weil deren Gratis-
-# Tarif nur 25 Anfragen/TAG erlaubt (bei mehreren Testlaeufen am selben Tag schnell
-# aufgebraucht) - Finnhubs Gratis-Tarif erlaubt stattdessen ~60/MINUTE. Kostenlos ohne
+# Zwei Verwendungszwecke, beide optional, beide NICHT fuer den Live-Betrieb:
+# 1. Historischer Backtest-Abruf (--source finnhub), NEBEN Alpha Vantage, weil dessen
+#    Gratis-Tarif nur 25 Anfragen/TAG erlaubt (bei mehreren Testlaeufen am selben Tag
+#    schnell aufgebraucht) - Finnhubs Gratis-Tarif erlaubt stattdessen ~60/MINUTE.
+# 2. Marktkapitalisierung fuer die Backtest-/Replay-Groessenklassen-Aufschluesselung
+#    (app/prices.py:get_market_caps, micro/small/mid/large-Cap) - live gefunden: die
+#    fruehere Quelle (Yahoos v7/finance/quote) liefert seitdem durchgehend HTTP 401
+#    Unauthorized (dauerhaft, kein Netzwerkproblem). Finnhubs stock/profile2 ersetzt
+#    sie vollstaendig.
+# Ohne Key: --source finnhub nicht nutzbar, und die Groessenklassen-Aufschluesselung
+# bleibt leer ("unbekannt") - alles andere laeuft unveraendert weiter. Kostenlos ohne
 # Kreditkarte: finnhub.io/register
 FINNHUB_API_KEY = _str("FINNHUB_API_KEY")
 
@@ -632,11 +644,27 @@ def validate() -> tuple[list[str], list[str]]:
     errors = []
     warnings = []
 
-    if not ANTHROPIC_API_KEY:
+    from app import llm
+    free_providers = llm.configured_openai_providers()
+    if not ANTHROPIC_API_KEY and not free_providers:
         errors.append(
-            "ANTHROPIC_API_KEY ist nicht gesetzt - Klassifikation kann nicht laufen. "
-            "In .env eintragen (siehe .env.example)."
+            "Kein KI-Anbieter konfiguriert - Klassifikation kann nicht laufen. Kostenlos "
+            "z.B. GEMINI_API_KEY (https://aistudio.google.com/apikey) und/oder "
+            "GROQ_API_KEY (https://console.groq.com/keys) in .env eintragen, siehe "
+            ".env.example."
         )
+    elif ANTHROPIC_API_KEY and not free_providers:
+        warnings.append(
+            "Nur Claude (kostenpflichtig) als KI-Anbieter konfiguriert - ist das Guthaben "
+            "leer, steht die Klassifikation komplett. Ein kostenloser Anbieter als "
+            "Ausweich (GEMINI_API_KEY/GROQ_API_KEY) macht den Bot ausfallsicher."
+        )
+    for entry in [p.strip() for p in os.getenv("LLM_PROVIDERS", "").split(",") if p.strip()]:
+        if llm.parse_entry(entry)[0] is None:
+            warnings.append(
+                f"LLM_PROVIDERS enthaelt unbekannten Anbieter {entry!r} - wird ignoriert. "
+                f"Bekannt: {', '.join(list(llm.PRESETS) + [llm.ANTHROPIC])}."
+            )
 
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         warnings.append(
