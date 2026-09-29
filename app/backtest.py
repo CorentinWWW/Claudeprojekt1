@@ -630,7 +630,9 @@ async def run_backtest(
             continue
         calls_made += 1
         actual_cost += estimate_call_cost_usd(raw_stmt.text)
-        db.insert_statement(raw_stmt, classification, claude_model=CLAUDE_MODEL)
+        db.insert_statement(
+            raw_stmt, classification, claude_model=classification.model_used or CLAUDE_MODEL
+        )
 
         if not is_alert_worthy(classification):
             continue

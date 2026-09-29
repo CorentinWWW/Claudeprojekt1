@@ -97,6 +97,18 @@ diagnostizieren, einfach wissen):
   ersetzt durch Finnhubs `stock/profile2` (`app/prices.py:get_market_caps`).
 - Backtest-Chargen-Dedup war früher O(n²) - jetzt zeitfenstergebündelt
   (`DEDUP_WINDOW_SECONDS`, siehe `app/orchestrator.py:_partition_duplicates`).
+- Der Nutzer hat KEIN Geld für API-Guthaben. Die Klassifikation läuft über eine
+  Kette kostenloser, OpenAI-kompatibler Anbieter (`app/llm.py`: Gemini, Groq x2,
+  Mistral, Cloudflare, OpenRouter, custom/Ollama), Claude nur als letzter Ausweg.
+  Stand der Gratis-Tarife 2026-09: GitHub Models eingestellt, Cerebras ohne
+  Dauer-Gratistarif, Groq ohne Llama im Gratisplan, Gemini 2.5 für Neukunden zu.
+  Zustand je Anbieter: `/api/health` -> `llm_providers` (ohne Keys).
+- Self-Hosting (Ollama) lohnt nicht: die VM ist ein x86-Micro (1 GB RAM), und
+  Oracles Always-Free-ARM wurde 2026 auf 2 OCPU/12 GB halbiert.
+- Meine eigene Sandbox kann die VM-IP NICHT erreichen (Egress-Proxy blockt) - den
+  Live-Zustand prüft immer der Nutzer mit den Befehlen, ich werte die Ausgabe aus.
+- Die Sandbox wird nach längerer Pause neu aufgesetzt: Abhängigkeiten dann in einem
+  venv installieren (Debians System-setuptools scheitert an `sgmllib3k`).
 
 ## Branches
 

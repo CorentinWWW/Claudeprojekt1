@@ -226,6 +226,11 @@ class Classification:
     # Zeithorizont ("Stunden"/"Tage"/"Wochen"). Optional; None, wenn keine Schaetzung.
     expected_move_pct: Optional[float] = None
     expected_horizon: Optional[str] = None
+    # Welcher Anbieter/welches Modell diese Klassifikation tatsaechlich geliefert hat
+    # (z.B. "claude-haiku-4-5" oder "groq:openai/gpt-oss-20b") - bei einer Kette aus
+    # mehreren Gratis-Anbietern (app/llm.py) sonst nicht nachvollziehbar. Landet ueber
+    # insert_statement(claude_model=...) in statements.claude_model.
+    model_used: Optional[str] = None
 
 
 @contextmanager

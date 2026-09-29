@@ -55,6 +55,12 @@ ANTHROPIC_API_KEY = _str("ANTHROPIC_API_KEY")
 CLAUDE_MODEL = _str("CLAUDE_MODEL", "claude-haiku-4-5")
 CLAUDE_MAX_RETRIES = _int("CLAUDE_MAX_RETRIES", 3)
 CLAUDE_TIMEOUT_SECONDS = _float("CLAUDE_TIMEOUT_SECONDS", 30)
+# Kostenlose KI-Anbieter (siehe app/llm.py, .env.example): Keys wie GEMINI_API_KEY /
+# GROQ_API_KEY werden dort zur Laufzeit gelesen. Hier nur, wie lange eine
+# Klassifikation hoechstens wartet, wenn ALLE Anbieter gerade kurz pausieren (typisch:
+# Minutenlimit des Gratis-Tarifs) - laenger pausierte (Tageslimit) werden nicht
+# abgewartet, das Statement wird dann diesen Zyklus uebersprungen.
+LLM_MAX_WAIT_SECONDS = _float("LLM_MAX_WAIT_SECONDS", 65)
 
 TELEGRAM_BOT_TOKEN = _str("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = _str("TELEGRAM_CHAT_ID")
@@ -638,11 +644,27 @@ def validate() -> tuple[list[str], list[str]]:
     errors = []
     warnings = []
 
-    if not ANTHROPIC_API_KEY:
+    from app import llm
+    free_providers = llm.configured_openai_providers()
+    if not ANTHROPIC_API_KEY and not free_providers:
         errors.append(
-            "ANTHROPIC_API_KEY ist nicht gesetzt - Klassifikation kann nicht laufen. "
-            "In .env eintragen (siehe .env.example)."
+            "Kein KI-Anbieter konfiguriert - Klassifikation kann nicht laufen. Kostenlos "
+            "z.B. GEMINI_API_KEY (https://aistudio.google.com/apikey) und/oder "
+            "GROQ_API_KEY (https://console.groq.com/keys) in .env eintragen, siehe "
+            ".env.example."
         )
+    elif ANTHROPIC_API_KEY and not free_providers:
+        warnings.append(
+            "Nur Claude (kostenpflichtig) als KI-Anbieter konfiguriert - ist das Guthaben "
+            "leer, steht die Klassifikation komplett. Ein kostenloser Anbieter als "
+            "Ausweich (GEMINI_API_KEY/GROQ_API_KEY) macht den Bot ausfallsicher."
+        )
+    for entry in [p.strip() for p in os.getenv("LLM_PROVIDERS", "").split(",") if p.strip()]:
+        if llm.parse_entry(entry)[0] is None:
+            warnings.append(
+                f"LLM_PROVIDERS enthaelt unbekannten Anbieter {entry!r} - wird ignoriert. "
+                f"Bekannt: {', '.join(list(llm.PRESETS) + [llm.ANTHROPIC])}."
+            )
 
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         warnings.append(

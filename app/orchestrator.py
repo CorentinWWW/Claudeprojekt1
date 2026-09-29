@@ -8,7 +8,14 @@ from typing import Optional
 
 from anthropic import AuthenticationError, NotFoundError, PermissionDeniedError
 
-from app.classifier import CONTEXT_SNIPPET_MAX_CHARS, DailyCapExceeded, FALLBACK_CLASSIFICATION, classify
+from app.classifier import (
+    CONTEXT_SNIPPET_MAX_CHARS,
+    DailyCapExceeded,
+    FALLBACK_CLASSIFICATION,
+    classify,
+    model_available,
+)
+from app.llm import LLMConfigError
 from app.config import (
     ALERT_CONFIDENCE_THRESHOLD,
     ALERT_DIGEST_THRESHOLD,
@@ -158,7 +165,10 @@ except Exception:  # pragma: no cover - nur falls die Zeitzonendaten fehlen
 # (401), fehlende Berechtigung (403) oder ein nicht (mehr) existierendes Modell (404)
 # reparieren sich nicht von selbst - im Gegensatz zu transienten Fehlern (Timeouts,
 # 429, 529), die das SDK selbst retried und die den Lauf nicht abbrechen sollen.
-PERMANENT_CLAUDE_ERRORS = (AuthenticationError, PermissionDeniedError, NotFoundError)
+# LLMConfigError: dasselbe fuer die Anbieter-Kette (app/llm.py) - ALLE konfigurierten
+# Anbieter scheitern an Key/Modell. Scheitert nur EINER, uebernimmt der naechste und
+# es ist kein permanenter Fehler des Monitors.
+PERMANENT_CLAUDE_ERRORS = (AuthenticationError, PermissionDeniedError, NotFoundError, LLMConfigError)
 
 logger = logging.getLogger(__name__)
 
@@ -555,6 +565,15 @@ async def _maybe_escalate(text, recent_context, priority, classification):
     if not (ALERT_MIN_TICKER_CONFIDENCE - ESCALATION_BAND <= strongest
             <= ALERT_MIN_TICKER_CONFIDENCE + ESCALATION_BAND):
         return classification
+    if not model_available(CLAUDE_ESCALATION_MODEL):
+        # Z.B. Default claude-sonnet-5, aber kein (bezahlter) Anthropic-Key mehr, oder
+        # der Anbieter ist gerade im Limit: Zweitmeinung still auslassen statt pro
+        # Grenzfall einen Fehler zu loggen.
+        logger.debug(
+            "[borderline] Eskalations-Modell %s nicht verfuegbar - behalte Erstbewertung.",
+            CLAUDE_ESCALATION_MODEL,
+        )
+        return classification
     try:
         second = await classify(
             text, recent_context=recent_context,
@@ -623,6 +642,10 @@ async def _classify_and_store(raw, semaphore: asyncio.Semaphore, recent_context:
             if escalated is not classification:
                 model_used = CLAUDE_ESCALATION_MODEL
             classification = escalated
+            # Bei der Anbieter-Kette weiss nur classify(), wer tatsaechlich geliefert hat
+            # (z.B. "groq:openai/gpt-oss-120b").
+            if classification.model_used:
+                model_used = classification.model_used
         except DailyCapExceeded as exc:
             # Kein logger.exception() (kein Traceback-Spam): sobald das Tages-Limit
             # erreicht ist, trifft das jedes weitere Statement in diesem und allen

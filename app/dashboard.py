@@ -15,7 +15,9 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from app import config, ensemble
-from app.classifier import DailyCapExceeded, classify, selftest
+from app import classifier as classifier_module
+from app import llm
+from app.classifier import DailyCapExceeded, SelftestTransientError, classify, selftest
 from app.db import (
     RawStatement,
     analyze_gap_impact,
@@ -115,10 +117,18 @@ async def startup():
 
         try:
             await selftest()
-            logger.info("Claude-Selftest erfolgreich.")
+        except SelftestTransientError as exc:
+            # Alle Anbieter gerade im (Minuten-)Limit oder gestoert: das erholt sich von
+            # selbst. Frueher startete der Loop in dem Fall GAR NICHT und der Bot blieb
+            # bis zum naechsten manuellen Neustart tot.
+            _startup_warnings.append(f"KI-Selftest voruebergehend fehlgeschlagen: {exc}")
+            logger.warning(
+                "KI-Selftest voruebergehend fehlgeschlagen (%s) - Monitoring-Loop startet "
+                "trotzdem, Klassifikationen laufen, sobald ein Anbieter wieder frei ist.", exc,
+            )
         except Exception as exc:
-            _startup_errors.append(f"Claude-Selftest fehlgeschlagen: {exc}")
-            logger.critical("Claude-Selftest fehlgeschlagen, Monitoring-Loop startet nicht: %s", exc)
+            _startup_errors.append(f"KI-Selftest fehlgeschlagen: {exc}")
+            logger.critical("KI-Selftest fehlgeschlagen, Monitoring-Loop startet nicht: %s", exc)
             return
 
         asyncio.create_task(run_forever())
@@ -351,7 +361,22 @@ def api_health():
             config.MAX_CLASSIFICATIONS_PER_DAY + config.PRIORITY_CLASSIFICATIONS_PER_DAY
         ),
         "sources": source_health,
+        # Zustand jedes KI-Anbieters der Kette (app/llm.py): wer liefert, wer pausiert
+        # (Limit/Key-Fehler) und warum. Keys werden NIE ausgegeben.
+        "llm_providers": _llm_status(),
     }
+
+
+def _llm_status() -> list:
+    # Defensiv wie der Rest von /api/health: der Endpunkt muss auch bei kaputter
+    # Konfiguration antworten - genau dann ist er am wichtigsten.
+    try:
+        return llm.provider_status(
+            anthropic_available=classifier_module._client is not None,
+            anthropic_model=config.CLAUDE_MODEL,
+        )
+    except Exception as exc:
+        return [{"error": f"Status nicht ermittelbar: {exc}"}]
 
 
 class TestRequest(BaseModel):
@@ -385,7 +410,11 @@ async def api_test(req: TestRequest):
         # 500er landen, statt derselben klaren, erwarteten Meldung wie ueberall sonst
         # im Code (siehe orchestrator.py: _classify_and_store).
         raise HTTPException(status_code=429, detail=str(exc)) from exc
-    statement_id = insert_statement(raw, classification)
+    except llm.LLMError as exc:
+        # Alle KI-Anbieter im Limit/gestoert/falsch konfiguriert: klare Meldung, welcher
+        # warum, statt eines undurchsichtigen 500ers (Details: /api/health -> llm_providers).
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    statement_id = insert_statement(raw, classification, claude_model=classification.model_used)
 
     alert_sent = False
     # Gleicher strenger Filter wie im echten Betrieb: ein Alert wird nur ausgeloest,
